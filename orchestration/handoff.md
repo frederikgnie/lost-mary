@@ -51,7 +51,7 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
 ### Optional cost / stall signals
 
 | Field | Type | Purpose |
-|-------|------|---------|
+| ------- | ------ | --------- |
 | `tokens_used` | number ≥ 0 | Rough estimate of tokens consumed this turn |
 | `attempts` | integer ≥ 1 | How many implementation/diagnosis attempts before this handoff |
 | `stop_reason` | enum string | Why the agent stopped: `completed`, `blocked_on_dependency`, `blocked_on_scope`, `stalled`, `budget`, `needs_human` |
@@ -181,6 +181,10 @@ Validation rule: unknown top-level fields are rejected. Keep envelope keys limit
 ## Evolution
 
 Bump `schema_version` only on breaking changes. Additive optional fields inside the envelope or `payload` do not require a version bump. Keep the envelope small so models reliably emit it.
+
+### Version notes
+
+- `1.0` (current): strict top-level envelope, role-scoped required payload fields, optional `tokens_used`/`attempts`/`stop_reason`, and enumerated `stop_reason` values for consistent lead-side gating.
 
 ## Validate a handoff
 

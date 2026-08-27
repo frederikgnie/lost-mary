@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "handoff_id": "invalid-req-001",
+  "from_role": "implementer",
+  "to": "lead",
+  "status": "done",
+  "confidence": 0.9,
+  "summary": "Changed src/example.ts:12 and ran npm test 3/3.",
+  "timestamp": "2026-08-27T00:00:00Z",
+  "payload": {
+    "result": "Implemented behavior",
+    "owned_scope": ["src/**"],
+    "files_changed": [],
+    "files_off_limits_touched": [],
+    "validation": [],
+    "tests_added_or_updated": [],
+    "risks": [],
+    "integration_notes": [],
+    "rejected_approaches": []
+  }
+}

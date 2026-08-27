@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "handoff_id": "invalid-stop-001",
+  "from_role": "tester",
+  "to": "lead",
+  "task_id": "fixture-invalid-stop",
+  "status": "done",
+  "confidence": 0.8,
+  "summary": "Validated tests 5/5 via npm test.",
+  "timestamp": "2026-08-27T00:00:00Z",
+  "stop_reason": "timed_out",
+  "payload": {
+    "coverage_assessment": "basic coverage",
+    "tests_added": [],
+    "validation": [],
+    "findings": [],
+    "recommendation": "safe"
+  }
+}

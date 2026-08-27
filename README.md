@@ -46,7 +46,8 @@ A reusable, team-aware Claude Code setup for software engineering.
 │   ├── validate-handoff.sh
 │   └── validate-handoff.ps1
 ├── tests/
-│   └── handoff-fixtures/
+│   ├── handoff-fixtures/
+│   └── handoff-fixtures-invalid/
 ├── .github/workflows/
 │   └── handoff-contract.yml
 ├── settings.example.json
@@ -176,7 +177,7 @@ The team lead remains responsible for the overall task, integration decisions, a
 Use this lightweight mapping to reduce token waste:
 
 | Situation | Primary role | Required gate before done |
-|---|---|---|
+| --- | --- | --- |
 | New feature with cross-module impact | `architect` then `implementer` | `plan_ready` handoff then passing validation evidence |
 | Bug with unclear cause | `debugger` | root cause + regression test evidence |
 | Medium-risk behavior change | `implementer` + `reviewer` | independent review handoff with no unresolved HIGH+ findings |
@@ -204,12 +205,19 @@ Get-Content .\path\to\handoff.json -Raw | ./scripts/validate-handoff.ps1 -
 
 ## Contract Drift Checks
 
-This repository includes fixture handoffs in `tests/handoff-fixtures/` and a CI workflow at `.github/workflows/handoff-contract.yml`.
+This repository includes fixture handoffs in `tests/handoff-fixtures/`, invalid fixtures in `tests/handoff-fixtures-invalid/`, and a CI workflow at `.github/workflows/handoff-contract.yml`.
 
 CI validates every fixture against both:
 
 - JSON Schema (`orchestration/handoff.schema.json`)
 - Runtime validator (`scripts/validate-handoff.py`)
+
+CI also enforces that intentionally invalid fixtures fail both checks, and runs the shell wrapper (`scripts/validate-handoff.sh`) on Linux to catch wrapper regressions.
+
+Python compatibility policy:
+
+- Runtime validator targets Python 3.11+.
+- CI runs the contract workflow on Python 3.11 and 3.12.
 
 This keeps schema and runtime enforcement in sync and fails fast when either side drifts.
 

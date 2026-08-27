@@ -5,23 +5,38 @@ on:
     paths:
       - 'orchestration/handoff.schema.json'
       - 'scripts/validate-handoff.py'
+      - 'scripts/validate-handoff.sh'
       - 'tests/handoff-fixtures/**'
+      - 'tests/handoff-fixtures-invalid/**'
       - '.github/workflows/handoff-contract.yml'
   pull_request:
     paths:
       - 'orchestration/handoff.schema.json'
       - 'scripts/validate-handoff.py'
+      - 'scripts/validate-handoff.sh'
       - 'tests/handoff-fixtures/**'
+      - 'tests/handoff-fixtures-invalid/**'
       - '.github/workflows/handoff-contract.yml'
 
 jobs:
   validate-fixtures:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '${{ matrix.python-version }}'
+      - name: Ensure fixture directories and baseline files exist
+        run: |
+          set -euo pipefail
+          test -d tests/handoff-fixtures
+          test -d tests/handoff-fixtures-invalid
+          test -f tests/handoff-fixtures/lead.json
+          test -f tests/handoff-fixtures-invalid/missing-required-field.json
       - name: Validate fixtures with runtime validator
         run: |
           set -euo pipefail
@@ -30,10 +45,39 @@ jobs:
             echo "Validating $f"
             python3 scripts/validate-handoff.py "$f"
           done
+      - name: Validate fixtures with shell wrapper
+        run: |
+          set -euo pipefail
+          chmod +x scripts/validate-handoff.sh
+          for f in tests/handoff-fixtures/*.json; do
+            echo "Wrapper-validate $f"
+            ./scripts/validate-handoff.sh "$f"
+          done
+      - name: Assert invalid fixtures fail runtime validation
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in tests/handoff-fixtures-invalid/*.json; do
+            echo "Expect runtime INVALID for $f"
+            if python3 scripts/validate-handoff.py "$f"; then
+              echo "ERROR: invalid fixture unexpectedly passed runtime validation: $f" >&2
+              exit 1
+            fi
+          done
       - name: Validate fixtures against JSON Schema (if check-jsonschema available)
         run: |
           pip install check-jsonschema
           for f in tests/handoff-fixtures/*.json; do
             echo "Schema-check $f"
             check-jsonschema --schemafile orchestration/handoff.schema.json "$f"
+          done
+      - name: Assert invalid fixtures fail schema validation
+        run: |
+          set -euo pipefail
+          for f in tests/handoff-fixtures-invalid/*.json; do
+            echo "Expect schema INVALID for $f"
+            if check-jsonschema --schemafile orchestration/handoff.schema.json "$f"; then
+              echo "ERROR: invalid fixture unexpectedly passed schema validation: $f" >&2
+              exit 1
+            fi
           done
