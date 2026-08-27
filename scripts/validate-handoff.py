@@ -238,11 +238,20 @@ PAYLOAD_ARRAY_FIELDS: dict[str, tuple[str, ...]] = {
 
 def load(path: str) -> Any:
     if path == "-":
-        raw = sys.stdin.read()
+        # Bytes + utf-8-sig: text-mode stdin uses the locale codepage on
+        # Windows, which mangles the BOM PowerShell prepends to pipes.
+        buffer = getattr(sys.stdin, "buffer", None)
+        raw = (
+            buffer.read().decode("utf-8-sig", "replace")
+            if buffer is not None
+            else sys.stdin.read()
+        )
     else:
-        with open(path, encoding="utf-8") as f:
+        # utf-8-sig so a BOM-prefixed handoff file parses.
+        with open(path, encoding="utf-8-sig") as f:
             raw = f.read()
-    raw = raw.strip()
+    # Strip a BOM piped in on stdin (PowerShell adds one).
+    raw = raw.lstrip("\ufeff").strip()
     return json.loads(raw)
 
 

@@ -77,12 +77,32 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def read_stdin_json() -> Any:
+    """Parse a JSON payload from stdin, tolerant of encoding and BOM.
+
+    Reads BYTES and decodes utf-8-sig rather than using text mode. On Windows
+    text-mode stdin decodes with the locale codepage, so the UTF-8 BOM that
+    PowerShell prepends when piping to a native executable arrives as mojibake
+    rather than U+FEFF and cannot be stripped as a character. utf-8-sig removes
+    the BOM and forces correct decoding regardless of locale.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        raw = buffer.read().decode("utf-8-sig", "replace")
+    else:
+        raw = sys.stdin.read().lstrip("﻿")
+    return json.loads(raw.strip())
+
+
 def main() -> int:
     try:
-        event = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+        event = read_stdin_json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Fail open, but noisily: enforcement must never vanish in silence.
+        print(f"check-handoff-hook: unreadable payload ({exc}); allowing.", file=sys.stderr)
         return 0
     if not isinstance(event, dict):
+        print("check-handoff-hook: payload was not an object; allowing.", file=sys.stderr)
         return 0
 
     # Do not fight an already-blocked stop; avoids a retry loop.

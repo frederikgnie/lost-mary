@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from typing import Any
 
 # Roles that must not mutate the working tree. Matched against `agent_type`,
 # which PreToolUse supplies only when firing inside a subagent.
@@ -63,13 +64,33 @@ def offending_reason(command: str) -> str | None:
     return None
 
 
+def read_stdin_json() -> Any:
+    """Parse a JSON payload from stdin, tolerant of encoding and BOM.
+
+    Reads BYTES and decodes utf-8-sig rather than using text mode. On Windows
+    text-mode stdin decodes with the locale codepage, so the UTF-8 BOM that
+    PowerShell prepends when piping to a native executable arrives as mojibake
+    rather than U+FEFF and cannot be stripped as a character. utf-8-sig removes
+    the BOM and forces correct decoding regardless of locale.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:
+        raw = buffer.read().decode("utf-8-sig", "replace")
+    else:
+        raw = sys.stdin.read().lstrip("﻿")
+    return json.loads(raw.strip())
+
+
 def main() -> int:
     try:
-        event = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        # Never break the session on a malformed payload.
+        event = read_stdin_json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Fail open: a hook that wedges on an unexpected payload would break
+        # every session. Announce it, so enforcement never vanishes silently.
+        print(f"guard-readonly-bash: unreadable hook payload ({exc}); allowing.", file=sys.stderr)
         return 0
     if not isinstance(event, dict):
+        print("guard-readonly-bash: hook payload was not an object; allowing.", file=sys.stderr)
         return 0
 
     agent_type = event.get("agent_type")

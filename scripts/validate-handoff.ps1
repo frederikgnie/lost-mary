@@ -23,5 +23,14 @@ if (-not $python) {
     exit 2
 }
 
-& $python.Source "$root/scripts/validate-handoff.py" $args[0]
+$validator = "$root/scripts/validate-handoff.py"
+
+if ($args[0] -eq '-') {
+    # PowerShell hands pipeline input to the script's $input, NOT to native
+    # commands called inside it. Without this branch python receives empty
+    # stdin and the documented `Get-Content x.json -Raw | ... -` form fails.
+    $input | & $python.Source $validator -
+} else {
+    & $python.Source $validator $args[0]
+}
 exit $LASTEXITCODE

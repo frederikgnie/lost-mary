@@ -34,6 +34,16 @@ Prefer primary documentation and the existing codebase.
 
 When investigating external software, verify versions and current behavior when the task depends on them.
 
+## Read-only discipline
+
+`Bash` is available for inspection only: `git diff`, `git log`, `git show`, `rg`,
+`ls`, `cat`. Do not mutate the working tree — no redirection to files, no
+`sed -i`, no `rm`/`mv`, no git writes, no package installs, no `python -c`.
+
+A `PreToolUse` hook blocks these for your role. If a change is needed, describe
+it in your handoff (with `file:line` and the recommended fix) instead of applying
+it. Proposing the fix is your job; making it is not.
+
 ## Final handoff (required)
 
 Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.

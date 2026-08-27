@@ -24,12 +24,20 @@ ALLOW, BLOCK = 0, 2
 failures: list[str] = []
 
 
-def run_hook(script: Path, event: dict[str, object]) -> int:
+def run_hook(script: Path, event: dict[str, object], bom: bool = False) -> int:
+    """Run a hook with `event` on stdin.
+
+    stdin is written as explicit UTF-8 bytes, not text mode: on Windows text
+    mode uses the locale codepage, which cannot encode a BOM and would make the
+    bom=True cases unrunnable rather than meaningful.
+    """
+    payload = json.dumps(event)
+    if bom:
+        payload = chr(0xFEFF) + payload
     result = subprocess.run(
         [sys.executable, str(script)],
-        input=json.dumps(event),
+        input=payload.encode("utf-8"),
         capture_output=True,
-        text=True,
     )
     return result.returncode
 
@@ -93,6 +101,11 @@ expect("implementer: redirect allowed", run_hook(GUARD, bash_event("implementer"
 expect("tester: sed -i allowed", run_hook(GUARD, bash_event("tester", "sed -i 's/a/b/' t.py")), ALLOW)
 expect("main session (no agent_type)", run_hook(GUARD, bash_event(None, "rm -rf build/")), ALLOW)
 
+# BOM regression (PowerShell pipes prepend one; hooks fail open on parse error,
+# so a BOM silently disabled enforcement on Windows).
+expect("reviewer: BOM + write is still blocked", run_hook(GUARD, bash_event("reviewer", "echo x > a.py"), bom=True), BLOCK)
+expect("reviewer: BOM + read is still allowed", run_hook(GUARD, bash_event("reviewer", "git diff"), bom=True), ALLOW)
+
 print()
 print("check-handoff-hook.py - specialist must emit a valid handoff")
 valid_reviewer = (FIXTURES / "reviewer.json").read_text(encoding="utf-8")
@@ -131,6 +144,16 @@ expect("lead: prose allowed", run_hook(HANDOFF, stop_event("lead", "Integrated a
 expect(
     "stop_hook_active guard (no retry loop)",
     run_hook(HANDOFF, stop_event("reviewer", "prose only", active=True)),
+    ALLOW,
+)
+expect(
+    "BOM + prose is still blocked",
+    run_hook(HANDOFF, stop_event("reviewer", "I reviewed it, looks fine."), bom=True),
+    BLOCK,
+)
+expect(
+    "BOM + valid handoff is still allowed",
+    run_hook(HANDOFF, stop_event("reviewer", valid_reviewer), bom=True),
     ALLOW,
 )
 

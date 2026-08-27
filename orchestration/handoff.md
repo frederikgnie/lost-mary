@@ -4,6 +4,14 @@ Every specialist agent ends its turn with **exactly one JSON object** that match
 
 Nothing after the JSON. No trailing commentary. The lead treats the JSON as the interface; free-text outside it is ignored for gating and task completion.
 
+**This is enforced, not merely requested.** With `scripts/check-handoff-hook.py`
+wired as a `SubagentStop` hook, a specialist that stops without a conforming
+handoff is blocked and handed the validation errors, and must re-emit before it
+can finish. The hook also rejects a handoff whose `from_role` does not match the
+agent actually running. Without the hook installed the contract degrades to
+documentation and the lead must validate manually — see the Enforcement section
+in `README.md`.
+
 ## Why
 
 Free-text reports force the lead to trust claims. Structured handoffs make claims checkable:
@@ -36,17 +44,35 @@ Free-text reports force the lead to trust claims. Structured handoffs make claim
 
 `tokens_used`, `attempts`, and `stop_reason` are **optional**. Emit them when the information is available; the lead may use them for cost awareness and stall detection.
 
-### Proof token (required inside `summary`)
+### Proof token (required)
 
-Include at least one of:
+A proof token is an anchor the lead can **re-check**. The validator accepts any
+one of these:
 
-- commit SHA
-- test count (`12/12 passed`)
-- `file:line`
-- exact command that succeeded
+| Source | Example |
+| --- | --- |
+| test ratio in `summary` | `95/95 tests pass` |
+| test count + outcome in `summary` | `12 tests passed`, `0 failures` |
+| `file:line` in `summary` | `checkout.tsx:88` |
+| commit SHA in `summary` | `a1b2c3d` |
+| backticked command in `summary` | `` `npm test -- billing` `` |
+| a `payload.validation[].command` entry | any non-empty command the lead can re-run |
+| a `payload.findings[].location` matching `file:line` | `src/billing/lifecycle.ts:88` |
 
-Bad: `"Fixed the billing bug."`  
+Bad: `"Fixed the billing bug."` — nothing to re-check.
+Bad: `"Fixed the billing bug: it works now."` — a colon is not evidence.
+Bad: `"Addressed 3 issues from the review."` — a bare digit is not an anchor.
 Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests pass."`
+
+> Earlier revisions of the validator accepted any summary containing a digit
+> **or** a colon, which passed almost anything. That is fixed; see
+> `tests/handoff-fixtures-runtime-invalid/` for the cases that now fail.
+
+**Clean-review carve-out.** Demanding a proof token for a negative result is
+incoherent — a `reviewer` or `security-reviewer` that found nothing has no
+location to cite. When `from_role` is a review role and `payload.findings` is an
+empty list, the handoff is accepted and the lead gets a warning noting that no
+proof token was present.
 
 ### Optional cost / stall signals
 

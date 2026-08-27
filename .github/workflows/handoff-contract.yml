@@ -127,6 +127,26 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             throw "Invalid fixture unexpectedly passed PowerShell wrapper validation."
           }
+      - name: PowerShell wrapper accepts piped stdin
+        # PowerShell hands pipeline input to $input, not to native commands
+        # inside the script. This form was documented but broken; keep it tested.
+        shell: pwsh
+        run: |
+          Get-Content ./tests/handoff-fixtures/lead.json -Raw | ./scripts/validate-handoff.ps1 -
+          if ($LASTEXITCODE -ne 0) { throw "Wrapper rejected a valid handoff on stdin." }
+          Get-Content ./tests/handoff-fixtures-runtime-invalid/weak-proof-colon-only.json -Raw | ./scripts/validate-handoff.ps1 -
+          if ($LASTEXITCODE -eq 0) { throw "Wrapper accepted a weak proof token on stdin." }
+      - name: Hooks survive a PowerShell pipe (UTF-8 BOM)
+        # PowerShell prepends a BOM when piping to a native exe. Both hooks fail
+        # open on unparseable stdin, so this silently disabled enforcement.
+        shell: pwsh
+        run: |
+          '{"agent_type":"reviewer","tool_input":{"command":"echo x > app.py"}}' | python ./scripts/guard-readonly-bash.py
+          if ($LASTEXITCODE -ne 2) { throw "Bash guard failed to block a write through a PowerShell pipe (exit $LASTEXITCODE)." }
+          '{"agent_type":"reviewer","tool_input":{"command":"git diff"}}' | python ./scripts/guard-readonly-bash.py
+          if ($LASTEXITCODE -ne 0) { throw "Bash guard blocked read-only inspection (exit $LASTEXITCODE)." }
+          '{"agent_type":"reviewer","last_assistant_message":"looks fine to me."}' | python ./scripts/check-handoff-hook.py
+          if ($LASTEXITCODE -ne 2) { throw "Handoff hook failed to block prose through a PowerShell pipe (exit $LASTEXITCODE)." }
       - name: Run hook enforcement tests on Windows
         shell: pwsh
         run: python tests/test-hooks.py

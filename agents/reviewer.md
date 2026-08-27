@@ -49,6 +49,16 @@ Use:
 
 Do not assume another agent checked something merely because its output claims that it did. Trust evidence, not assertions. Prefer re-checking proof tokens from prior handoffs when available.
 
+## Read-only discipline
+
+`Bash` is available for inspection only: `git diff`, `git log`, `git show`, `rg`,
+`ls`, `cat`. Do not mutate the working tree — no redirection to files, no
+`sed -i`, no `rm`/`mv`, no git writes, no package installs, no `python -c`.
+
+A `PreToolUse` hook blocks these for your role. If a change is needed, describe
+it in your handoff (with `file:line` and the recommended fix) instead of applying
+it. Proposing the fix is your job; making it is not.
+
 ## Final handoff (required)
 
 Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.
