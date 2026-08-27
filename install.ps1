@@ -71,9 +71,14 @@ Get-ChildItem -Path (Join-Path $RootDir 'agents') -Filter '*.md' -File | ForEach
 
 Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.md') -Target (Join-Path $DestLib 'orchestration/handoff.md')
 Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.schema.json') -Target (Join-Path $DestLib 'orchestration/handoff.schema.json')
+Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/worktree-rules.md') -Target (Join-Path $DestLib 'orchestration/worktree-rules.md')
+Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/team-lead.md') -Target (Join-Path $DestLib 'orchestration/team-lead.md')
+Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/delegation-rules.md') -Target (Join-Path $DestLib 'orchestration/delegation-rules.md')
 Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.py') -Target (Join-Path $DestLib 'scripts/validate-handoff.py')
 Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.sh') -Target (Join-Path $DestLib 'scripts/validate-handoff.sh')
 Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.ps1') -Target (Join-Path $DestLib 'scripts/validate-handoff.ps1')
+Install-ManagedFile -Source (Join-Path $RootDir 'capabilities.md') -Target (Join-Path $DestLib 'capabilities.md')
+Install-ManagedFile -Source (Join-Path $RootDir 'global-CLAUDE.md') -Target (Join-Path $DestLib 'global-CLAUDE.md')
 
 Write-Host ''
 Write-Host "Claude Code global agents installed in: $DestAgents"

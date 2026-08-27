@@ -42,15 +42,69 @@ ROLES = {
 }
 STATUSES = {"done", "blocked", "needs_review", "failed", "plan_ready"}
 
-# Required payload keys per role (missing keys = hard fail)
+# Required payload keys per role — aligned with handoff.schema.json / handoff.md
 PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
-    "implementer": ("result", "files_changed", "validation"),
-    "debugger": ("result", "root_cause", "validation"),
-    "tester": ("coverage_assessment", "validation"),
-    "reviewer": ("posture", "findings"),
-    "security-reviewer": ("posture", "findings"),
-    "architect": ("recommendation", "task_breakdown"),
-    "researcher": ("question", "findings", "recommendation"),
+    "implementer": (
+        "result",
+        "owned_scope",
+        "files_changed",
+        "files_off_limits_touched",
+        "validation",
+        "tests_added_or_updated",
+        "risks",
+        "integration_notes",
+        "rejected_approaches",
+    ),
+    "debugger": (
+        "result",
+        "failure",
+        "reproduction",
+        "root_cause",
+        "fix",
+        "owned_scope",
+        "files_changed",
+        "files_off_limits_touched",
+        "validation",
+        "tests_added_or_updated",
+        "risks",
+        "integration_notes",
+        "rejected_approaches",
+    ),
+    "tester": (
+        "coverage_assessment",
+        "tests_added",
+        "validation",
+        "findings",
+        "recommendation",
+    ),
+    "reviewer": (
+        "posture",
+        "findings",
+        "positive_controls",
+        "residual_risk",
+    ),
+    "security-reviewer": (
+        "posture",
+        "findings",
+        "positive_controls",
+        "residual_risk",
+    ),
+    "architect": (
+        "understanding",
+        "change_surface",
+        "dependencies",
+        "parallelization",
+        "risks",
+        "recommendation",
+        "task_breakdown",
+    ),
+    "researcher": (
+        "question",
+        "findings",
+        "options",
+        "recommendation",
+        "caveats",
+    ),
 }
 
 
@@ -117,6 +171,20 @@ def check(data: Any) -> tuple[list[str], list[str]]:
     ):
         errors.append("task_id must be a non-empty string")
 
+    # Optional envelope fields
+    if "tokens_used" in data:
+        tu = data["tokens_used"]
+        if not isinstance(tu, (int, float)) or float(tu) < 0:
+            errors.append("tokens_used must be a non-negative number")
+
+    if "attempts" in data:
+        at = data["attempts"]
+        if not isinstance(at, int) or isinstance(at, bool) or at < 1:
+            errors.append("attempts must be an integer >= 1")
+
+    if "stop_reason" in data and not isinstance(data["stop_reason"], str):
+        errors.append("stop_reason must be a string")
+
     if "payload" in data and not isinstance(data["payload"], dict):
         errors.append("payload must be an object")
     elif isinstance(data.get("payload"), dict):
@@ -166,7 +234,13 @@ def main(argv: list[str]) -> int:
     role = data.get("from_role", "?")
     status = data.get("status", "?")
     task = data.get("task_id", "?")
-    print(f"OK  role={role}  status={status}  task_id={task}")
+    extra = []
+    if "attempts" in data:
+        extra.append(f"attempts={data['attempts']}")
+    if "stop_reason" in data:
+        extra.append(f"stop_reason={data['stop_reason']}")
+    suffix = ("  " + "  ".join(extra)) if extra else ""
+    print(f"OK  role={role}  status={status}  task_id={task}{suffix}")
     return 0
 
 

@@ -71,6 +71,20 @@
       "format": "date-time",
       "description": "ISO-8601 UTC time the handoff was produced."
     },
+    "tokens_used": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Optional rough estimate of tokens consumed by this agent turn. Used by the lead for cost awareness; not a hard budget."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional number of implementation or diagnosis attempts made before this handoff."
+    },
+    "stop_reason": {
+      "type": "string",
+      "description": "Optional reason the agent stopped: completed, blocked_on_dependency, blocked_on_scope, stalled, budget, needs_human, or free-text."
+    },
     "payload": {
       "type": "object",
       "description": "Role-specific body. Shape depends on from_role; see orchestration/handoff.md.",

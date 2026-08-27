@@ -97,9 +97,14 @@ done
 
 install_file "$ROOT_DIR/orchestration/handoff.md" "$DEST_LIB/orchestration/handoff.md"
 install_file "$ROOT_DIR/orchestration/handoff.schema.json" "$DEST_LIB/orchestration/handoff.schema.json"
+install_file "$ROOT_DIR/orchestration/worktree-rules.md" "$DEST_LIB/orchestration/worktree-rules.md"
+install_file "$ROOT_DIR/orchestration/team-lead.md" "$DEST_LIB/orchestration/team-lead.md"
+install_file "$ROOT_DIR/orchestration/delegation-rules.md" "$DEST_LIB/orchestration/delegation-rules.md"
 install_file "$ROOT_DIR/scripts/validate-handoff.py" "$DEST_LIB/scripts/validate-handoff.py"
 install_file "$ROOT_DIR/scripts/validate-handoff.sh" "$DEST_LIB/scripts/validate-handoff.sh"
 install_file "$ROOT_DIR/scripts/validate-handoff.ps1" "$DEST_LIB/scripts/validate-handoff.ps1"
+install_file "$ROOT_DIR/capabilities.md" "$DEST_LIB/capabilities.md"
+install_file "$ROOT_DIR/global-CLAUDE.md" "$DEST_LIB/global-CLAUDE.md"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   chmod +x "$DEST_LIB/scripts/validate-handoff.sh"

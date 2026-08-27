@@ -11,6 +11,7 @@ Free-text reports force the lead to trust claims. Structured handoffs make claim
 - required fields cannot be silently omitted
 - proof tokens turn “tests passed” into something the lead can re-run
 - ownership and off-limits violations become visible
+- optional cost/stall signals give the lead something to gate on besides vibes
 - reviewers and the lead can consume prior results without re-parsing prose
 
 ## Envelope (all roles)
@@ -26,9 +27,14 @@ Free-text reports force the lead to trust claims. Structured handoffs make claim
   "confidence": 0.0,
   "summary": "<1-2 sentences + proof token>",
   "timestamp": "<ISO-8601 UTC>",
+  "tokens_used": 0,
+  "attempts": 1,
+  "stop_reason": "completed",
   "payload": { }
 }
 ```
+
+`tokens_used`, `attempts`, and `stop_reason` are **optional**. Emit them when the information is available; the lead may use them for cost awareness and stall detection.
 
 ### Proof token (required inside `summary`)
 
@@ -41,6 +47,16 @@ Include at least one of:
 
 Bad: `"Fixed the billing bug."`  
 Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests pass."`
+
+### Optional cost / stall signals
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `tokens_used` | number ≥ 0 | Rough estimate of tokens consumed this turn |
+| `attempts` | integer ≥ 1 | How many implementation/diagnosis attempts before this handoff |
+| `stop_reason` | string | Why the agent stopped: `completed`, `blocked_on_dependency`, `blocked_on_scope`, `stalled`, `budget`, `needs_human`, or short free-text |
+
+Lead guidance: if `attempts` is high or `stop_reason` is `stalled` / `budget`, pause and re-plan instead of spawning another retry.
 
 ## Role payloads
 
@@ -63,6 +79,8 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
   "rejected_approaches": ["full rewrite of state machine — too large for scope"]
 }
 ```
+
+Debugger additionally requires: `failure`, `reproduction`, `root_cause`, `fix`.
 
 ### tester
 
@@ -144,6 +162,7 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
 3. Re-run or spot-check the proof token before integrating.
 4. If `files_off_limits_touched` is non-empty, treat as scope violation until explained.
 5. For high-risk work, require a `plan_ready` handoff from architect or implementer before allowing implementation to proceed.
+6. Treat high `attempts` or `stop_reason` in `{stalled, budget}` as a signal to re-plan rather than retry blindly.
 
 ## Emission rules for agents
 
@@ -151,10 +170,11 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
 - Do not invent fields outside the schema and the role payload shapes above.
 - Never claim tests passed unless the command actually ran in this session.
 - If blocked, set `status: "blocked"`, explain in `summary` and `payload.risks` / findings, and stop.
+- Emit `attempts` and `stop_reason` when useful; omit them when unknown.
 
 ## Evolution
 
-Bump `schema_version` only on breaking changes. Additive optional fields inside `payload` do not require a version bump. Keep the envelope small so models reliably emit it.
+Bump `schema_version` only on breaking changes. Additive optional fields inside the envelope or `payload` do not require a version bump. Keep the envelope small so models reliably emit it.
 
 ## Validate a handoff
 

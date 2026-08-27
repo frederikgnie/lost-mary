@@ -10,6 +10,10 @@ A reusable, team-aware Claude Code setup for software engineering.
 - Review and security roles that are intentionally read-only.
 - A bootstrap script for installing the agents into `~/.claude/agents/`.
 - Structured JSON handoffs (`orchestration/handoff.md`) so the lead can gate on checkable results instead of free-text claims.
+- Concrete worktree naming and merge conventions.
+- A short threat model with a pre-spawn trust check for untrusted input.
+- Optional cost/stall signals on handoffs (`tokens_used`, `attempts`, `stop_reason`).
+- A capability declaration so the library can degrade when Claude Code changes.
 
 ## Layout
 
@@ -18,6 +22,7 @@ A reusable, team-aware Claude Code setup for software engineering.
 ├── AGENTS.md
 ├── README.md
 ├── global-CLAUDE.md
+├── capabilities.md
 ├── agents/
 │   ├── architect.md
 │   ├── researcher.md
