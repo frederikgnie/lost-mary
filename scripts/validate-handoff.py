@@ -13,6 +13,7 @@ No deps beyond Python 3 stdlib. Intentionally minimal.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime
 from typing import Any
@@ -55,6 +56,70 @@ STOP_REASONS = {
     "budget",
     "needs_human",
 }
+
+# Roles whose result may legitimately be "nothing to point at" (a clean review).
+REVIEW_ROLES = {"reviewer", "security-reviewer"}
+
+# A proof token is an anchor the lead can re-check. Deliberately stricter than
+# JSON Schema can express, which is why weak-proof fixtures live in
+# tests/handoff-fixtures-runtime-invalid/ (schema-valid, runtime-invalid).
+FILE_LINE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,10}:\d+")
+PROOF_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # test ratio: "12/12", "95 / 95"
+    re.compile(r"\b\d+\s*/\s*\d+\b"),
+    # test count + outcome: "12 passed", "95 tests pass", "0 failures"
+    re.compile(
+        r"\b\d+\s+(?:\S+\s+){0,2}?(?:passed|passing|pass|failed|failing|failures|green|ok)\b",
+        re.IGNORECASE,
+    ),
+    # file:line anchor: "checkout.tsx:88"
+    FILE_LINE,
+    # commit sha: 7-40 hex chars
+    re.compile(r"\b[0-9a-f]{7,40}\b"),
+    # backticked command with an argument: "`npm test -- billing`"
+    re.compile(r"`[^`]*\s[^`]*`"),
+)
+
+
+def find_proof(data: dict[str, Any]) -> tuple[bool, str | None]:
+    """Return (has_proof, warning). Accepts a re-checkable anchor from the
+    summary text, a re-runnable validation command, or a located finding."""
+    summary = data.get("summary")
+    if isinstance(summary, str):
+        for pattern in PROOF_PATTERNS:
+            if pattern.search(summary):
+                return True, None
+
+    payload = data.get("payload")
+    if not isinstance(payload, dict):
+        return False, None
+
+    # A command the lead can re-run is itself proof.
+    validation = payload.get("validation")
+    if isinstance(validation, list):
+        for entry in validation:
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and len(entry["command"].strip()) >= 2
+            ):
+                return True, None
+
+    # A finding pinned to file:line is a re-checkable anchor.
+    findings = payload.get("findings")
+    if isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict) and FILE_LINE.search(
+                str(finding.get("location") or "")
+            ):
+                return True, None
+
+    # Demanding a proof token for a negative result is incoherent: a clean
+    # review has no location to cite. Accept, but surface it to the lead.
+    if data.get("from_role") in REVIEW_ROLES and isinstance(findings, list) and not findings:
+        return True, "clean review accepted with no proof token (no findings to anchor)"
+
+    return False, None
 
 # Required payload keys per role — aligned with handoff.schema.json / handoff.md
 PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
@@ -216,10 +281,6 @@ def check(data: Any) -> tuple[list[str], list[str]]:
         s = data["summary"]
         if not isinstance(s, str) or len(s.strip()) < 10:
             errors.append("summary must be a string of at least 10 characters")
-        elif not any(ch.isdigit() for ch in s) and ":" not in s:
-            errors.append(
-                "summary must include a proof token (test count, SHA, file:line, or command evidence)"
-            )
 
     if "timestamp" in data and isinstance(data["timestamp"], str):
         ts = data["timestamp"].replace("Z", "+00:00")
@@ -284,6 +345,18 @@ def check(data: Any) -> tuple[list[str], list[str]]:
             warnings.append(
                 f"files_off_limits_touched is non-empty ({len(off)} path(s)) — scope violation?"
             )
+
+    # Proof token: needs the whole handoff, so it runs after payload checks.
+    if isinstance(data.get("summary"), str) and len(data["summary"].strip()) >= 10:
+        proven, note = find_proof(data)
+        if not proven:
+            errors.append(
+                "no proof token found: summary needs a re-checkable anchor "
+                "(test count, commit SHA, file:line, or `command`), or payload "
+                "needs a validation command / located finding"
+            )
+        elif note:
+            warnings.append(note)
 
     return errors, warnings
 

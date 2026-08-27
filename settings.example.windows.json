@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/guard-readonly-bash.py\"",
+            "command": "python \"%USERPROFILE%\\.claude\\agent-library\\scripts\\guard-readonly-bash.py\"",
             "timeout": 10
           }
         ]
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-handoff-hook.py\"",
+            "command": "python \"%USERPROFILE%\\.claude\\agent-library\\scripts\\check-handoff-hook.py\"",
             "timeout": 15
           }
         ]

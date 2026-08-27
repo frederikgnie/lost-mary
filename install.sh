@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_AGENTS="${HOME}/.claude/agents"
 DEST_LIB="${HOME}/.claude/agent-library"
+# Claude Code auto-loads ~/.claude/CLAUDE.md only. global-CLAUDE.md is inert
+# unless that file imports it, so the installer maintains the import line.
+CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
+IMPORT_LINE='@~/.claude/agent-library/global-CLAUDE.md'
 DRY_RUN=0
 NO_OVERWRITE=0
 VERIFY=0
@@ -110,6 +114,54 @@ verify_file() {
   fi
 }
 
+ensure_import() {
+  # Additive and idempotent: never rewrites the user's own global CLAUDE.md.
+  if [[ -f "$CLAUDE_MD" ]] && grep -qF -- "$IMPORT_LINE" "$CLAUDE_MD"; then
+    log "Unchanged: import already present in $CLAUDE_MD"
+    return 0
+  fi
+
+  if [[ ! -f "$CLAUDE_MD" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[dry-run] create $CLAUDE_MD with import line"
+      return 0
+    fi
+    mkdir -p "$(dirname "$CLAUDE_MD")"
+    {
+      printf '# Global Claude Code Instructions\n\n'
+      printf '%s\n' "$IMPORT_LINE"
+    } > "$CLAUDE_MD"
+    log "Created $CLAUDE_MD with agent-library import"
+    return 0
+  fi
+
+  if [[ "$NO_OVERWRITE" -eq 1 ]]; then
+    log "Skipped (--no-overwrite): $CLAUDE_MD not modified"
+    log "MANUAL ACTION REQUIRED — add this line to $CLAUDE_MD or the library stays inert:"
+    log "    $IMPORT_LINE"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[dry-run] append import line to $CLAUDE_MD (after backup)"
+    return 0
+  fi
+
+  cp "$CLAUDE_MD" "${CLAUDE_MD}.backup.${TIMESTAMP}"
+  log "Backing up existing $CLAUDE_MD -> ${CLAUDE_MD}.backup.${TIMESTAMP}"
+  printf '\n%s\n' "$IMPORT_LINE" >> "$CLAUDE_MD"
+  log "Appended agent-library import to $CLAUDE_MD"
+}
+
+verify_import() {
+  if [[ -f "$CLAUDE_MD" ]] && grep -qF -- "$IMPORT_LINE" "$CLAUDE_MD"; then
+    log "OK: import present in $CLAUDE_MD"
+  else
+    log "DRIFT: $CLAUDE_MD does not import $IMPORT_LINE (global-CLAUDE.md would be inert)"
+    DRIFT_COUNT=$((DRIFT_COUNT + 1))
+  fi
+}
+
 if [[ "$VERIFY" -eq 0 ]]; then
   run mkdir -p "$DEST_AGENTS"
   run mkdir -p "$DEST_LIB/orchestration"
@@ -137,8 +189,11 @@ if [[ "$VERIFY" -eq 1 ]]; then
   verify_file "$ROOT_DIR/scripts/validate-handoff.py" "$DEST_LIB/scripts/validate-handoff.py"
   verify_file "$ROOT_DIR/scripts/validate-handoff.sh" "$DEST_LIB/scripts/validate-handoff.sh"
   verify_file "$ROOT_DIR/scripts/validate-handoff.ps1" "$DEST_LIB/scripts/validate-handoff.ps1"
+  verify_file "$ROOT_DIR/scripts/guard-readonly-bash.py" "$DEST_LIB/scripts/guard-readonly-bash.py"
+  verify_file "$ROOT_DIR/scripts/check-handoff-hook.py" "$DEST_LIB/scripts/check-handoff-hook.py"
   verify_file "$ROOT_DIR/capabilities.md" "$DEST_LIB/capabilities.md"
   verify_file "$ROOT_DIR/global-CLAUDE.md" "$DEST_LIB/global-CLAUDE.md"
+  verify_import
 else
   install_file "$ROOT_DIR/orchestration/handoff.md" "$DEST_LIB/orchestration/handoff.md"
   install_file "$ROOT_DIR/orchestration/handoff.schema.json" "$DEST_LIB/orchestration/handoff.schema.json"
@@ -150,8 +205,11 @@ else
   install_file "$ROOT_DIR/scripts/validate-handoff.py" "$DEST_LIB/scripts/validate-handoff.py"
   install_file "$ROOT_DIR/scripts/validate-handoff.sh" "$DEST_LIB/scripts/validate-handoff.sh"
   install_file "$ROOT_DIR/scripts/validate-handoff.ps1" "$DEST_LIB/scripts/validate-handoff.ps1"
+  install_file "$ROOT_DIR/scripts/guard-readonly-bash.py" "$DEST_LIB/scripts/guard-readonly-bash.py"
+  install_file "$ROOT_DIR/scripts/check-handoff-hook.py" "$DEST_LIB/scripts/check-handoff-hook.py"
   install_file "$ROOT_DIR/capabilities.md" "$DEST_LIB/capabilities.md"
   install_file "$ROOT_DIR/global-CLAUDE.md" "$DEST_LIB/global-CLAUDE.md"
+  ensure_import
 fi
 
 if [[ "$VERIFY" -eq 1 ]]; then
@@ -166,11 +224,20 @@ fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   chmod +x "$DEST_LIB/scripts/validate-handoff.sh"
+  chmod +x "$DEST_LIB/scripts/guard-readonly-bash.py"
+  chmod +x "$DEST_LIB/scripts/check-handoff-hook.py"
 else
   log "[dry-run] chmod +x $DEST_LIB/scripts/validate-handoff.sh"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/guard-readonly-bash.py"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/check-handoff-hook.py"
 fi
 
 echo
 echo "Claude Code global agents installed in: $DEST_AGENTS"
 echo "Claude Code shared orchestration assets installed in: $DEST_LIB"
+echo "Operating rules imported into: $CLAUDE_MD"
+echo
+echo "Hooks are NOT installed automatically (they live in settings.json, which"
+echo "this installer does not touch). Merge the 'hooks' block from"
+echo "settings.example.json into ~/.claude/settings.json to enable enforcement."
 echo "Restart the current Claude Code session only if this is the first time you created the agents directory."

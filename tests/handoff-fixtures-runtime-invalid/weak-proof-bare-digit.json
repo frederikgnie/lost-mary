@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "handoff_id": "runtime-invalid-weak-proof-digit",
+  "from_role": "lead",
+  "to": "lead",
+  "task_id": "fixture-weak-proof-digit",
+  "status": "done",
+  "confidence": 0.8,
+  "summary": "Addressed 3 issues raised in the earlier round.",
+  "timestamp": "2026-08-27T10:00:00Z",
+  "payload": {
+    "result": "A bare digit is not an anchor. No test count, no commit, no file:line, no command."
+  }
+}

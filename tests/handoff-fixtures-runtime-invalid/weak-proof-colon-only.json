@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "handoff_id": "runtime-invalid-weak-proof-colon",
+  "from_role": "lead",
+  "to": "lead",
+  "task_id": "fixture-weak-proof-colon",
+  "status": "done",
+  "confidence": 0.9,
+  "summary": "Fixed the billing bug: it works now.",
+  "timestamp": "2026-08-27T10:00:00Z",
+  "payload": {
+    "result": "Schema-valid but unfalsifiable. A bare colon used to satisfy the proof-token check."
+  }
+}
