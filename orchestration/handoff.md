@@ -54,7 +54,7 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
 |-------|------|---------|
 | `tokens_used` | number ≥ 0 | Rough estimate of tokens consumed this turn |
 | `attempts` | integer ≥ 1 | How many implementation/diagnosis attempts before this handoff |
-| `stop_reason` | string | Why the agent stopped: `completed`, `blocked_on_dependency`, `blocked_on_scope`, `stalled`, `budget`, `needs_human`, or short free-text |
+| `stop_reason` | enum string | Why the agent stopped: `completed`, `blocked_on_dependency`, `blocked_on_scope`, `stalled`, `budget`, `needs_human` |
 
 Lead guidance: if `attempts` is high or `stop_reason` is `stalled` / `budget`, pause and re-plan instead of spawning another retry.
 
@@ -171,6 +171,8 @@ Debugger additionally requires: `failure`, `reproduction`, `root_cause`, `fix`.
 - Never claim tests passed unless the command actually ran in this session.
 - If blocked, set `status: "blocked"`, explain in `summary` and `payload.risks` / findings, and stop.
 - Emit `attempts` and `stop_reason` when useful; omit them when unknown.
+
+Validation rule: unknown top-level fields are rejected. Keep envelope keys limited to the documented set so validator and schema remain aligned.
 
 ## Evolution
 

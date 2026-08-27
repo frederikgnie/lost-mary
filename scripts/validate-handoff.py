@@ -30,6 +30,12 @@ REQUIRED = (
     "timestamp",
     "payload",
 )
+OPTIONAL = (
+    "tokens_used",
+    "attempts",
+    "stop_reason",
+)
+ALLOWED_TOP_LEVEL = set(REQUIRED) | set(OPTIONAL)
 ROLES = {
     "architect",
     "researcher",
@@ -41,6 +47,14 @@ ROLES = {
     "lead",
 }
 STATUSES = {"done", "blocked", "needs_review", "failed", "plan_ready"}
+STOP_REASONS = {
+    "completed",
+    "blocked_on_dependency",
+    "blocked_on_scope",
+    "stalled",
+    "budget",
+    "needs_human",
+}
 
 # Required payload keys per role — aligned with handoff.schema.json / handoff.md
 PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
@@ -107,6 +121,55 @@ PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Required payload fields that must be arrays per role
+PAYLOAD_ARRAY_FIELDS: dict[str, tuple[str, ...]] = {
+    "implementer": (
+        "owned_scope",
+        "files_changed",
+        "files_off_limits_touched",
+        "validation",
+        "tests_added_or_updated",
+        "risks",
+        "integration_notes",
+        "rejected_approaches",
+    ),
+    "debugger": (
+        "owned_scope",
+        "files_changed",
+        "files_off_limits_touched",
+        "validation",
+        "tests_added_or_updated",
+        "risks",
+        "integration_notes",
+        "rejected_approaches",
+    ),
+    "tester": (
+        "tests_added",
+        "validation",
+        "findings",
+    ),
+    "reviewer": (
+        "findings",
+        "positive_controls",
+    ),
+    "security-reviewer": (
+        "findings",
+        "positive_controls",
+    ),
+    "architect": (
+        "change_surface",
+        "dependencies",
+        "parallelization",
+        "risks",
+        "task_breakdown",
+    ),
+    "researcher": (
+        "findings",
+        "options",
+        "caveats",
+    ),
+}
+
 
 def load(path: str) -> Any:
     if path == "-":
@@ -124,6 +187,10 @@ def check(data: Any) -> tuple[list[str], list[str]]:
 
     if not isinstance(data, dict):
         return ["handoff must be a JSON object"], []
+
+    unknown = sorted(set(data.keys()) - ALLOWED_TOP_LEVEL)
+    if unknown:
+        errors.append(f"unknown top-level fields: {', '.join(unknown)}")
 
     for key in REQUIRED:
         if key not in data:
@@ -182,8 +249,14 @@ def check(data: Any) -> tuple[list[str], list[str]]:
         if not isinstance(at, int) or isinstance(at, bool) or at < 1:
             errors.append("attempts must be an integer >= 1")
 
-    if "stop_reason" in data and not isinstance(data["stop_reason"], str):
-        errors.append("stop_reason must be a string")
+    if "stop_reason" in data:
+        sr = data["stop_reason"]
+        if not isinstance(sr, str):
+            errors.append("stop_reason must be a string")
+        elif sr not in STOP_REASONS:
+            errors.append(
+                "stop_reason must be one of: " + ", ".join(sorted(STOP_REASONS))
+            )
 
     if "payload" in data and not isinstance(data["payload"], dict):
         errors.append("payload must be an object")
@@ -194,6 +267,16 @@ def check(data: Any) -> tuple[list[str], list[str]]:
         if missing:
             errors.append(
                 f"payload missing required fields for {role}: {', '.join(missing)}"
+            )
+        array_fields = PAYLOAD_ARRAY_FIELDS.get(role or "", ())
+        wrong_type = [
+            k
+            for k in array_fields
+            if k in data["payload"] and not isinstance(data["payload"][k], list)
+        ]
+        if wrong_type:
+            errors.append(
+                f"payload fields must be arrays for {role}: {', '.join(wrong_type)}"
             )
         # Scope discipline signal
         off = data["payload"].get("files_off_limits_touched")

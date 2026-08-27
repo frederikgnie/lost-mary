@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "handoff_id": "fix-test-001",
+  "from_role": "tester",
+  "to": "lead",
+  "task_id": "fixture-tester",
+  "status": "done",
+  "confidence": 0.88,
+  "summary": "Coverage updated in tests/api.test.ts:30 with 10/10 passing.",
+  "timestamp": "2026-08-27T00:00:00Z",
+  "stop_reason": "completed",
+  "payload": {
+    "coverage_assessment": "Core paths covered; load tests out of scope",
+    "tests_added": ["tests/api.test.ts"],
+    "validation": [
+      {"command": "npm test", "passed": true, "output_snippet": "10 passed"}
+    ],
+    "findings": [],
+    "recommendation": "Ready for review"
+  }
+}

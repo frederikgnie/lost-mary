@@ -83,7 +83,15 @@
     },
     "stop_reason": {
       "type": "string",
-      "description": "Optional reason the agent stopped: completed, blocked_on_dependency, blocked_on_scope, stalled, budget, needs_human, or free-text."
+      "enum": [
+        "completed",
+        "blocked_on_dependency",
+        "blocked_on_scope",
+        "stalled",
+        "budget",
+        "needs_human"
+      ],
+      "description": "Optional reason the agent stopped. Use one of the documented values so lead-side automation can react consistently."
     },
     "payload": {
       "type": "object",

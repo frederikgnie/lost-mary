@@ -1,0 +1,70 @@
+name: Handoff Contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate-handoff-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install schema validator
+        run: python -m pip install --disable-pip-version-check jsonschema
+
+      - name: Validate fixture set exists
+        run: |
+          set -euo pipefail
+          for file in \
+            tests/handoff-fixtures/architect.json \
+            tests/handoff-fixtures/researcher.json \
+            tests/handoff-fixtures/implementer.json \
+            tests/handoff-fixtures/debugger.json \
+            tests/handoff-fixtures/tester.json \
+            tests/handoff-fixtures/reviewer.json \
+            tests/handoff-fixtures/security-reviewer.json \
+            tests/handoff-fixtures/lead.json; do
+            test -f "$file"
+          done
+
+      - name: Validate fixtures against JSON schema
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from jsonschema import Draft202012Validator
+
+          schema = json.loads(Path('orchestration/handoff.schema.json').read_text(encoding='utf-8'))
+          validator = Draft202012Validator(schema)
+          fixture_dir = Path('tests/handoff-fixtures')
+
+          failures = []
+          for path in sorted(fixture_dir.glob('*.json')):
+              data = json.loads(path.read_text(encoding='utf-8'))
+              errs = sorted(validator.iter_errors(data), key=lambda e: e.path)
+              if errs:
+                  failures.append((path, errs))
+
+          if failures:
+              for path, errs in failures:
+                  print(f'FAILED: {path}')
+                  for err in errs:
+                      print(f'  - {err.message}')
+              raise SystemExit(1)
+          print('Schema validation passed for all fixtures.')
+          PY
+
+      - name: Validate fixtures with runtime validator
+        run: |
+          set -euo pipefail
+          for file in tests/handoff-fixtures/*.json; do
+            python scripts/validate-handoff.py "$file"
+          done

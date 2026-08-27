@@ -96,6 +96,18 @@ PowerShell equivalent:
 ./install.ps1 -DryRun -NoOverwrite
 ```
 
+Verify installed global files without writing anything (exit 0 on no drift, 1 on drift):
+
+```bash
+./install.sh --verify
+```
+
+PowerShell equivalent:
+
+```powershell
+./install.ps1 -Verify
+```
+
 The script copies the reusable agent files into:
 
 ```text
@@ -151,6 +163,19 @@ Require a plan before risky implementation, and perform a final review before in
 
 The team lead remains responsible for the overall task, integration decisions, and final validation.
 
+## Role Selection Quick Table
+
+Use this lightweight mapping to reduce token waste:
+
+| Situation | Primary role | Required gate before done |
+|---|---|---|
+| New feature with cross-module impact | `architect` then `implementer` | `plan_ready` handoff then passing validation evidence |
+| Bug with unclear cause | `debugger` | root cause + regression test evidence |
+| Medium-risk behavior change | `implementer` + `reviewer` | independent review handoff with no unresolved HIGH+ findings |
+| Security-sensitive change | `implementer` + `security-reviewer` | security handoff with posture not `needs rework` |
+| Test coverage strengthening | `tester` | test command evidence + findings/recommendation |
+| Unknown code or external API research | `researcher` | sourced findings + clear recommendation/caveats |
+
 ## Validate handoffs
 
 Specialist handoffs are expected to be a single raw JSON object (no markdown wrapper).
@@ -168,6 +193,17 @@ On Windows PowerShell:
 ./scripts/validate-handoff.ps1 .\path\to\handoff.json
 Get-Content .\path\to\handoff.json -Raw | ./scripts/validate-handoff.ps1 -
 ```
+
+## Contract Drift Checks
+
+This repository includes fixture handoffs in `tests/handoff-fixtures/` and a CI workflow at `.github/workflows/handoff-contract.yml`.
+
+CI validates every fixture against both:
+
+- JSON Schema (`orchestration/handoff.schema.json`)
+- Runtime validator (`scripts/validate-handoff.py`)
+
+This keeps schema and runtime enforcement in sync and fails fast when either side drifts.
 
 ## Important
 
