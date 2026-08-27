@@ -76,5 +76,232 @@
       "description": "Role-specific body. Shape depends on from_role; see orchestration/handoff.md.",
       "additionalProperties": true
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "implementer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "result",
+              "owned_scope",
+              "files_changed",
+              "files_off_limits_touched",
+              "validation",
+              "tests_added_or_updated",
+              "risks",
+              "integration_notes",
+              "rejected_approaches"
+            ],
+            "properties": {
+              "owned_scope": {"type": "array"},
+              "files_changed": {"type": "array"},
+              "files_off_limits_touched": {"type": "array"},
+              "validation": {"type": "array"},
+              "tests_added_or_updated": {"type": "array"},
+              "risks": {"type": "array"},
+              "integration_notes": {"type": "array"},
+              "rejected_approaches": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "debugger"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "result",
+              "failure",
+              "reproduction",
+              "root_cause",
+              "fix",
+              "owned_scope",
+              "files_changed",
+              "files_off_limits_touched",
+              "validation",
+              "tests_added_or_updated",
+              "risks",
+              "integration_notes",
+              "rejected_approaches"
+            ],
+            "properties": {
+              "owned_scope": {"type": "array"},
+              "files_changed": {"type": "array"},
+              "files_off_limits_touched": {"type": "array"},
+              "validation": {"type": "array"},
+              "tests_added_or_updated": {"type": "array"},
+              "risks": {"type": "array"},
+              "integration_notes": {"type": "array"},
+              "rejected_approaches": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "tester"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "coverage_assessment",
+              "tests_added",
+              "validation",
+              "findings",
+              "recommendation"
+            ],
+            "properties": {
+              "tests_added": {"type": "array"},
+              "validation": {"type": "array"},
+              "findings": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "reviewer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "posture",
+              "findings",
+              "positive_controls",
+              "residual_risk"
+            ],
+            "properties": {
+              "findings": {"type": "array"},
+              "positive_controls": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "security-reviewer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "posture",
+              "findings",
+              "positive_controls",
+              "residual_risk"
+            ],
+            "properties": {
+              "findings": {"type": "array"},
+              "positive_controls": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "architect"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "understanding",
+              "change_surface",
+              "dependencies",
+              "parallelization",
+              "risks",
+              "recommendation",
+              "task_breakdown"
+            ],
+            "properties": {
+              "change_surface": {"type": "array"},
+              "dependencies": {"type": "array"},
+              "parallelization": {"type": "array"},
+              "risks": {"type": "array"},
+              "task_breakdown": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "from_role": {
+            "const": "researcher"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "question",
+              "findings",
+              "options",
+              "recommendation",
+              "caveats"
+            ],
+            "properties": {
+              "findings": {"type": "array"},
+              "options": {"type": "array"},
+              "caveats": {"type": "array"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ]
 }

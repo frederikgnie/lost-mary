@@ -34,9 +34,11 @@ A reusable, team-aware Claude Code setup for software engineering.
 │   └── handoff.schema.json
 ├── scripts/
 │   ├── validate-handoff.py
-│   └── validate-handoff.sh
+│   ├── validate-handoff.sh
+│   └── validate-handoff.ps1
 ├── settings.example.json
-└── install.sh
+├── install.sh
+└── install.ps1
 ```
 
 ## Install globally
@@ -47,13 +49,67 @@ Run:
 ./install.sh
 ```
 
+On Windows PowerShell:
+
+```powershell
+./install.ps1
+```
+
+Preview all actions first (no file writes):
+
+```bash
+./install.sh --dry-run
+```
+
+PowerShell equivalent:
+
+```powershell
+./install.ps1 -DryRun
+```
+
+Install only missing files and never overwrite existing ones:
+
+```bash
+./install.sh --no-overwrite
+```
+
+PowerShell equivalent:
+
+```powershell
+./install.ps1 -NoOverwrite
+```
+
+Combine both to audit what would be skipped:
+
+```bash
+./install.sh --dry-run --no-overwrite
+```
+
+PowerShell equivalent:
+
+```powershell
+./install.ps1 -DryRun -NoOverwrite
+```
+
 The script copies the reusable agent files into:
 
 ```text
 ~/.claude/agents/
 ```
 
+It also installs shared handoff and validation assets into:
+
+```text
+~/.claude/agent-library/
+```
+
 The global directory is the user-level Claude Code scope, so the agents are available in every repository on that machine.
+
+Safety behavior:
+
+- Installer only touches `~/.claude/agents` and `~/.claude/agent-library`.
+- Existing files are preserved by default via timestamped backups (`.backup.<timestamp>`).
+- Unchanged files are left untouched.
 
 ## Enable Agent Teams
 
@@ -89,6 +145,24 @@ Require a plan before risky implementation, and perform a final review before in
 ```
 
 The team lead remains responsible for the overall task, integration decisions, and final validation.
+
+## Validate handoffs
+
+Specialist handoffs are expected to be a single raw JSON object (no markdown wrapper).
+
+From this repository:
+
+```bash
+./scripts/validate-handoff.sh path/to/handoff.json
+cat handoff.json | ./scripts/validate-handoff.sh -
+```
+
+On Windows PowerShell:
+
+```powershell
+./scripts/validate-handoff.ps1 .\path\to\handoff.json
+Get-Content .\path\to\handoff.json -Raw | ./scripts/validate-handoff.ps1 -
+```
 
 ## Important
 

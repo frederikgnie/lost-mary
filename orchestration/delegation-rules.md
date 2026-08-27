@@ -34,6 +34,16 @@ Default to 2–4 teammates for meaningful engineering work.
 
 Use more only when the problem naturally decomposes into independent workstreams. More teammates increase coordination and token cost.
 
+## Token budget discipline
+
+Default to the least expensive execution mode that can still produce a correct result.
+
+- Start with one implementer and add teammates only when the dependency graph proves parallelism will reduce cycle time.
+- Prefer read-only specialist reviews over extra implementers when quality confidence is the main concern.
+- Require each teammate prompt to include a concise scope and explicit stop condition so long exploratory loops do not continue indefinitely.
+- Escalate model cost only for high-ambiguity architecture decisions, severe debugging uncertainty, or security-critical review.
+- If progress stalls without new evidence, pause and re-plan instead of continuing expensive retries.
+
 ## Spawn prompts
 
 Every implementation teammate prompt should state:

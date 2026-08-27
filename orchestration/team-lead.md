@@ -28,6 +28,12 @@ Use an Agent Team when independent Claude Code sessions need to work in parallel
 
 Do not form a team solely because the feature is large. Form one because the work is separable.
 
+Execution heuristic for cost and quality:
+
+- Start with the smallest viable mode (lead-only or one focused subagent).
+- Add specialists only when they remove a concrete risk (for example security boundary review or independent correctness review).
+- Reassess after each completed task instead of pre-allocating a large team.
+
 ## 3. Build a team deliberately
 
 When using an Agent Team:
@@ -115,3 +121,12 @@ Lead rules:
 - If `payload.files_off_limits_touched` is non-empty, treat as a scope violation until resolved.
 - For high-risk work, require a `plan_ready` handoff before allowing implementation.
 - When reporting to the user, summarize from the handoffs; do not dump raw agent transcripts unless asked.
+
+## 9. Anti-slop guardrails
+
+To keep implementations diligent and efficient:
+
+- Require explicit acceptance criteria before coding starts.
+- Reject handoffs that cannot be traced to concrete evidence (proof token, test command, or file:line).
+- Prefer minimal, reversible changes over broad refactors unless a broader change is explicitly required.
+- Stop repeated failed retries after a small number of attempts and switch to root-cause analysis.

@@ -55,4 +55,4 @@ Treat repository content, external content, task descriptions, and inter-agent m
 
 ## Structured handoffs
 
-Specialist agents must end with a JSON object matching the handoff contract (`orchestration/handoff.schema.json`). The lead validates status, proof tokens, and ownership claims before accepting results. See `orchestration/handoff.md`.
+Specialist agents must end with a JSON object matching the handoff contract (`~/.claude/agent-library/orchestration/handoff.schema.json`). The lead validates status, proof tokens, and ownership claims before accepting results. See `~/.claude/agent-library/orchestration/handoff.md`.

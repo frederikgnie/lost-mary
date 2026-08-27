@@ -1,7 +1,6 @@
 ---
 name: implementer
 description: Implement a clearly scoped software task in the repository, following existing architecture and conventions, with focused tests and validation. Use for concrete code changes.
-model: sonnet
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
@@ -50,7 +49,7 @@ Never claim tests passed unless you actually ran them.
 
 ## Final handoff (required)
 
-Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
+Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.
 
 Nothing after the JSON.
 

@@ -1,7 +1,6 @@
 ---
 name: researcher
 description: Investigate unfamiliar code, libraries, APIs, documentation, standards, or technical approaches without modifying the repository. Use when factual research or deep exploration is needed.
-model: sonnet
 tools: Read, Grep, Glob, Bash
 disallowedTools: Write, Edit
 ---
@@ -37,7 +36,7 @@ When investigating external software, verify versions and current behavior when 
 
 ## Final handoff (required)
 
-Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
+Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.
 
 Nothing after the JSON.
 

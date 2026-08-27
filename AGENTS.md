@@ -79,6 +79,6 @@ Claude Code's own current documentation is the authority for runtime behavior an
 
 ## Structured handoffs
 
-Every specialist agent ends with a JSON handoff defined by `orchestration/handoff.schema.json` and documented in `orchestration/handoff.md`.
+Every specialist agent ends with a JSON handoff defined by `~/.claude/agent-library/orchestration/handoff.schema.json` and documented in `~/.claude/agent-library/orchestration/handoff.md`.
 
 The lead treats the JSON as the interface. Free-text outside the handoff is ignored for task gating. Proof tokens in `summary` make claims checkable.

@@ -147,7 +147,7 @@ Good: `"Checkout 500 fixed at checkout.tsx:88 (UUID was unquoted); 95/95 tests p
 
 ## Emission rules for agents
 
-- Final message = only the JSON object (or a short Markdown note that ends with a single fenced `json` block and nothing after it).
+- Final message = only the JSON object.
 - Do not invent fields outside the schema and the role payload shapes above.
 - Never claim tests passed unless the command actually ran in this session.
 - If blocked, set `status: "blocked"`, explain in `summary` and `payload.risks` / findings, and stop.

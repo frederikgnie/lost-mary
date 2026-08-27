@@ -42,8 +42,8 @@ ROLES = {
 }
 STATUSES = {"done", "blocked", "needs_review", "failed", "plan_ready"}
 
-# Soft payload hints per role (missing keys = warning, not hard fail)
-PAYLOAD_HINTS: dict[str, tuple[str, ...]] = {
+# Required payload keys per role (missing keys = hard fail)
+PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
     "implementer": ("result", "files_changed", "validation"),
     "debugger": ("result", "root_cause", "validation"),
     "tester": ("coverage_assessment", "validation"),
@@ -61,14 +61,6 @@ def load(path: str) -> Any:
         with open(path, encoding="utf-8") as f:
             raw = f.read()
     raw = raw.strip()
-    # Allow a single fenced ```json ... ``` block
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
     return json.loads(raw)
 
 
@@ -103,10 +95,9 @@ def check(data: Any) -> tuple[list[str], list[str]]:
         s = data["summary"]
         if not isinstance(s, str) or len(s.strip()) < 10:
             errors.append("summary must be a string of at least 10 characters")
-        # Soft: encourage a proof token (digit, SHA-ish, or path:line)
         elif not any(ch.isdigit() for ch in s) and ":" not in s:
-            warnings.append(
-                "summary has no obvious proof token (test count, SHA, or file:line)"
+            errors.append(
+                "summary must include a proof token (test count, SHA, file:line, or command evidence)"
             )
 
     if "timestamp" in data and isinstance(data["timestamp"], str):
@@ -130,11 +121,11 @@ def check(data: Any) -> tuple[list[str], list[str]]:
         errors.append("payload must be an object")
     elif isinstance(data.get("payload"), dict):
         role = data.get("from_role")
-        hints = PAYLOAD_HINTS.get(role or "", ())
-        missing = [k for k in hints if k not in data["payload"]]
+        required = PAYLOAD_REQUIRED.get(role or "", ())
+        missing = [k for k in required if k not in data["payload"]]
         if missing:
-            warnings.append(
-                f"payload missing recommended fields for {role}: {', '.join(missing)}"
+            errors.append(
+                f"payload missing required fields for {role}: {', '.join(missing)}"
             )
         # Scope discipline signal
         off = data["payload"].get("files_off_limits_touched")

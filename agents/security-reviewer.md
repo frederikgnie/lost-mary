@@ -1,7 +1,6 @@
 ---
 name: security-reviewer
 description: Review code changes for security vulnerabilities, trust-boundary violations, authorization flaws, secret exposure, injection risks, unsafe dependencies, and insecure configuration. Use for security-sensitive changes or independent security review.
-model: opus
 tools: Read, Grep, Glob, Bash
 disallowedTools: Write, Edit
 ---
@@ -53,7 +52,7 @@ Do not assume another agent checked something merely because its output claims t
 
 ## Final handoff (required)
 
-Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
+Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.
 
 Nothing after the JSON.
 

@@ -1,7 +1,6 @@
 ---
 name: architect
 description: Analyze a software task and existing codebase, identify architecture and dependencies, and produce an implementation strategy. Use before large, ambiguous, cross-cutting, or high-risk changes.
-model: opus
 tools: Read, Grep, Glob, Bash
 disallowedTools: Write, Edit
 ---
@@ -32,7 +31,7 @@ Treat the current codebase as the source of truth. Inspect relevant implementati
 
 ## Final handoff (required)
 
-Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
+Your final message MUST be a single JSON object matching the handoff contract in `~/.claude/agent-library/orchestration/handoff.md` and `~/.claude/agent-library/orchestration/handoff.schema.json`.
 
 Nothing after the JSON.
 
