@@ -22,14 +22,15 @@ Read time: ~5 minutes. Setup time: ~3 minutes.
 
 Want to see what it would do first? Add `-DryRun` / `--dry-run`.
 
-This does three things:
+This does four things:
 
 1. Copies the 7 agent roles into `~/.claude/agents/`.
-2. Copies the contract, validator, and hook scripts into `~/.claude/agent-library/`.
-3. Adds one line to `~/.claude/CLAUDE.md`:
+2. Installs the `/lost_mary` skill into `~/.claude/skills/lost_mary/`.
+3. Copies the contract, validator, and hook scripts into `~/.claude/agent-library/`.
+4. Adds one line to `~/.claude/CLAUDE.md`:
    `@~/.claude/agent-library/global-CLAUDE.md`
 
-**Step 3 is the one that matters.** Claude Code only auto-loads
+**Step 4 is the one that matters.** Claude Code only auto-loads
 `~/.claude/CLAUDE.md`. Without that import line the agents exist but the
 operating rules never load. Your existing `CLAUDE.md` content is never
 rewritten — the line is appended after a timestamped backup.
@@ -73,9 +74,29 @@ echo '{"agent_type":"reviewer","tool_input":{"command":"git diff HEAD~1"}}' | py
 ```
 
 If (b) returns 0 instead of 2, your hook path or interpreter is wrong — fix that
-before relying on the guard. See §7.
+before relying on the guard. See §8.
 
-## 4. Pick the right mode (this is where tokens are won or lost)
+## 4. Daily use: `/lost_mary`
+
+This is the entry point. Instead of remembering the operating model, invoke it:
+
+```text
+/lost_mary add idempotency keys to the payout webhook
+```
+
+It makes the session state an acceptance predicate before writing code, pick the
+smallest execution mode that can work, spawn with full scope boundaries, and gate
+"done" on evidence you can re-run. Run it with no argument and it asks what you
+want done.
+
+Use it for anything non-trivial. For a one-line fix, just ask normally - the
+point of the mode is to stop you skipping the framing step on work where
+skipping it costs you.
+
+Sections 5-7 explain what it does, so you can tell when it is steering you
+wrong.
+
+## 5. Pick the right mode (this is where tokens are won or lost)
 
 | Your task | Do this | Don't |
 | --- | --- | --- |
@@ -90,7 +111,7 @@ Rule of thumb: **start with the smallest mode that could work, add a specialist
 only when it removes a concrete risk.** Every extra agent costs tokens and
 coordination.
 
-## 5. The one thing to get right: the spawn prompt
+## 6. The one thing to get right: the spawn prompt
 
 A vague prompt produces a vague result and you pay for both. Every
 implementation spawn should carry these eight things:
@@ -122,7 +143,7 @@ VALIDATION:
 HANDOFF: final message is handoff JSON only, task_id = <id>
 ```
 
-## 6. Reading the handoff
+## 7. Reading the handoff
 
 Each specialist ends with one JSON object. You don't need to read all of it.
 Check four fields:
@@ -144,7 +165,7 @@ Validate a handoff by hand:
 ./scripts/validate-handoff.sh handoff.json
 ```
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
@@ -154,8 +175,9 @@ Validate a handoff by hand:
 | Specialist keeps getting blocked at the end | it's emitting prose, not JSON | the block message says what's missing; it should re-emit |
 | A reviewer complains it can't run something | the Bash guard blocked a write | that's working as designed — reviewers propose, they don't apply |
 | `--no-overwrite` left the library inert | that flag skips the import line on purpose | add the printed line to `~/.claude/CLAUDE.md` manually |
+| `/lost_mary` doesn't appear | not restarted, or the underscore is rejected | restart; if still absent rename `~/.claude/skills/lost_mary/` to `lost-mary` and use `/lost-mary` |
 
-## 8. Honest limits
+## 9. Honest limits
 
 Worth knowing before you rely on this:
 

@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DestAgents = Join-Path $HOME '.claude/agents'
 $DestLib = Join-Path $HOME '.claude/agent-library'
+$DestSkills = Join-Path $HOME '.claude/skills'
 # Claude Code auto-loads ~/.claude/CLAUDE.md only. global-CLAUDE.md is inert
 # unless that file imports it, so the installer maintains the import line.
 $ClaudeMd = Join-Path $HOME '.claude/CLAUDE.md'
@@ -155,6 +156,7 @@ function Test-ManagedFile {
 
 if (-not $Verify) {
     Invoke-Step -Description "New-Item directory '$DestAgents'" -Script { New-Item -ItemType Directory -Path $DestAgents -Force | Out-Null }
+    Invoke-Step -Description "New-Item directory '$DestSkills'" -Script { New-Item -ItemType Directory -Path $DestSkills -Force | Out-Null }
     Invoke-Step -Description "New-Item directory '$DestLib/orchestration'" -Script { New-Item -ItemType Directory -Path (Join-Path $DestLib 'orchestration') -Force | Out-Null }
     Invoke-Step -Description "New-Item directory '$DestLib/scripts'" -Script { New-Item -ItemType Directory -Path (Join-Path $DestLib 'scripts') -Force | Out-Null }
 }
@@ -164,6 +166,23 @@ Get-ChildItem -Path (Join-Path $RootDir 'agents') -Filter '*.md' -File | ForEach
         Test-ManagedFile -Source $_.FullName -Target (Join-Path $DestAgents $_.Name)
     } else {
         Install-ManagedFile -Source $_.FullName -Target (Join-Path $DestAgents $_.Name)
+    }
+}
+
+# Skills become slash commands (~/.claude/skills/<name>/SKILL.md -> /<name>).
+$skillRoot = Join-Path $RootDir 'skills'
+if (Test-Path -LiteralPath $skillRoot) {
+    Get-ChildItem -Path $skillRoot -Directory | ForEach-Object {
+        $source = Join-Path $_.FullName 'SKILL.md'
+        if (-not (Test-Path -LiteralPath $source)) { return }
+        $targetDir = Join-Path $DestSkills $_.Name
+        $target = Join-Path $targetDir 'SKILL.md'
+        if ($Verify) {
+            Test-ManagedFile -Source $source -Target $target
+        } else {
+            Invoke-Step -Description "New-Item directory '$targetDir'" -Script { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+            Install-ManagedFile -Source $source -Target $target
+        }
     }
 }
 
@@ -211,6 +230,7 @@ Set-LibraryImport
 
 Write-Host ''
 Write-Host "Claude Code global agents installed in: $DestAgents"
+Write-Host "Claude Code skills (slash commands) installed in: $DestSkills"
 Write-Host "Claude Code shared orchestration assets installed in: $DestLib"
 Write-Host "Operating rules imported into: $ClaudeMd"
 Write-Host ''

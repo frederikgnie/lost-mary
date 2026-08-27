@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_AGENTS="${HOME}/.claude/agents"
 DEST_LIB="${HOME}/.claude/agent-library"
+DEST_SKILLS="${HOME}/.claude/skills"
 # Claude Code auto-loads ~/.claude/CLAUDE.md only. global-CLAUDE.md is inert
 # unless that file imports it, so the installer maintains the import line.
 CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
@@ -164,6 +165,7 @@ verify_import() {
 
 if [[ "$VERIFY" -eq 0 ]]; then
   run mkdir -p "$DEST_AGENTS"
+  run mkdir -p "$DEST_SKILLS"
   run mkdir -p "$DEST_LIB/orchestration"
   run mkdir -p "$DEST_LIB/scripts"
 fi
@@ -175,6 +177,19 @@ for file in "$ROOT_DIR"/agents/*.md; do
     verify_file "$file" "$target"
   else
     install_file "$file" "$target"
+  fi
+done
+
+# Skills become slash commands (~/.claude/skills/<name>/SKILL.md -> /<name>).
+for skill_dir in "$ROOT_DIR"/skills/*/; do
+  [[ -f "${skill_dir}SKILL.md" ]] || continue
+  skill_name="$(basename "$skill_dir")"
+  skill_target="$DEST_SKILLS/$skill_name"
+  if [[ "$VERIFY" -eq 1 ]]; then
+    verify_file "${skill_dir}SKILL.md" "$skill_target/SKILL.md"
+  else
+    run mkdir -p "$skill_target"
+    install_file "${skill_dir}SKILL.md" "$skill_target/SKILL.md"
   fi
 done
 
@@ -234,6 +249,7 @@ fi
 
 echo
 echo "Claude Code global agents installed in: $DEST_AGENTS"
+echo "Claude Code skills (slash commands) installed in: $DEST_SKILLS"
 echo "Claude Code shared orchestration assets installed in: $DEST_LIB"
 echo "Operating rules imported into: $CLAUDE_MD"
 echo

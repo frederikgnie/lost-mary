@@ -39,6 +39,8 @@ A reusable, team-aware Claude Code setup for software engineering.
 │   ├── tester.md
 │   ├── reviewer.md
 │   └── security-reviewer.md
+├── skills/
+│   └── lost_mary/SKILL.md          # the /lost_mary slash command
 ├── orchestration/
 │   ├── team-lead.md
 │   ├── delegation-rules.md
@@ -179,6 +181,34 @@ Agent Teams are currently experimental and disabled by default. The official Cla
 ```
 
 See `settings.example.json` for a full example and `orchestration/team-lead.md` for the operating policy.
+
+## The `/lost_mary` slash command
+
+`skills/lost_mary/SKILL.md` installs to `~/.claude/skills/lost_mary/SKILL.md`,
+which Claude Code exposes as `/lost_mary`. Invoke it with a task:
+
+```text
+/lost_mary add idempotency keys to the payout webhook
+```
+
+It puts the session into this library's operating model: frame the task and
+state an acceptance predicate before any code, pick the smallest execution mode
+that can work, understand before editing, carry all eight fields in every spawn
+prompt, gate completion on re-checkable evidence, and deslop before closing.
+
+**Why a slash command rather than always-on context.** The orchestration docs
+are ~400 lines. Loading them into every session via `CLAUDE.md` is the expensive
+way to be ignored. The skill inlines the compressed decision procedure — the
+part that actually changes behavior — and names the reference files to read only
+when a step needs them. You pay for the operating model when you ask for it.
+
+`disable-model-invocation: true` keeps it user-invoked. Claude will not pull it
+in on its own, so it never becomes a hidden per-task tax.
+
+Note: Claude Code's documented convention for skill names is kebab-case. The
+underscore in `lost_mary` follows no documented prohibition but is off-convention;
+if `/lost_mary` does not appear after a restart, rename the directory to
+`lost-mary` and it becomes `/lost-mary`.
 
 ## Enforcement (hooks)
 

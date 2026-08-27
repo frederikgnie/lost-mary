@@ -55,6 +55,27 @@ Both signal a block with **exit code 2** and put the reason on stderr.
 
 **Stdin encoding.** Both hooks read `sys.stdin.buffer` and decode `utf-8-sig`, never text mode. Windows text-mode stdin decodes with the locale codepage, so the UTF-8 BOM that PowerShell prepends when piping to a native executable arrives as mojibake rather than `U+FEFF` — the payload then fails to parse and the hook fails open, silently disabling enforcement. If you refactor either hook, keep the byte-level read. `tests/test-hooks.py` covers this with BOM-prefixed payloads, and CI exercises a real PowerShell pipe on `windows-latest`.
 
+### Skills / slash commands
+
+`skills/<name>/SKILL.md` installs to `~/.claude/skills/<name>/SKILL.md` and Claude Code exposes it as `/<name>`. Custom commands (`.claude/commands/*.md`) and skills have been merged: both create the same slash command, and skills additionally allow a directory of supporting files plus invocation-control frontmatter.
+
+Frontmatter fields this library relies on:
+
+| Field | Purpose |
+|-------|---------|
+| `name` | Command identifier |
+| `description` | Shown in the command list; also drives model auto-invocation when enabled |
+| `argument-hint` | Placeholder text for arguments |
+| `disable-model-invocation` | `true` keeps the skill user-invoked only |
+
+`$ARGUMENTS` interpolates everything passed after the command name; `$1`/`$2` and `$ARGUMENTS[N]` address positionally.
+
+**`@path` imports do NOT work inside a skill body.** `@`-style includes are a `CLAUDE.md` feature. In a skill, `@~/.claude/...` is literal text, so an "import" written that way silently ships as prose instead of loading the file — the skill appears to work while carrying none of the referenced content. `skills/lost_mary/SKILL.md` therefore inlines its decision procedure and instructs explicit reads of absolute paths where a step needs the full reference. If you extend it, do not add `@` imports.
+
+Skill naming convention is kebab-case in Claude Code's documentation. `lost_mary` uses an underscore, which no documented rule forbids but which is off-convention; if it stops resolving, rename the directory to `lost-mary`.
+
+A skill invoked with `/name` stays in context for the remainder of the session, so its token cost is paid once per session, not per turn. Keep the body compressed for that reason.
+
 ### Model assumptions
 
 Agent files intentionally do **not** hard-code model aliases (`opus`, `sonnet`, etc.). Model selection is left to the lead / Claude Code settings so the library does not rot when Anthropic renames or retires model aliases.
