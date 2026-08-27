@@ -4,16 +4,20 @@ on:
   push:
     paths:
       - 'orchestration/handoff.schema.json'
+      - 'orchestration/handoff.md'
       - 'scripts/validate-handoff.py'
       - 'scripts/validate-handoff.sh'
+      - 'scripts/validate-handoff.ps1'
       - 'tests/handoff-fixtures/**'
       - 'tests/handoff-fixtures-invalid/**'
       - '.github/workflows/handoff-contract.yml'
   pull_request:
     paths:
       - 'orchestration/handoff.schema.json'
+      - 'orchestration/handoff.md'
       - 'scripts/validate-handoff.py'
       - 'scripts/validate-handoff.sh'
+      - 'scripts/validate-handoff.ps1'
       - 'tests/handoff-fixtures/**'
       - 'tests/handoff-fixtures-invalid/**'
       - '.github/workflows/handoff-contract.yml'
@@ -81,3 +85,22 @@ jobs:
               exit 1
             fi
           done
+
+  validate-powershell-wrapper:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate PowerShell wrapper with valid fixture
+        shell: pwsh
+        run: |
+          ./scripts/validate-handoff.ps1 ./tests/handoff-fixtures/lead.json
+      - name: Validate PowerShell wrapper rejects invalid fixture
+        shell: pwsh
+        run: |
+          ./scripts/validate-handoff.ps1 ./tests/handoff-fixtures-invalid/missing-required-field.json
+          if ($LASTEXITCODE -eq 0) {
+            throw "Invalid fixture unexpectedly passed PowerShell wrapper validation."
+          }
