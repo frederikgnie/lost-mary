@@ -9,6 +9,7 @@ A reusable, team-aware Claude Code setup for software engineering.
 - Guidance for parallel work and file ownership.
 - Review and security roles that are intentionally read-only.
 - A bootstrap script for installing the agents into `~/.claude/agents/`.
+- Structured JSON handoffs (`orchestration/handoff.md`) so the lead can gate on checkable results instead of free-text claims.
 
 ## Layout
 
@@ -16,6 +17,7 @@ A reusable, team-aware Claude Code setup for software engineering.
 .
 ├── AGENTS.md
 ├── README.md
+├── global-CLAUDE.md
 ├── agents/
 │   ├── architect.md
 │   ├── researcher.md
@@ -27,7 +29,12 @@ A reusable, team-aware Claude Code setup for software engineering.
 ├── orchestration/
 │   ├── team-lead.md
 │   ├── delegation-rules.md
-│   └── worktree-rules.md
+│   ├── worktree-rules.md
+│   ├── handoff.md
+│   └── handoff.schema.json
+├── scripts/
+│   ├── validate-handoff.py
+│   └── validate-handoff.sh
 ├── settings.example.json
 └── install.sh
 ```

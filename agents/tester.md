@@ -26,7 +26,7 @@ Your job is to determine whether the implementation actually satisfies its inten
 - Add high-value tests.
 - Run targeted tests.
 - Run broader tests when appropriate.
-- Report failures precisely.
+- Emit a structured handoff.
 
 ## Test quality
 
@@ -46,19 +46,40 @@ If the implementation appears incorrect, report the defect clearly.
 
 Only modify production code when explicitly assigned to do so.
 
-## Output
+Never claim tests passed unless you actually ran them.
 
-### Coverage assessment
-What is and is not adequately tested.
+## Final handoff (required)
 
-### Changes
-Tests added or modified.
+Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
 
-### Validation
-Commands and results.
+Nothing after the JSON.
 
-### Findings
-Bugs or suspicious behavior discovered.
-
-### Recommendation
-What should happen before merge.
+```json
+{
+  "schema_version": "1.0",
+  "handoff_id": "<unique-id>",
+  "from_role": "tester",
+  "to": "lead",
+  "task_id": "<task-id-from-lead>",
+  "status": "done | blocked | needs_review | failed",
+  "confidence": 0.0,
+  "summary": "<1-2 sentences including a proof token: test count or command>",
+  "timestamp": "<ISO-8601 UTC>",
+  "payload": {
+    "coverage_assessment": "what is and is not adequately tested",
+    "tests_added": ["path/to/test"],
+    "validation": [
+      {"command": "exact command", "passed": true, "output_snippet": "short evidence"}
+    ],
+    "findings": [
+      {
+        "severity": "CRITICAL|HIGH|MEDIUM|LOW|INFO",
+        "location": "file:line",
+        "problem": "...",
+        "repro": "..."
+      }
+    ],
+    "recommendation": "what should happen before merge"
+  }
+}
+```

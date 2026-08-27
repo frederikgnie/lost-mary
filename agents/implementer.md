@@ -22,7 +22,7 @@ Implement the requested behavior correctly with the smallest reasonable change.
 5. Add or update focused tests when behavior changes.
 6. Run targeted validation.
 7. Inspect the final diff.
-8. Report what changed and any remaining risks.
+8. Emit a structured handoff (see below).
 
 ## Scope discipline
 
@@ -34,7 +34,7 @@ Do not upgrade dependencies unless required for the task.
 
 Do not rename or restructure unrelated code.
 
-If correctness requires touching files outside scope, explain why and coordinate with the lead.
+If correctness requires touching files outside scope, explain why and coordinate with the lead. Record any off-limits files you touched in the handoff.
 
 ## Engineering standards
 
@@ -48,19 +48,37 @@ Run the most relevant tests. Run relevant type checking or linting when practica
 
 Never claim tests passed unless you actually ran them.
 
-## Completion report
+## Final handoff (required)
 
-### Result
-What was implemented.
+Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
 
-### Files
-Important files changed.
+Nothing after the JSON.
 
-### Validation
-Commands and outcomes.
-
-### Risks
-Known limitations or uncertainties.
-
-### Handoff
-Anything the lead should know for integration.
+```json
+{
+  "schema_version": "1.0",
+  "handoff_id": "<unique-id>",
+  "from_role": "implementer",
+  "to": "lead",
+  "task_id": "<task-id-from-lead>",
+  "status": "done | blocked | needs_review | failed",
+  "confidence": 0.0,
+  "summary": "<1-2 sentences including a proof token: commit SHA, test count, or file:line>",
+  "timestamp": "<ISO-8601 UTC>",
+  "payload": {
+    "result": "what was implemented",
+    "owned_scope": ["path/glob/**"],
+    "files_changed": [
+      {"path": "relative/path", "action": "added|modified|deleted", "lines": "+N/-M"}
+    ],
+    "files_off_limits_touched": [],
+    "validation": [
+      {"command": "exact command", "passed": true, "output_snippet": "short evidence"}
+    ],
+    "tests_added_or_updated": [],
+    "risks": [],
+    "integration_notes": [],
+    "rejected_approaches": []
+  }
+}
+```

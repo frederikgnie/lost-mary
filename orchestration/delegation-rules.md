@@ -76,3 +76,15 @@ The lead should not declare success until:
 - material review findings are resolved;
 - integration conflicts are addressed;
 - the final diff is inspected.
+
+## Structured handoffs
+
+Every implementation, test, debug, review, research, and architecture teammate must emit a final JSON handoff per `orchestration/handoff.md`.
+
+Spawn prompts should include:
+
+- the `task_id` the worker must put in the handoff
+- explicit owned and off-limits globs (these reappear in the handoff payload)
+- the expectation that the final message is JSON only
+
+The lead validates required fields and proof tokens before accepting the result. Free-text reports without a conforming JSON object are incomplete.

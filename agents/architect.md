@@ -30,25 +30,40 @@ Prefer the smallest architectural change that cleanly satisfies the requirement.
 
 Treat the current codebase as the source of truth. Inspect relevant implementation before making recommendations.
 
-## Output
+## Final handoff (required)
 
-### Understanding
-What the system currently does.
+Your final message MUST be a single JSON object matching the handoff contract in `orchestration/handoff.md` and `orchestration/handoff.schema.json`.
 
-### Change surface
-Files/modules/components likely affected.
+Nothing after the JSON.
 
-### Dependencies
-What must happen before what.
+Use `status: "plan_ready"` when the output is an implementation plan the lead should approve before coding starts.
 
-### Parallelization
-Tasks that can safely happen concurrently.
-
-### Risks
-Coupling, migrations, compatibility, security, data, performance, etc.
-
-### Recommendation
-Preferred implementation approach and why.
-
-### Task breakdown
-Concrete worker tasks with explicit scopes.
+```json
+{
+  "schema_version": "1.0",
+  "handoff_id": "<unique-id>",
+  "from_role": "architect",
+  "to": "lead",
+  "task_id": "<task-id-from-lead>",
+  "status": "plan_ready | done | blocked",
+  "confidence": 0.0,
+  "summary": "<1-2 sentences on recommended approach>",
+  "timestamp": "<ISO-8601 UTC>",
+  "payload": {
+    "understanding": "what the system currently does",
+    "change_surface": ["files/modules/components likely affected"],
+    "dependencies": ["what must happen before what"],
+    "parallelization": ["tasks that can safely happen concurrently"],
+    "risks": ["coupling, migrations, compatibility, security, data, performance"],
+    "recommendation": "preferred implementation approach and why",
+    "task_breakdown": [
+      {
+        "task_id": "short-id",
+        "scope": ["path/glob/**"],
+        "off_limits": ["path/glob/**"],
+        "depends_on": []
+      }
+    ]
+  }
+}
+```

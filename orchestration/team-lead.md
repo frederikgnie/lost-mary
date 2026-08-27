@@ -102,3 +102,16 @@ Return a concise summary of:
 - any unresolved risks or follow-ups.
 
 Do not dump internal agent transcripts unless asked.
+
+## 8. Structured handoffs
+
+Every specialist must end with a JSON handoff matching `orchestration/handoff.schema.json`. See `orchestration/handoff.md`.
+
+Lead rules:
+
+- Do not mark a task complete until a valid handoff arrives with an acceptable `status`.
+- Prefer the JSON over any prose the agent also emitted.
+- Re-run or spot-check the proof token in `summary` before integrating.
+- If `payload.files_off_limits_touched` is non-empty, treat as a scope violation until resolved.
+- For high-risk work, require a `plan_ready` handoff before allowing implementation.
+- When reporting to the user, summarize from the handoffs; do not dump raw agent transcripts unless asked.
