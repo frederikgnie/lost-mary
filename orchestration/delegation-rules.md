@@ -65,9 +65,9 @@ Every implementation teammate prompt should state:
 3. files/directories owned;
 4. files/directories explicitly off-limits;
 5. dependencies;
-6. acceptance criteria;
+6. **acceptance predicate** (`Done means: …` — observable check);
 7. validation expected;
-8. required handoff information.
+8. required handoff information (JSON only; `task_id`).
 
 Bad:
 
@@ -75,7 +75,7 @@ Bad:
 
 Good:
 
-> Implement subscription lifecycle handling. Own `src/billing/**` and `tests/billing/**`. Do not modify frontend code, migrations, or package dependencies. Preserve existing public API compatibility. Add regression tests and run the billing test suite. Report files changed, commands run, results, and integration concerns.
+> Implement subscription lifecycle handling. Own `src/billing/**` and `tests/billing/**`. Do not modify frontend code, migrations, or package dependencies. Done means: billing unit tests pass and POST /subscribe rejects null planId. Add regression tests and run the billing test suite. Final message is handoff JSON only with task_id billing-backend.
 
 ## Dependency management
 

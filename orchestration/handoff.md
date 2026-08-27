@@ -155,9 +155,13 @@ Debugger additionally requires: `failure`, `reproduction`, `root_cause`, `fix`.
 }
 ```
 
+## Acceptance predicate
+
+The lead defines a checkable “done means…” before implementation. Put it in the spawn prompt. Agents should aim proof tokens and `validation` entries at that predicate. The lead does not mark the overall task complete until the predicate holds under re-check—not merely until a handoff says `done`.
+
 ## Lead rules
 
-1. Do not mark a task complete until a valid handoff JSON arrives with `status` in `{done, needs_review}` (or `plan_ready` when a plan gate is required).
+1. Do not mark a task complete until a valid handoff JSON arrives with `status` in `{done, needs_review}` (or `plan_ready` when a plan gate is required) **and** the acceptance predicate still holds.
 2. Prefer the JSON over any prose the agent also emitted.
 3. Re-run or spot-check the proof token before integrating.
 4. If `files_off_limits_touched` is non-empty, treat as scope violation until explained.

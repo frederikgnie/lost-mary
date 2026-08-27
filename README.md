@@ -14,6 +14,8 @@ A reusable, team-aware Claude Code setup for software engineering.
 - A short threat model with a pre-spawn trust check for untrusted input.
 - Optional cost/stall signals on handoffs (`tokens_used`, `attempts`, `stop_reason`).
 - A capability declaration so the library can degrade when Claude Code changes.
+- Lean playbooks and principles (routing + quality gates without a large skill tree).
+- Acceptance predicates (`Done means: …`) on spawn prompts and lead completion checks.
 
 ## Layout
 
@@ -35,12 +37,18 @@ A reusable, team-aware Claude Code setup for software engineering.
 │   ├── team-lead.md
 │   ├── delegation-rules.md
 │   ├── worktree-rules.md
+│   ├── playbooks.md
+│   ├── principles.md
 │   ├── handoff.md
 │   └── handoff.schema.json
 ├── scripts/
 │   ├── validate-handoff.py
 │   ├── validate-handoff.sh
 │   └── validate-handoff.ps1
+├── tests/
+│   └── handoff-fixtures/
+├── .github/workflows/
+│   └── handoff-contract.yml
 ├── settings.example.json
 ├── install.sh
 └── install.ps1

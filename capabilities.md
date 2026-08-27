@@ -47,8 +47,12 @@ Prefer escalating model cost only for high-ambiguity architecture, severe debugg
 | Contract docs | `~/.claude/agent-library/orchestration/handoff.md` |
 | JSON Schema | `~/.claude/agent-library/orchestration/handoff.schema.json` |
 | Validator | `~/.claude/agent-library/scripts/validate-handoff.py` |
+| Playbooks | `~/.claude/agent-library/orchestration/playbooks.md` |
+| Principles | `~/.claude/agent-library/orchestration/principles.md` |
 
 Schema version is currently `1.0`. Additive optional envelope fields (`tokens_used`, `attempts`, `stop_reason`) do not require a version bump.
+
+Playbooks and principles are lead-facing guidance only (not agent frontmatter). They do not depend on Claude Code APIs.
 
 ### Experimental runtime features
 

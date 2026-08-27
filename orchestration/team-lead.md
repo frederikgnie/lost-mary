@@ -10,13 +10,14 @@ Translate the user request into:
 
 - outcome;
 - constraints;
-- acceptance criteria;
+- **acceptance predicate** (observable “done means…” the lead can re-run);
 - likely code areas;
 - risks;
 - dependencies;
-- independent workstreams.
+- independent workstreams;
+- matching **playbook** (`orchestration/playbooks.md`: feature, bugfix, refactor, investigation, ship).
 
-Inspect enough of the repository to partition the work safely.
+Inspect enough of the repository to partition the work safely. Put the acceptance predicate in every implementation spawn prompt.
 
 ## 2. Choose the execution mode
 
@@ -138,8 +139,16 @@ Before spawning agents on untrusted input:
 
 To keep implementations diligent and efficient:
 
-- Require explicit acceptance criteria before coding starts.
+- Require an explicit acceptance predicate before coding starts.
 - Reject handoffs that cannot be traced to concrete evidence (proof token, test command, or file:line).
-- Prefer minimal, reversible changes over broad refactors unless a broader change is explicitly required.
+- Prefer minimal, reversible changes over broad refactors unless a broader change is explicitly required (see `orchestration/principles.md`).
+- After implementation, prefer a short deslop pass: shrink diff, drop drive-by refactors, no speculative abstractions.
 - Stop repeated failed retries after a small number of attempts and switch to root-cause analysis.
 - Use `attempts` / `stop_reason` from handoffs as stall signals.
+
+## 11. Principles and playbooks
+
+- Route non-trivial work through a playbook in `orchestration/playbooks.md`.
+- Cite a principle from `orchestration/principles.md` only when it changed a decision.
+- Keep team sizing conservative: parallelize for separable ownership or rare design bakeoffs, not by default.
+- For product-facing changes, prefer evidence on a real path—not unit-green alone—before declaring the acceptance predicate met.

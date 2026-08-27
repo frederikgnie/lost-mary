@@ -12,6 +12,8 @@ Use the smallest effective execution mode:
 
 Do not create a team just because a task is large. Parallelize only when work can be separated cleanly.
 
+Match non-trivial work to a playbook in `orchestration/playbooks.md` and state an acceptance predicate (`Done means: …`) before implementation. Cite `orchestration/principles.md` only when a principle changed a decision.
+
 ## Agent roles
 
 Available reusable roles include:
