@@ -127,6 +127,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             throw "Invalid fixture unexpectedly passed PowerShell wrapper validation."
           }
+          $global:LASTEXITCODE = 0
       - name: PowerShell wrapper accepts piped stdin
         # PowerShell hands pipeline input to $input, not to native commands
         # inside the script. This form was documented but broken; keep it tested.
@@ -136,6 +137,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Wrapper rejected a valid handoff on stdin." }
           Get-Content ./tests/handoff-fixtures-runtime-invalid/weak-proof-colon-only.json -Raw | ./scripts/validate-handoff.ps1 -
           if ($LASTEXITCODE -eq 0) { throw "Wrapper accepted a weak proof token on stdin." }
+          $global:LASTEXITCODE = 0
       - name: Hooks survive a PowerShell pipe (UTF-8 BOM)
         # PowerShell prepends a BOM when piping to a native exe. Both hooks fail
         # open on unparseable stdin, so this silently disabled enforcement.
@@ -147,6 +149,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Bash guard blocked read-only inspection (exit $LASTEXITCODE)." }
           '{"agent_type":"reviewer","last_assistant_message":"looks fine to me."}' | python ./scripts/check-handoff-hook.py
           if ($LASTEXITCODE -ne 2) { throw "Handoff hook failed to block prose through a PowerShell pipe (exit $LASTEXITCODE)." }
+          $global:LASTEXITCODE = 0
       - name: Run hook enforcement tests on Windows
         shell: pwsh
         run: python tests/test-hooks.py
@@ -162,7 +165,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.claude"
           printf '# Pre-existing user rules\nSENTINEL-DO-NOT-LOSE\n' > "$HOME/.claude/CLAUDE.md"
-          ./install.sh
+          bash ./install.sh
           grep -qF 'SENTINEL-DO-NOT-LOSE' "$HOME/.claude/CLAUDE.md"
           grep -qF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md"
           ls "$HOME/.claude/" | grep -q 'CLAUDE.md.backup.'
@@ -195,17 +198,17 @@ jobs:
       - name: Install is idempotent (no duplicate import line)
         run: |
           set -euo pipefail
-          ./install.sh
+          bash ./install.sh
           count="$(grep -cF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md")"
           test "$count" = "1" || { echo "ERROR: import line appears $count times" >&2; exit 1; }
       - name: --verify passes on a clean install
-        run: ./install.sh --verify
+        run: bash ./install.sh --verify
       - name: --verify detects a missing import line
         run: |
           set -euo pipefail
           grep -vF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md" > /tmp/cm
           mv /tmp/cm "$HOME/.claude/CLAUDE.md"
-          if ./install.sh --verify; then
+          if bash ./install.sh --verify; then
             echo "ERROR: --verify passed while global-CLAUDE.md was inert" >&2
             exit 1
           fi
@@ -243,3 +246,4 @@ jobs:
           (Get-Content $p) | Where-Object { $_ -notmatch 'agent-library/global-CLAUDE' } | Set-Content $p -Encoding utf8
           ./install.ps1 -Verify
           if ($LASTEXITCODE -eq 0) { throw '-Verify passed while global-CLAUDE.md was inert.' }
+          $global:LASTEXITCODE = 0
