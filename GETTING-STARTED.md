@@ -25,7 +25,7 @@ Want to see what it would do first? Add `-DryRun` / `--dry-run`.
 This does four things:
 
 1. Copies the 7 agent roles into `~/.claude/agents/`.
-2. Installs the `/lost_mary` skill into `~/.claude/skills/lost_mary/`.
+2. Installs the `/lost-mary` skill into `~/.claude/skills/lost-mary/`.
 3. Copies the contract, validator, and hook scripts into `~/.claude/agent-library/`.
 4. Adds one line to `~/.claude/CLAUDE.md`:
    `@~/.claude/agent-library/global-CLAUDE.md`
@@ -76,12 +76,12 @@ echo '{"agent_type":"reviewer","tool_input":{"command":"git diff HEAD~1"}}' | py
 If (b) returns 0 instead of 2, your hook path or interpreter is wrong — fix that
 before relying on the guard. See §8.
 
-## 4. Daily use: `/lost_mary`
+## 4. Daily use: `/lost-mary`
 
 This is the entry point. Instead of remembering the operating model, invoke it:
 
 ```text
-/lost_mary add idempotency keys to the payout webhook
+/lost-mary add idempotency keys to the payout webhook
 ```
 
 It makes the session state an acceptance predicate before writing code, pick the
@@ -175,7 +175,7 @@ Validate a handoff by hand:
 | Specialist keeps getting blocked at the end | it's emitting prose, not JSON | the block message says what's missing; it should re-emit |
 | A reviewer complains it can't run something | the Bash guard blocked a write | that's working as designed — reviewers propose, they don't apply |
 | `--no-overwrite` left the library inert | that flag skips the import line on purpose | add the printed line to `~/.claude/CLAUDE.md` manually |
-| `/lost_mary` doesn't appear | not restarted, or the underscore is rejected | restart; if still absent rename `~/.claude/skills/lost_mary/` to `lost-mary` and use `/lost-mary` |
+| `/lost-mary` doesn't appear | Claude Code was not restarted after install | restart it; skills are discovered at startup |
 
 ## 9. Honest limits
 

@@ -70,9 +70,7 @@ Frontmatter fields this library relies on:
 
 `$ARGUMENTS` interpolates everything passed after the command name; `$1`/`$2` and `$ARGUMENTS[N]` address positionally.
 
-**`@path` imports do NOT work inside a skill body.** `@`-style includes are a `CLAUDE.md` feature. In a skill, `@~/.claude/...` is literal text, so an "import" written that way silently ships as prose instead of loading the file — the skill appears to work while carrying none of the referenced content. `skills/lost_mary/SKILL.md` therefore inlines its decision procedure and instructs explicit reads of absolute paths where a step needs the full reference. If you extend it, do not add `@` imports.
-
-Skill naming convention is kebab-case in Claude Code's documentation. `lost_mary` uses an underscore, which no documented rule forbids but which is off-convention; if it stops resolving, rename the directory to `lost-mary`.
+**`@path` imports do NOT work inside a skill body.** `@`-style includes are a `CLAUDE.md` feature. In a skill, `@~/.claude/...` is literal text, so an "import" written that way silently ships as prose instead of loading the file — the skill appears to work while carrying none of the referenced content. `skills/lost-mary/SKILL.md` therefore inlines its decision procedure and instructs explicit reads of absolute paths where a step needs the full reference. If you extend it, do not add `@` imports.
 
 A skill invoked with `/name` stays in context for the remainder of the session, so its token cost is paid once per session, not per turn. Keep the body compressed for that reason.
 

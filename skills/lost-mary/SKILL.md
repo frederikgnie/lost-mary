@@ -1,5 +1,5 @@
 ---
-name: lost_mary
+name: lost-mary
 description: Run a task under the agent-library operating model - playbook routing, an acceptance predicate before any code, the smallest viable execution mode, and structured handoffs gated on re-checkable evidence.
 argument-hint: [what you want done]
 disable-model-invocation: true
