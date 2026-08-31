@@ -158,27 +158,39 @@ jobs:
 
   installer-posix:
     # The installer must leave ~/.claude/CLAUDE.md importing global-CLAUDE.md, or
-    # the operating rules never load. Runner HOME is disposable, so this is safe.
+    # the operating rules never load.
+    #
+    # HERMETIC BY CONSTRUCTION. These steps used to write to the real $HOME,
+    # which is fine on a disposable runner and destroys a developer's Claude
+    # config the moment anyone runs a step locally to debug CI. That happened.
+    # Every step now points HOME at a sandbox inside the workspace and asserts
+    # the sandbox is not the real HOME before writing anything, so these steps
+    # are safe to copy-paste and run on a workstation.
     runs-on: ubuntu-latest
+    env:
+      FAKE_HOME: ${{ github.workspace }}/.testhome
     steps:
       - uses: actions/checkout@v4
       - name: Pre-existing global CLAUDE.md must be preserved
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.claude"
-          printf '# Pre-existing user rules\nSENTINEL-DO-NOT-LOSE\n' > "$HOME/.claude/CLAUDE.md"
-          bash ./install.sh
-          grep -qF 'SENTINEL-DO-NOT-LOSE' "$HOME/.claude/CLAUDE.md"
-          grep -qF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md"
-          ls "$HOME/.claude/" | grep -q 'CLAUDE.md.backup.'
+          test -n "${FAKE_HOME:-}"
+          test "$FAKE_HOME" != "$HOME" || { echo "ERROR: sandbox equals real HOME; refusing" >&2; exit 1; }
+          rm -rf "$FAKE_HOME"
+          mkdir -p "$FAKE_HOME/.claude"
+          printf '# Pre-existing user rules\nSENTINEL-DO-NOT-LOSE\n' > "$FAKE_HOME/.claude/CLAUDE.md"
+          HOME="$FAKE_HOME" bash ./install.sh
+          grep -qF 'SENTINEL-DO-NOT-LOSE' "$FAKE_HOME/.claude/CLAUDE.md"
+          grep -qF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md"
+          ls "$FAKE_HOME/.claude/" | grep -q 'CLAUDE.md.backup.'
           echo "preserved + imported + backed up"
       - name: Agents and hook scripts landed
         run: |
           set -euo pipefail
-          test -f "$HOME/.claude/agents/reviewer.md"
-          test -f "$HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
-          test -f "$HOME/.claude/agent-library/scripts/check-handoff-hook.py"
-          test -x "$HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
+          test -f "$FAKE_HOME/.claude/agents/reviewer.md"
+          test -f "$FAKE_HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
+          test -f "$FAKE_HOME/.claude/agent-library/scripts/check-handoff-hook.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
       - name: Skills landed as slash commands
         run: |
           set -euo pipefail
@@ -186,9 +198,9 @@ jobs:
           found=0
           for d in skills/*/; do
             name="$(basename "$d")"
-            test -f "$HOME/.claude/skills/$name/SKILL.md" \
+            test -f "$FAKE_HOME/.claude/skills/$name/SKILL.md" \
               || { echo "ERROR: skill $name did not install" >&2; exit 1; }
-            cmp -s "$d/SKILL.md" "$HOME/.claude/skills/$name/SKILL.md" \
+            cmp -s "$d/SKILL.md" "$FAKE_HOME/.claude/skills/$name/SKILL.md" \
               || { echo "ERROR: installed skill $name differs from source" >&2; exit 1; }
             found=$((found + 1))
           done
@@ -200,52 +212,90 @@ jobs:
       - name: Install is idempotent (no duplicate import line)
         run: |
           set -euo pipefail
-          bash ./install.sh
-          count="$(grep -cF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md")"
+          HOME="$FAKE_HOME" bash ./install.sh
+          count="$(grep -cF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md")"
           test "$count" = "1" || { echo "ERROR: import line appears $count times" >&2; exit 1; }
       - name: --verify passes on a clean install
-        run: bash ./install.sh --verify
+        run: HOME="$FAKE_HOME" bash ./install.sh --verify
       - name: --verify detects a missing import line
         run: |
           set -euo pipefail
-          grep -vF '@~/.claude/agent-library/global-CLAUDE.md' "$HOME/.claude/CLAUDE.md" > /tmp/cm
-          mv /tmp/cm "$HOME/.claude/CLAUDE.md"
-          if bash ./install.sh --verify; then
+          grep -vF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md" > "$FAKE_HOME/cm"
+          mv "$FAKE_HOME/cm" "$FAKE_HOME/.claude/CLAUDE.md"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
             echo "ERROR: --verify passed while global-CLAUDE.md was inert" >&2
             exit 1
           fi
           echo "drift correctly detected"
 
   installer-windows:
+    # Also hermetic - see the comment on installer-posix.
+    #
+    # PowerShell resolves $HOME once at session start from the FileSystem
+    # provider, so it cannot be reassigned mid-script. The installer is
+    # therefore driven in a CHILD pwsh with the home env vars overridden, and
+    # the child is GATED: it must report $HOME inside the sandbox before any
+    # destructive step runs. All scenarios live in one step because each new
+    # pwsh step would otherwise have to repeat that setup, and a step that
+    # forgot it would silently target the real HOME.
     runs-on: windows-latest
+    env:
+      FAKE_HOME: ${{ github.workspace }}\.testhome
     steps:
       - uses: actions/checkout@v4
-      - name: Pre-existing global CLAUDE.md must be preserved
+      - name: Installer scenarios in a sandboxed HOME
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path (Join-Path $HOME '.claude') | Out-Null
-          Set-Content -Path (Join-Path $HOME '.claude/CLAUDE.md') -Value "# Pre-existing user rules`nSENTINEL-DO-NOT-LOSE" -Encoding utf8
-          ./install.ps1
-          $md = Get-Content (Join-Path $HOME '.claude/CLAUDE.md') -Raw
+          $ErrorActionPreference = 'Stop'
+          $fake = $env:FAKE_HOME
+          if (-not $fake) { throw 'FAKE_HOME not set.' }
+          if ($fake -eq $HOME) { throw 'Sandbox equals real HOME; refusing.' }
+
+          Remove-Item -Recurse -Force $fake -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Join-Path $fake '.claude') | Out-Null
+          Set-Content -Path (Join-Path $fake '.claude/CLAUDE.md') -Value "# Pre-existing user rules`nSENTINEL-DO-NOT-LOSE" -Encoding utf8
+
+          # Child pwsh must inherit these at startup to compute $HOME from them.
+          $env:USERPROFILE = $fake
+          $env:HOMEDRIVE = ''
+          $env:HOMEPATH = ''
+          $env:HOME = $fake
+
+          $probe = & pwsh -NoProfile -Command 'Write-Output $HOME'
+          if ($probe.Trim() -ne $fake) { throw "Sandbox ineffective: child HOME = '$probe', expected '$fake'. Refusing to run the installer." }
+          Write-Host "sandbox confirmed: $probe"
+
+          function Invoke-Installer([string]$Args = '') {
+            & pwsh -NoProfile -Command "& './install.ps1' $Args"
+            return $LASTEXITCODE
+          }
+
+          Write-Host '--- pre-existing CLAUDE.md must be preserved ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Installer failed.' }
+          $mdPath = Join-Path $fake '.claude/CLAUDE.md'
+          $md = Get-Content $mdPath -Raw
           if ($md -notmatch 'SENTINEL-DO-NOT-LOSE') { throw 'Existing user content was lost.' }
           if ($md -notmatch [regex]::Escape('@~/.claude/agent-library/global-CLAUDE.md')) { throw 'Import line missing.' }
-          if (-not (Get-ChildItem (Join-Path $HOME '.claude') -Filter 'CLAUDE.md.backup.*')) { throw 'No backup created.' }
-      - name: Install is idempotent
-        shell: pwsh
-        run: |
-          ./install.ps1
-          $n = (Select-String -Path (Join-Path $HOME '.claude/CLAUDE.md') -Pattern 'agent-library/global-CLAUDE.md' -SimpleMatch).Count
+          if (-not (Get-ChildItem (Join-Path $fake '.claude') -Filter 'CLAUDE.md.backup.*')) { throw 'No backup created.' }
+
+          Write-Host '--- skills landed ---'
+          Get-ChildItem ./skills -Directory | ForEach-Object {
+            $installed = Join-Path $fake ".claude/skills/$($_.Name)/SKILL.md"
+            if (-not (Test-Path $installed)) { throw "Skill $($_.Name) did not install." }
+            if ((Get-FileHash $installed).Hash -ne (Get-FileHash (Join-Path $_.FullName 'SKILL.md')).Hash) {
+              throw "Installed skill $($_.Name) differs from source."
+            }
+          }
+
+          Write-Host '--- idempotent ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Second install failed.' }
+          $n = (Select-String -Path $mdPath -Pattern 'agent-library/global-CLAUDE.md' -SimpleMatch).Count
           if ($n -ne 1) { throw "Import line appears $n times, expected 1." }
-      - name: -Verify passes on a clean install
-        shell: pwsh
-        run: |
-          ./install.ps1 -Verify
-          if ($LASTEXITCODE -ne 0) { throw "-Verify failed on a clean install." }
-      - name: -Verify detects a missing import line
-        shell: pwsh
-        run: |
-          $p = Join-Path $HOME '.claude/CLAUDE.md'
-          (Get-Content $p) | Where-Object { $_ -notmatch 'agent-library/global-CLAUDE' } | Set-Content $p -Encoding utf8
-          ./install.ps1 -Verify
-          if ($LASTEXITCODE -eq 0) { throw '-Verify passed while global-CLAUDE.md was inert.' }
-          $global:LASTEXITCODE = 0
+
+          Write-Host '--- -Verify passes clean ---'
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on a clean install.' }
+
+          Write-Host '--- -Verify detects a missing import ---'
+          (Get-Content $mdPath) | Where-Object { $_ -notmatch 'agent-library/global-CLAUDE' } | Set-Content $mdPath -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed while global-CLAUDE.md was inert.' }
+          Write-Host 'drift correctly detected'

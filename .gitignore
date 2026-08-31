@@ -63,3 +63,6 @@ scratch/
 *.tmp
 *.orig
 *.rej
+
+# CI installer sandbox (hermetic HOME for installer tests)
+.testhome/
