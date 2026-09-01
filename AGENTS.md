@@ -82,3 +82,25 @@ Claude Code's own current documentation is the authority for runtime behavior an
 Every specialist agent ends with a JSON handoff defined by `~/.claude/agent-library/orchestration/handoff.schema.json` and documented in `~/.claude/agent-library/orchestration/handoff.md`.
 
 The lead treats the JSON as the interface. Free-text outside the handoff is ignored for task gating. Proof tokens in `summary` make claims checkable.
+
+## Contributing to this repository (GitHub account)
+
+This repository lives under the personal `frederikgnie` GitHub account, not the work account. Commits and `gh` operations must use that identity.
+
+**Commit identity** is set per clone, because a repository cannot carry it for you:
+
+```sh
+git config --local user.name  "frederikgnie"
+git config --local user.email "60433760+frederikgnie@users.noreply.github.com"
+```
+
+**Push and `gh` operations** require the personal account to be the active one:
+
+```sh
+gh auth switch --hostname github.com --user frederikgnie   # before pushing
+gh auth switch --hostname github.com --user fgn-odigo      # after, to avoid cross-account surprises
+```
+
+An agent working in this repository should perform that switch itself rather than asking, and switch back when finished.
+
+**Why this is not automatic.** `gh auth git-credential` serves only the token of the *active* account; it does not select an account from the username in the remote URL. Rewriting the remote as `https://frederikgnie@github.com/...` therefore does not work — the helper returns nothing and Git falls through to an interactive password prompt. With the work account active, this repository reads as `Repository not found`, because a private repo is invisible to an account that cannot see it. The only mechanisms giving genuinely per-repository authentication are an SSH host alias with a dedicated key registered on the personal account, or a stored per-repo token. Neither is set up here, so the account switch is the supported path.
