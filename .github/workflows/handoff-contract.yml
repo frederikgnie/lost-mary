@@ -283,8 +283,14 @@ jobs:
           if ($probe.Trim() -ne $fake) { throw "Sandbox ineffective: child HOME = '$probe', expected '$fake'. Refusing to run the installer." }
           Write-Host "sandbox confirmed: $probe"
 
-          function Invoke-Installer([string]$Args = '') {
-            & pwsh -NoProfile -Command "& './install.ps1' $Args"
+          function Invoke-Installer([string]$InstallerArgs = '') {
+            # Out-Host is load-bearing: a PowerShell function returns ALL
+            # pipeline output, so without it the child's stdout pollutes the
+            # "return value" and (Invoke-Installer) -ne 0 is truthy even on a
+            # successful run. It also keeps installer output visible in the
+            # job log. ($InstallerArgs, not $Args, which shadows the automatic
+            # variable.)
+            & pwsh -NoProfile -Command "& './install.ps1' $InstallerArgs" | Out-Host
             return $LASTEXITCODE
           }
 
