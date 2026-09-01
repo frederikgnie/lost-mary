@@ -227,6 +227,24 @@ jobs:
             exit 1
           fi
           echo "drift correctly detected"
+      - name: Installer converges a duplicated import line
+        # Reproduces observed real-world drift: the import line hand-pasted
+        # extra times, with CRLF endings. The installer must dedupe to one and
+        # --verify must flag the duplicated state.
+        run: |
+          set -euo pipefail
+          IMPORT='@~/.claude/agent-library/global-CLAUDE.md'
+          HOME="$FAKE_HOME" bash ./install.sh
+          printf '\r\n%s\r\n\r\n%s\r\n' "$IMPORT" "$IMPORT" >> "$FAKE_HOME/.claude/CLAUDE.md"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with a duplicated import line" >&2
+            exit 1
+          fi
+          HOME="$FAKE_HOME" bash ./install.sh
+          count="$(grep -cF -- "$IMPORT" "$FAKE_HOME/.claude/CLAUDE.md")"
+          test "$count" = "1" || { echo "ERROR: import appears $count times after dedupe" >&2; exit 1; }
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+          echo "duplicate converged to one and verify is clean"
 
   installer-windows:
     # Also hermetic - see the comment on installer-posix.
@@ -299,3 +317,13 @@ jobs:
           (Get-Content $mdPath) | Where-Object { $_ -notmatch 'agent-library/global-CLAUDE' } | Set-Content $mdPath -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed while global-CLAUDE.md was inert.' }
           Write-Host 'drift correctly detected'
+
+          Write-Host '--- duplicated import is converged ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Reinstall failed.' }
+          Add-Content -Path $mdPath -Value "`r`n@~/.claude/agent-library/global-CLAUDE.md`r`n`r`n@~/.claude/agent-library/global-CLAUDE.md" -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with a duplicated import line.' }
+          if ((Invoke-Installer) -ne 0) { throw 'Dedupe install failed.' }
+          $n = (Select-String -Path $mdPath -Pattern 'agent-library/global-CLAUDE.md' -SimpleMatch).Count
+          if ($n -ne 1) { throw "Import appears $n times after dedupe." }
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after dedupe.' }
+          Write-Host 'duplicate converged to one and verify is clean'

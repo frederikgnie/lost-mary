@@ -27,12 +27,54 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Text, $encoding)
 }
 
+function Get-ImportLineCount {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # Exact-line count, not substring: a mention of the path inside prose must
+    # not satisfy the import requirement. ReadAllLines strips CR/LF endings.
+    $n = 0
+    foreach ($l in [System.IO.File]::ReadAllLines($Path)) {
+        if ($l -eq $ImportLine) { $n++ }
+    }
+    return $n
+}
+
 function Set-LibraryImport {
     # Additive and idempotent: never rewrites the user's own global CLAUDE.md.
+    # Also self-healing: editors and hand-pastes have been observed to duplicate
+    # the import line (the installer itself always checks first). Converge back
+    # to exactly one occurrence rather than merely tolerating the drift.
     if (Test-Path -LiteralPath $ClaudeMd -PathType Leaf) {
         $existing = [System.IO.File]::ReadAllText($ClaudeMd)
-        if ($existing.Contains($ImportLine)) {
+        $count = Get-ImportLineCount -Path $ClaudeMd
+        if ($count -eq 1) {
             Write-Host "Unchanged: import already present in $ClaudeMd"
+            return
+        }
+
+        if ($count -gt 1) {
+            if ($NoOverwrite) {
+                Write-Host "WARNING: import line appears $count times in $ClaudeMd (-NoOverwrite: leaving as is)"
+                return
+            }
+            if ($DryRun) {
+                Write-Host "[dry-run] dedupe import line in $ClaudeMd ($count -> 1, after backup)"
+                return
+            }
+            $backup = "$ClaudeMd.backup.$Timestamp"
+            Write-Host "Backing up existing $ClaudeMd -> $backup"
+            Copy-Item -LiteralPath $ClaudeMd -Destination $backup -Force
+            $newline = "`n"
+            if ($existing.Contains("`r`n")) { $newline = "`r`n" }
+            $seen = $false
+            $kept = foreach ($l in [System.IO.File]::ReadAllLines($ClaudeMd)) {
+                if ($l -eq $ImportLine) {
+                    if ($seen) { continue }
+                    $seen = $true
+                }
+                $l
+            }
+            Write-Utf8NoBom -Path $ClaudeMd -Text (($kept -join $newline) + $newline)
+            Write-Host "Deduplicated import line in $ClaudeMd ($count -> 1)"
             return
         }
 
@@ -68,11 +110,19 @@ function Set-LibraryImport {
 }
 
 function Test-LibraryImport {
-    if ((Test-Path -LiteralPath $ClaudeMd -PathType Leaf) -and
-        ([System.IO.File]::ReadAllText($ClaudeMd)).Contains($ImportLine)) {
-        Write-Host "OK: import present in $ClaudeMd"
-    } else {
+    if (-not (Test-Path -LiteralPath $ClaudeMd -PathType Leaf)) {
+        Write-Host "DRIFT: $ClaudeMd does not exist (global-CLAUDE.md would be inert)"
+        $script:DriftCount++
+        return
+    }
+    $count = Get-ImportLineCount -Path $ClaudeMd
+    if ($count -eq 1) {
+        Write-Host "OK: import present exactly once in $ClaudeMd"
+    } elseif ($count -eq 0) {
         Write-Host "DRIFT: $ClaudeMd does not import $ImportLine (global-CLAUDE.md would be inert)"
+        $script:DriftCount++
+    } else {
+        Write-Host "DRIFT: import line appears $count times in $ClaudeMd (run the installer to dedupe)"
         $script:DriftCount++
     }
 }

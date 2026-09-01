@@ -115,10 +115,40 @@ verify_file() {
   fi
 }
 
+count_import_lines() {
+  # Exact-line count (CRLF-tolerant), not substring count: a commented or
+  # quoted mention of the path must not satisfy the import requirement.
+  awk -v line="$IMPORT_LINE" '{ t = $0; sub(/\r$/, "", t) } t == line { n++ } END { print n + 0 }' "$1"
+}
+
 ensure_import() {
   # Additive and idempotent: never rewrites the user's own global CLAUDE.md.
-  if [[ -f "$CLAUDE_MD" ]] && grep -qF -- "$IMPORT_LINE" "$CLAUDE_MD"; then
-    log "Unchanged: import already present in $CLAUDE_MD"
+  # Also self-healing: editors and hand-pastes have been observed to duplicate
+  # the import line (the installer itself always checks first). Converge back
+  # to exactly one occurrence rather than merely tolerating the drift.
+  local count=0
+  if [[ -f "$CLAUDE_MD" ]]; then
+    count="$(count_import_lines "$CLAUDE_MD")"
+  fi
+  if [[ "$count" -ge 1 ]]; then
+    if [[ "$count" -eq 1 ]]; then
+      log "Unchanged: import already present in $CLAUDE_MD"
+      return 0
+    fi
+    if [[ "$NO_OVERWRITE" -eq 1 ]]; then
+      log "WARNING: import line appears $count times in $CLAUDE_MD (--no-overwrite: leaving as is)"
+      return 0
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[dry-run] dedupe import line in $CLAUDE_MD ($count -> 1, after backup)"
+      return 0
+    fi
+    cp "$CLAUDE_MD" "${CLAUDE_MD}.backup.${TIMESTAMP}"
+    log "Backing up existing $CLAUDE_MD -> ${CLAUDE_MD}.backup.${TIMESTAMP}"
+    awk -v line="$IMPORT_LINE" '{ t = $0; sub(/\r$/, "", t) } t == line { if (seen++) next } { print }' \
+      "$CLAUDE_MD" > "${CLAUDE_MD}.dedupe.tmp"
+    mv "${CLAUDE_MD}.dedupe.tmp" "$CLAUDE_MD"
+    log "Deduplicated import line in $CLAUDE_MD ($count -> 1)"
     return 0
   fi
 
@@ -155,10 +185,20 @@ ensure_import() {
 }
 
 verify_import() {
-  if [[ -f "$CLAUDE_MD" ]] && grep -qF -- "$IMPORT_LINE" "$CLAUDE_MD"; then
-    log "OK: import present in $CLAUDE_MD"
-  else
+  if [[ ! -f "$CLAUDE_MD" ]]; then
+    log "DRIFT: $CLAUDE_MD does not exist (global-CLAUDE.md would be inert)"
+    DRIFT_COUNT=$((DRIFT_COUNT + 1))
+    return
+  fi
+  local count
+  count="$(count_import_lines "$CLAUDE_MD")"
+  if [[ "$count" -eq 1 ]]; then
+    log "OK: import present exactly once in $CLAUDE_MD"
+  elif [[ "$count" -eq 0 ]]; then
     log "DRIFT: $CLAUDE_MD does not import $IMPORT_LINE (global-CLAUDE.md would be inert)"
+    DRIFT_COUNT=$((DRIFT_COUNT + 1))
+  else
+    log "DRIFT: import line appears $count times in $CLAUDE_MD (run the installer to dedupe)"
     DRIFT_COUNT=$((DRIFT_COUNT + 1))
   fi
 }
