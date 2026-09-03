@@ -4,6 +4,7 @@ param(
     [switch]$Verify
 )
 
+# Install the agent library (v2) into ~/.claude. See README.md.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -11,12 +12,20 @@ $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DestAgents = Join-Path $HOME '.claude/agents'
 $DestLib = Join-Path $HOME '.claude/agent-library'
 $DestSkills = Join-Path $HOME '.claude/skills'
+$Settings = Join-Path $HOME '.claude/settings.json'
 # Claude Code auto-loads ~/.claude/CLAUDE.md only. global-CLAUDE.md is inert
 # unless that file imports it, so the installer maintains the import line.
 $ClaudeMd = Join-Path $HOME '.claude/CLAUDE.md'
 $ImportLine = '@~/.claude/agent-library/global-CLAUDE.md'
 $Timestamp = Get-Date -Format 'yyyyMMddHHmmss'
 $DriftCount = 0
+
+# What v2 manages under ~/.claude/agent-library.
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'global-CLAUDE.md', 'capabilities.md')
+# What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
+$RetiredAgents = @('architect', 'researcher', 'implementer', 'debugger', 'tester', 'reviewer', 'security-reviewer')
+$RetiredLib = @('orchestration', 'scripts/check-handoff-hook.py', 'scripts/guard-readonly-bash.py', 'scripts/validate-handoff.py', 'scripts/validate-handoff.sh', 'scripts/validate-handoff.ps1')
+$V1HookPattern = 'check-handoff-hook\.py|guard-readonly-bash\.py'
 
 function Write-Utf8NoBom {
     param(
@@ -39,10 +48,8 @@ function Get-ImportLineCount {
 }
 
 function Set-LibraryImport {
-    # Additive and idempotent: never rewrites the user's own global CLAUDE.md.
-    # Also self-healing: editors and hand-pastes have been observed to duplicate
-    # the import line (the installer itself always checks first). Converge back
-    # to exactly one occurrence rather than merely tolerating the drift.
+    # Additive, idempotent and self-healing: converge to exactly one import
+    # line without ever rewriting the user's own content.
     if (Test-Path -LiteralPath $ClaudeMd -PathType Leaf) {
         $existing = [System.IO.File]::ReadAllText($ClaudeMd)
         $count = Get-ImportLineCount -Path $ClaudeMd
@@ -50,7 +57,6 @@ function Set-LibraryImport {
             Write-Host "Unchanged: import already present in $ClaudeMd"
             return
         }
-
         if ($count -gt 1) {
             if ($NoOverwrite) {
                 Write-Host "WARNING: import line appears $count times in $ClaudeMd (-NoOverwrite: leaving as is)"
@@ -77,19 +83,16 @@ function Set-LibraryImport {
             Write-Host "Deduplicated import line in $ClaudeMd ($count -> 1)"
             return
         }
-
         if ($NoOverwrite) {
             Write-Host "Skipped (-NoOverwrite): $ClaudeMd not modified"
             Write-Host "MANUAL ACTION REQUIRED - add this line to $ClaudeMd or the library stays inert:"
             Write-Host "    $ImportLine"
             return
         }
-
         if ($DryRun) {
             Write-Host "[dry-run] append import line to $ClaudeMd (after backup)"
             return
         }
-
         $backup = "$ClaudeMd.backup.$Timestamp"
         Write-Host "Backing up existing $ClaudeMd -> $backup"
         Copy-Item -LiteralPath $ClaudeMd -Destination $backup -Force
@@ -99,7 +102,6 @@ function Set-LibraryImport {
         Write-Host "Appended agent-library import to $ClaudeMd"
         return
     }
-
     if ($DryRun) {
         Write-Host "[dry-run] create $ClaudeMd with import line"
         return
@@ -127,6 +129,25 @@ function Test-LibraryImport {
     }
 }
 
+function Test-Settings {
+    # Read-only. The installer never edits settings.json, but -Verify should say
+    # whether the hooks are wired and whether v1 entries linger.
+    if (-not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
+        Write-Host "NOTE: $Settings not found - hooks are not enabled (see settings.example.windows.json)"
+        return
+    }
+    $text = [System.IO.File]::ReadAllText($Settings)
+    if ($text -match $V1HookPattern) {
+        Write-Host "STALE: $Settings still references v1 hook scripts - replace the hooks block with settings.example.windows.json"
+        $script:DriftCount++
+    }
+    if ($text -match 'pycheck\.py') {
+        Write-Host "OK: $Settings wires pycheck.py"
+    } else {
+        Write-Host "NOTE: $Settings does not wire pycheck.py - hooks not enabled (merge settings.example.windows.json)"
+    }
+}
+
 function Invoke-Step {
     param([scriptblock]$Script, [string]$Description)
     if ($DryRun) {
@@ -141,8 +162,7 @@ function Install-ManagedFile {
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Target
     )
-
-    if ((Test-Path -LiteralPath $Target) -or ((Get-Item -LiteralPath $Target -ErrorAction SilentlyContinue) -is [System.IO.FileSystemInfo])) {
+    if (Test-Path -LiteralPath $Target) {
         $same = $false
         if (Test-Path -LiteralPath $Target -PathType Leaf) {
             try {
@@ -153,22 +173,18 @@ function Install-ManagedFile {
                 $same = $false
             }
         }
-
         if ($same) {
             Write-Host "Unchanged: $Target"
             return
         }
-
         if ($NoOverwrite) {
             Write-Host "Skipped (exists): $Target"
             return
         }
-
         $backup = "$Target.backup.$Timestamp"
         Write-Host "Backing up existing $Target -> $backup"
         Invoke-Step -Description "Move-Item '$Target' '$backup'" -Script { Move-Item -LiteralPath $Target -Destination $backup -Force }
     }
-
     Invoke-Step -Description "Copy-Item '$Source' '$Target'" -Script { Copy-Item -LiteralPath $Source -Destination $Target -Force }
     if ($DryRun) {
         Write-Host "Planned install $([System.IO.Path]::GetFileName($Target))"
@@ -182,13 +198,11 @@ function Test-ManagedFile {
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Target
     )
-
     if (-not (Test-Path -LiteralPath $Target)) {
         Write-Host "MISSING: $Target"
         $script:DriftCount++
         return
     }
-
     try {
         $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash
         $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Target).Hash
@@ -204,10 +218,29 @@ function Test-ManagedFile {
     }
 }
 
+function Retire-Path {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    if (-not (Test-Path -LiteralPath $Target)) { return }
+    if ($NoOverwrite) {
+        Write-Host "WARNING: v1 file still installed: $Target (-NoOverwrite: leaving as is)"
+        return
+    }
+    $moved = "$Target.retired.$Timestamp"
+    Write-Host "Retiring v1 file: $Target -> $moved"
+    Invoke-Step -Description "Move-Item '$Target' '$moved'" -Script { Move-Item -LiteralPath $Target -Destination $moved -Force }
+}
+
+function Test-Retired {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    if (Test-Path -LiteralPath $Target) {
+        Write-Host "STALE: $Target (v1 file still installed; run the installer to retire it)"
+        $script:DriftCount++
+    }
+}
+
 if (-not $Verify) {
     Invoke-Step -Description "New-Item directory '$DestAgents'" -Script { New-Item -ItemType Directory -Path $DestAgents -Force | Out-Null }
     Invoke-Step -Description "New-Item directory '$DestSkills'" -Script { New-Item -ItemType Directory -Path $DestSkills -Force | Out-Null }
-    Invoke-Step -Description "New-Item directory '$DestLib/orchestration'" -Script { New-Item -ItemType Directory -Path (Join-Path $DestLib 'orchestration') -Force | Out-Null }
     Invoke-Step -Description "New-Item directory '$DestLib/scripts'" -Script { New-Item -ItemType Directory -Path (Join-Path $DestLib 'scripts') -Force | Out-Null }
 }
 
@@ -217,6 +250,10 @@ Get-ChildItem -Path (Join-Path $RootDir 'agents') -Filter '*.md' -File | ForEach
     } else {
         Install-ManagedFile -Source $_.FullName -Target (Join-Path $DestAgents $_.Name)
     }
+}
+foreach ($name in $RetiredAgents) {
+    if ($Verify) { Test-Retired -Target (Join-Path $DestAgents "$name.md") }
+    else { Retire-Path -Target (Join-Path $DestAgents "$name.md") }
 }
 
 # Skills become slash commands (~/.claude/skills/<name>/SKILL.md -> /<name>).
@@ -236,55 +273,37 @@ if (Test-Path -LiteralPath $skillRoot) {
     }
 }
 
-if ($Verify) {
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.md') -Target (Join-Path $DestLib 'orchestration/handoff.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.schema.json') -Target (Join-Path $DestLib 'orchestration/handoff.schema.json')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/worktree-rules.md') -Target (Join-Path $DestLib 'orchestration/worktree-rules.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/team-lead.md') -Target (Join-Path $DestLib 'orchestration/team-lead.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/delegation-rules.md') -Target (Join-Path $DestLib 'orchestration/delegation-rules.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/playbooks.md') -Target (Join-Path $DestLib 'orchestration/playbooks.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'orchestration/principles.md') -Target (Join-Path $DestLib 'orchestration/principles.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.py') -Target (Join-Path $DestLib 'scripts/validate-handoff.py')
-    Test-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.sh') -Target (Join-Path $DestLib 'scripts/validate-handoff.sh')
-    Test-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.ps1') -Target (Join-Path $DestLib 'scripts/validate-handoff.ps1')
-    Test-ManagedFile -Source (Join-Path $RootDir 'scripts/guard-readonly-bash.py') -Target (Join-Path $DestLib 'scripts/guard-readonly-bash.py')
-    Test-ManagedFile -Source (Join-Path $RootDir 'scripts/check-handoff-hook.py') -Target (Join-Path $DestLib 'scripts/check-handoff-hook.py')
-    Test-ManagedFile -Source (Join-Path $RootDir 'capabilities.md') -Target (Join-Path $DestLib 'capabilities.md')
-    Test-ManagedFile -Source (Join-Path $RootDir 'global-CLAUDE.md') -Target (Join-Path $DestLib 'global-CLAUDE.md')
-    Test-LibraryImport
+foreach ($rel in $LibFiles) {
+    if ($Verify) { Test-ManagedFile -Source (Join-Path $RootDir $rel) -Target (Join-Path $DestLib $rel) }
+    else { Install-ManagedFile -Source (Join-Path $RootDir $rel) -Target (Join-Path $DestLib $rel) }
+}
+foreach ($rel in $RetiredLib) {
+    if ($Verify) { Test-Retired -Target (Join-Path $DestLib $rel) }
+    else { Retire-Path -Target (Join-Path $DestLib $rel) }
+}
 
+if ($Verify) {
+    Test-LibraryImport
+    Test-Settings
     Write-Host ''
     if ($DriftCount -eq 0) {
         Write-Host 'Verify result: OK (no drift).'
         exit 0
     }
-    Write-Host "Verify result: DRIFT detected in $DriftCount file(s)."
+    Write-Host "Verify result: DRIFT detected in $DriftCount item(s)."
     exit 1
 }
 
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.md') -Target (Join-Path $DestLib 'orchestration/handoff.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/handoff.schema.json') -Target (Join-Path $DestLib 'orchestration/handoff.schema.json')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/worktree-rules.md') -Target (Join-Path $DestLib 'orchestration/worktree-rules.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/team-lead.md') -Target (Join-Path $DestLib 'orchestration/team-lead.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/delegation-rules.md') -Target (Join-Path $DestLib 'orchestration/delegation-rules.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/playbooks.md') -Target (Join-Path $DestLib 'orchestration/playbooks.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'orchestration/principles.md') -Target (Join-Path $DestLib 'orchestration/principles.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.py') -Target (Join-Path $DestLib 'scripts/validate-handoff.py')
-Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.sh') -Target (Join-Path $DestLib 'scripts/validate-handoff.sh')
-Install-ManagedFile -Source (Join-Path $RootDir 'scripts/validate-handoff.ps1') -Target (Join-Path $DestLib 'scripts/validate-handoff.ps1')
-Install-ManagedFile -Source (Join-Path $RootDir 'scripts/guard-readonly-bash.py') -Target (Join-Path $DestLib 'scripts/guard-readonly-bash.py')
-Install-ManagedFile -Source (Join-Path $RootDir 'scripts/check-handoff-hook.py') -Target (Join-Path $DestLib 'scripts/check-handoff-hook.py')
-Install-ManagedFile -Source (Join-Path $RootDir 'capabilities.md') -Target (Join-Path $DestLib 'capabilities.md')
-Install-ManagedFile -Source (Join-Path $RootDir 'global-CLAUDE.md') -Target (Join-Path $DestLib 'global-CLAUDE.md')
 Set-LibraryImport
 
 Write-Host ''
-Write-Host "Claude Code global agents installed in: $DestAgents"
-Write-Host "Claude Code skills (slash commands) installed in: $DestSkills"
-Write-Host "Claude Code shared orchestration assets installed in: $DestLib"
-Write-Host "Operating rules imported into: $ClaudeMd"
+Write-Host "Agents installed in:          $DestAgents  (explore, implement, review)"
+Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr)"
+Write-Host "Hook scripts + rules in:      $DestLib"
+Write-Host "Operating rules imported by:  $ClaudeMd"
 Write-Host ''
-Write-Host 'Hooks are NOT installed automatically (they live in settings.json, which'
-Write-Host "this installer does not touch). Merge the 'hooks' block from"
-Write-Host 'settings.example.json into ~/.claude/settings.json to enable enforcement.'
-Write-Host 'Restart the current Claude Code session only if this is the first time you created the agents directory.'
+Write-Host 'Hooks are NOT installed automatically (they live in settings.json, which this'
+Write-Host "installer never touches). Merge the 'hooks' block from settings.example.windows.json"
+Write-Host 'into ~/.claude/settings.json (use an absolute interpreter path: `python` on PATH is'
+Write-Host 'often the Microsoft Store stub), then restart Claude Code. Run .\install.ps1 -Verify'
+Write-Host 'afterwards; it reports whether the hooks are wired.'

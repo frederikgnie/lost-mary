@@ -66,3 +66,6 @@ scratch/
 
 # CI installer sandbox (hermetic HOME for installer tests)
 .testhome/
+
+# Local scratch used by tests/test-hooks.py (must live outside the system temp dir)
+.tmp-pycheck/

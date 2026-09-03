@@ -1,131 +1,113 @@
-# Capability Declaration
+# Capability declaration (library v2)
 
-This file documents the runtime assumptions of the Claude Code Agent Library so agents and leads can degrade gracefully when Claude Code evolves.
+What this library depends on in the Claude Code runtime, how each dependency
+was verified, and how each piece degrades when the runtime changes. Claude
+Code's own documentation is the authority; this file records what was checked
+and when, so a future upgrade has a checklist instead of a surprise.
 
-Claude Code's own documentation is always the authority for runtime behavior. This library layers opinionated workflow on top of that runtime.
+Last verified: **2026-09-03**, Claude Code **2.1.259**, against
+`code.claude.com/docs` (hooks, sub-agents, skills, settings) and against real
+transcripts on disk.
 
-## Declared surface (library v1)
+## Hooks
 
-### Agent frontmatter
+| Script | Event / matcher | Runtime fields relied on | Status |
+| --- | --- | --- | --- |
+| `scripts/pycheck.py --hook` | `PostToolUse`, matcher `Edit\|Write\|MultiEdit` | `tool_name`, `tool_input.file_path`. Exit 2 = stderr shown to the model (non-blocking; the edit already happened). | Documented |
+| `scripts/check-evidence.py` | `SubagentStop`, matcher on agent type (`implement\|general-purpose`) | `agent_id`, `agent_type`, `transcript_path` (the **parent** session's file), `last_assistant_message`; `stop_hook_active` honoured if present. Exit 2 = block the stop, stderr returned to the subagent. | Fields documented. Exit-2 blocking is documented for `Stop`; for `SubagentStop` it is inferred and must be confirmed live (see log below). |
 
-Agents under `agents/` use Claude Code frontmatter fields:
+**Subagent transcript location** (relied on by `check-evidence.py`, observed,
+not documented): `<parent-dir>/<parent-stem>/subagents/agent-<agent_id>.jsonl`.
+Records are JSONL with `type: assistant|user` and `message.content[]` items of
+type `tool_use` `{id, name, input}` and `tool_result` `{tool_use_id, content,
+is_error}`; a failing Bash result has `is_error: true` and text starting with
+`Exit code N`. The docs call this format internal and unstable. The hook falls
+back to searching the project directory for `agent-<id>.jsonl`, then fails open
+with a notice. `tests/test-hooks.py` pins the observed shape.
 
-| Field | Purpose |
-|-------|---------|
-| `name` | Role identifier |
-| `description` | When to use the role |
-| `tools` | Allowed tools (allow-list) |
-| `disallowedTools` | Explicitly blocked tools (used for read-only roles) |
+**Both hooks fail open, loudly.** An unreadable payload, a missing transcript
+or a missing tool prints a one-line notice on stderr and exits 0. That is the
+right call for availability and the wrong one for enforcement: if Claude Code
+renames a field, the hooks stop acting and only the notice tells you. After an
+upgrade, re-run `tests/test-hooks.py` (catches our bugs, not theirs) **and** the
+live smoke test in `GETTING-STARTED.md` §3 (catches theirs).
 
-If Claude Code renames or removes these fields, update the agent files and this declaration. Do not assume frontmatter is stable forever.
+**Stdin encoding.** Both hooks read `sys.stdin.buffer` and decode `utf-8-sig`.
+PowerShell prepends a UTF-8 BOM when piping to a native executable; text-mode
+stdin on Windows would turn it into mojibake and the hook would fail open.
 
-### Expected tools
+**Shell on Windows.** Hook `command` strings run under Git Bash (`sh -c`) when
+it is installed, otherwise PowerShell. `$HOME` expands in both, which is why
+`settings.example.windows.json` uses `$HOME` rather than `%USERPROFILE%`. The
+interpreter is the trap: `python` on PATH is often the Microsoft Store stub, so
+the Windows example expects an absolute `python.exe` path.
 
-| Tool | Used by | Notes |
-|------|---------|-------|
-| `Read` | all roles | Required |
-| `Grep` | all roles | Required |
-| `Glob` | all roles | Required |
-| `Bash` | all roles | Required for validation and inspection |
-| `Write` | implementer, debugger, tester | Blocked on read-only roles |
-| `Edit` | implementer, debugger, tester | Blocked on read-only roles |
+**Kill switches.** `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
+`"disableAllHooks": true` in `settings.json` disables every hook.
 
-Read-only roles (`architect`, `researcher`, `reviewer`, `security-reviewer`) set `disallowedTools: Write, Edit`.
+**Not used, deliberately.** `permissions.deny` cannot be scoped to one agent
+(documented), and Bash sandboxing is **not available on Windows native**
+(WSL2 only) - hence the read-only roles simply have no Bash. `agent_type` is
+not documented on `PreToolUse`/`PostToolUse` payloads, so nothing here keys on
+it there.
 
-`tools` is an allowlist and `disallowedTools` is a denylist applied first; both are honored in agent frontmatter. Either alone is sufficient to withhold `Write`/`Edit`, so the pair is belt-and-braces by design.
+## Agents (`agents/*.md` -> `~/.claude/agents/`)
 
-**`Bash` is not read-only.** Every role including the review roles retains `Bash` for inspection, and Bash can write files. `permissions.deny` in `settings.json` is session-wide and cannot be scoped to a single subagent, so the only per-role enforcement point is a `PreToolUse` hook. See the Hooks section below. Do not describe the review roles as read-only without that hook installed.
+Frontmatter keys used and their documented values:
 
-If a tool name changes in Claude Code, search-and-replace across `agents/*.md` and reinstall.
+| Key | Used as | Documented values |
+| --- | --- | --- |
+| `name`, `description` | required | `name` matches `^[a-z0-9-]+$` |
+| `tools` | strict allowlist | tool names; omitting `Bash` denies Bash |
+| `model` | `sonnet` (explore), `inherit` (implement, review) | `sonnet`, `opus`, `haiku`, `fable`, `inherit`, or a full model id |
+| `effort` | `medium` (explore), `high` (review) | `low`, `medium`, `high`, `xhigh`, `max` |
 
-### Hooks (enforcement surface)
+Available but not used yet: `hooks` (per-agent hooks; `Stop` maps to
+`SubagentStop` at runtime - would let `implement.md` carry the evidence hook
+itself, at the cost of hard-coding an interpreter path in a shipped file),
+`memory` (`user|project|local`), `permissionMode`, `maxTurns`, `isolation:
+worktree` (the lead passes it per spawn instead), `skills`, `background`.
 
-The library ships two optional hooks. They are the only components the runtime enforces, and they depend on specific hook payload fields:
+`tests/test-agents.py` asserts the tool properties (`explore`/`review` carry
+no mutating tool; `implement` has `Edit`, `Write`, `Bash`), the key set, and
+the report formats the docs promise.
 
-| Hook | Event | Payload fields depended on |
-|------|-------|----------------------------|
-| `scripts/guard-readonly-bash.py` | `PreToolUse` (matcher `Bash`) | `agent_type`, `tool_input.command` |
-| `scripts/check-handoff-hook.py` | `SubagentStop` (matcher `*`) | `agent_type`, `last_assistant_message`, `stop_hook_active` |
+## Skills (`skills/<name>/SKILL.md` -> `~/.claude/skills/<name>/` -> `/<name>`)
 
-Both signal a block with **exit code 2** and put the reason on stderr.
+Keys used: `name`, `description`, `argument-hint`, `disable-model-invocation`
+(`/lost-mary`, `/pr` are user-invoked only; `/validate` may be invoked by the
+model). Substitutions used: `$ARGUMENTS`. Dynamic context used: `` !`command` ``
+lines run in bash (default `shell`) before the skill body reaches the model.
 
-**Silent-degradation risk — read this before trusting the guard.** Both hooks fail *open* when `agent_type` is missing, because a hook that fails closed on an unrecognized payload would wedge every subagent. That is the safe choice for availability and the unsafe one for enforcement: if Claude Code renames or drops `agent_type`, the Bash guard stops protecting the read-only roles and nothing announces it. `tests/test-hooks.py` asserts the block behavior against synthetic payloads, so it will keep passing even if the real payload shape changes. To detect that, confirm a block is still observed in a live session after any Claude Code upgrade — the test suite cannot tell you this.
+`@path` imports do **not** work inside a skill body (CLAUDE.md only); the
+skills instruct explicit reads instead. A skill invoked with `/name` stays in
+context for the rest of the session - bodies are kept short for that reason.
 
-`check-handoff-hook.py` also fails open (with a warning on stderr) when `validate-handoff.py` is not found beside it, so a partial install does not block all work.
+## Settings (`settings.example*.json`)
 
-**Stdin encoding.** Both hooks read `sys.stdin.buffer` and decode `utf-8-sig`, never text mode. Windows text-mode stdin decodes with the locale codepage, so the UTF-8 BOM that PowerShell prepends when piping to a native executable arrives as mojibake rather than `U+FEFF` — the payload then fails to parse and the hook fails open, silently disabling enforcement. If you refactor either hook, keep the byte-level read. `tests/test-hooks.py` covers this with BOM-prefixed payloads, and CI exercises a real PowerShell pipe on `windows-latest`.
-
-### Skills / slash commands
-
-`skills/<name>/SKILL.md` installs to `~/.claude/skills/<name>/SKILL.md` and Claude Code exposes it as `/<name>`. Custom commands (`.claude/commands/*.md`) and skills have been merged: both create the same slash command, and skills additionally allow a directory of supporting files plus invocation-control frontmatter.
-
-Frontmatter fields this library relies on:
-
-| Field | Purpose |
-|-------|---------|
-| `name` | Command identifier |
-| `description` | Shown in the command list; also drives model auto-invocation when enabled |
-| `argument-hint` | Placeholder text for arguments |
-| `disable-model-invocation` | `true` keeps the skill user-invoked only |
-
-`$ARGUMENTS` interpolates everything passed after the command name; `$1`/`$2` and `$ARGUMENTS[N]` address positionally.
-
-**`@path` imports do NOT work inside a skill body.** `@`-style includes are a `CLAUDE.md` feature. In a skill, `@~/.claude/...` is literal text, so an "import" written that way silently ships as prose instead of loading the file — the skill appears to work while carrying none of the referenced content. `skills/lost-mary/SKILL.md` therefore inlines its decision procedure and instructs explicit reads of absolute paths where a step needs the full reference. If you extend it, do not add `@` imports.
-
-A skill invoked with `/name` stays in context for the remainder of the session, so its token cost is paid once per session, not per turn. Keep the body compressed for that reason.
-
-### Model assumptions
-
-Agent files intentionally do **not** hard-code model aliases (`opus`, `sonnet`, etc.). Model selection is left to the lead / Claude Code settings so the library does not rot when Anthropic renames or retires model aliases.
-
-Prefer escalating model cost only for high-ambiguity architecture, severe debugging uncertainty, or security-critical review (see `orchestration/delegation-rules.md`).
-
-### Structured handoff
-
-| Asset | Path (installed) |
-|-------|------------------|
-| Contract docs | `~/.claude/agent-library/orchestration/handoff.md` |
-| JSON Schema | `~/.claude/agent-library/orchestration/handoff.schema.json` |
-| Validator | `~/.claude/agent-library/scripts/validate-handoff.py` |
-| Bash guard hook | `~/.claude/agent-library/scripts/guard-readonly-bash.py` |
-| Handoff check hook | `~/.claude/agent-library/scripts/check-handoff-hook.py` |
-| Playbooks | `~/.claude/agent-library/orchestration/playbooks.md` |
-| Principles | `~/.claude/agent-library/orchestration/principles.md` |
-| Operating rules | `~/.claude/agent-library/global-CLAUDE.md`, imported by `~/.claude/CLAUDE.md` |
-
-Schema version is currently `1.0`. Additive optional envelope fields (`tokens_used`, `attempts`, `stop_reason`) do not require a version bump.
-
-Playbooks and principles are lead-facing guidance only (not agent frontmatter). They do not depend on Claude Code APIs.
-
-### Experimental runtime features
-
-Agent Teams require:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  }
-}
-```
-
-See `settings.example.json`. Treat team orchestration docs as best-effort until the feature is stable.
+Only the `hooks` block is prescribed. Agent Teams
+(`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) are no longer part of the library's
+model; the Agent tool's `isolation: worktree` covers concurrent writers.
 
 ## Degradation guidance
 
-When the runtime changes:
+| If Claude Code ... | Then |
+| --- | --- |
+| renames `tool_input.file_path` or `tool_name` | `pycheck` stops firing (fail open). Update `hook_main()`; the CLI and `/validate` keep working. |
+| renames `agent_id` / `transcript_path` / `last_assistant_message` | `check-evidence` stops firing with a stderr notice. Update field names in `main()`. |
+| moves subagent transcripts | `subagent_transcript()` falls back to a project-dir search; update the derived path if the fallback misses. |
+| changes the transcript record shape | `read_transcript()` finds no evidence and the hook allows everything (with edits/no-runs no longer detected). Re-derive the shape from a real file and update `tests/test-hooks.py`. |
+| stops honouring exit 2 on `SubagentStop` | switch `check-evidence` to the JSON form (`{"decision":"block","reason":...}` on stdout, exit 0). |
+| changes agent/skill frontmatter keys | update `tests/test-agents.py` `KNOWN_KEYS`, `tests/test-skills.py` `KNOWN_KEYS`, and the files; reinstall. |
+| ships Bash sandboxing on Windows | consider giving `explore` a read-only Bash for `git log`/`blame`; keep `review` without. |
+| ships per-agent `permissions` in settings | prefer that over tool omission where finer control is wanted. |
 
-1. **Tool rename / removal** — update `tools` / `disallowedTools` in affected agent files; reinstall; keep role behavior the same.
-2. **Frontmatter schema change** — update all `agents/*.md` and this file; prefer the minimal set of fields Claude Code still honors.
-3. **Agent Teams disabled or changed** — fall back to subagents + lead-only integration; the handoff contract still applies.
-4. **Worktree helpers appear in Claude Code** — prefer the built-in command; keep the naming convention in `orchestration/worktree-rules.md` as the coordination contract.
-5. **Handoff emission fails** — lead should reject free-text-only completions and ask the specialist to re-emit valid JSON.
-6. **Hook payload fields change** (`agent_type`, `last_assistant_message`, `stop_hook_active`) — both hooks fail open, so enforcement disappears silently. Re-check a live block after upgrading Claude Code, then update the field names in `scripts/guard-readonly-bash.py` and `scripts/check-handoff-hook.py`.
-7. **Per-subagent permissions become supported in `settings.json`** — prefer that over `guard-readonly-bash.py`, which is a shell-text denylist and strictly weaker. Retire the hook rather than running both.
-8. **`CLAUDE.md` import syntax changes** — the installer's `ensure_import` / `Set-LibraryImport` and the `--verify` drift check both hard-code `@~/.claude/agent-library/global-CLAUDE.md`. Update the `IMPORT_LINE` / `$ImportLine` constant in `install.sh` and `install.ps1` together.
+## Verified-live log
 
-## Versioning this library
+Fill this in after a real session confirms behaviour; the test suite cannot.
 
-- Agent role behavior changes → note in commit message / changelog.
-- Handoff envelope breaking change → bump `schema_version` and update validator + docs together.
-- Capability surface change (tools, frontmatter) → update this file in the same change.
+| Date | Claude Code | Check | Result |
+| --- | --- | --- | --- |
+| 2026-09-03 | 2.1.259 | `pycheck --hook` on a real monorepo file: shared-sibling venv discovered, ruff + ty diagnostics returned | OK (manual invocation of the hook script) |
+| _pending_ | | `pycheck` feedback appears after an `Edit` inside a live session | |
+| _pending_ | | `check-evidence` bounces an `implement` subagent that claims a run it never made | |

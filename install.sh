@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# Install the agent library (v2) into ~/.claude. See README.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_AGENTS="${HOME}/.claude/agents"
 DEST_LIB="${HOME}/.claude/agent-library"
 DEST_SKILLS="${HOME}/.claude/skills"
+SETTINGS="${HOME}/.claude/settings.json"
 # Claude Code auto-loads ~/.claude/CLAUDE.md only. global-CLAUDE.md is inert
 # unless that file imports it, so the installer maintains the import line.
 CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
@@ -15,51 +17,45 @@ VERIFY=0
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 DRIFT_COUNT=0
 
+# What v2 manages under ~/.claude/agent-library.
+LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py global-CLAUDE.md capabilities.md)
+# What v1 installed and v2 no longer ships. Retired by renaming, never deleted:
+# a stale agent file would keep registering a role the docs no longer describe,
+# and a stale hook script would keep an old settings.json entry alive.
+RETIRED_AGENTS=(architect researcher implementer debugger tester reviewer security-reviewer)
+RETIRED_LIB=(orchestration scripts/check-handoff-hook.py scripts/guard-readonly-bash.py scripts/validate-handoff.py scripts/validate-handoff.sh scripts/validate-handoff.ps1)
+V1_HOOK_PATTERN='check-handoff-hook\.py|guard-readonly-bash\.py'
+
 usage() {
   cat <<'EOF'
 Usage: ./install.sh [--dry-run] [--no-overwrite] [--verify]
 
 Options:
   --dry-run       Print planned actions without writing files.
-  --no-overwrite  Never replace existing destination files.
+  --no-overwrite  Never replace or retire existing destination files.
   --verify        Compare source files to installed destinations; no writes.
   -h, --help      Show this help.
 
 Notes:
-  - Existing files are backed up with a .backup.<timestamp> suffix unless --no-overwrite is set.
-  - Installer manages only ~/.claude/agents and ~/.claude/agent-library.
+  - Existing files are backed up as <name>.backup.<timestamp>; files this
+    library used to ship (v1) are retired as <name>.retired.<timestamp>.
+  - The installer manages ~/.claude/agents/<role>.md for its own roles,
+    ~/.claude/skills/<name>/, ~/.claude/agent-library/, and the single import
+    line in ~/.claude/CLAUDE.md. It never touches settings.json.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    --no-overwrite)
-      NO_OVERWRITE=1
-      shift
-      ;;
-    --verify)
-      VERIFY=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage >&2
-      exit 2
-      ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-overwrite) NO_OVERWRITE=1; shift ;;
+    --verify) VERIFY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-log() {
-  printf '%s\n' "$*"
-}
+log() { printf '%s\n' "$*"; }
 
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -70,25 +66,20 @@ run() {
 }
 
 install_file() {
-  local source_file="$1"
-  local target_file="$2"
-
+  local source_file="$1" target_file="$2"
   if [[ -e "$target_file" || -L "$target_file" ]]; then
     if cmp -s "$source_file" "$target_file" 2>/dev/null; then
       log "Unchanged: $target_file"
       return
     fi
-
     if [[ "$NO_OVERWRITE" -eq 1 ]]; then
       log "Skipped (exists): $target_file"
       return
     fi
-
     local backup_file="${target_file}.backup.${TIMESTAMP}"
     log "Backing up existing $target_file -> $backup_file"
     run mv "$target_file" "$backup_file"
   fi
-
   run cp "$source_file" "$target_file"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "Planned install $(basename "$target_file")"
@@ -98,15 +89,12 @@ install_file() {
 }
 
 verify_file() {
-  local source_file="$1"
-  local target_file="$2"
-
+  local source_file="$1" target_file="$2"
   if [[ ! -e "$target_file" && ! -L "$target_file" ]]; then
     log "MISSING: $target_file"
     DRIFT_COUNT=$((DRIFT_COUNT + 1))
     return
   fi
-
   if cmp -s "$source_file" "$target_file" 2>/dev/null; then
     log "OK: $target_file"
   else
@@ -115,17 +103,34 @@ verify_file() {
   fi
 }
 
+retire_path() {
+  local target="$1"
+  [[ -e "$target" || -L "$target" ]] || return 0
+  if [[ "$NO_OVERWRITE" -eq 1 ]]; then
+    log "WARNING: v1 file still installed: $target (--no-overwrite: leaving as is)"
+    return 0
+  fi
+  local moved="${target}.retired.${TIMESTAMP}"
+  log "Retiring v1 file: $target -> $moved"
+  run mv "$target" "$moved"
+}
+
+verify_retired() {
+  local target="$1"
+  if [[ -e "$target" || -L "$target" ]]; then
+    log "STALE: $target (v1 file still installed; run the installer to retire it)"
+    DRIFT_COUNT=$((DRIFT_COUNT + 1))
+  fi
+}
+
 count_import_lines() {
-  # Exact-line count (CRLF-tolerant), not substring count: a commented or
-  # quoted mention of the path must not satisfy the import requirement.
+  # Exact-line count (CRLF-tolerant), not substring count.
   awk -v line="$IMPORT_LINE" '{ t = $0; sub(/\r$/, "", t) } t == line { n++ } END { print n + 0 }' "$1"
 }
 
 ensure_import() {
-  # Additive and idempotent: never rewrites the user's own global CLAUDE.md.
-  # Also self-healing: editors and hand-pastes have been observed to duplicate
-  # the import line (the installer itself always checks first). Converge back
-  # to exactly one occurrence rather than merely tolerating the drift.
+  # Additive, idempotent and self-healing: converge to exactly one import line
+  # without ever rewriting the user's own content.
   local count=0
   if [[ -f "$CLAUDE_MD" ]]; then
     count="$(count_import_lines "$CLAUDE_MD")"
@@ -168,16 +173,14 @@ ensure_import() {
 
   if [[ "$NO_OVERWRITE" -eq 1 ]]; then
     log "Skipped (--no-overwrite): $CLAUDE_MD not modified"
-    log "MANUAL ACTION REQUIRED — add this line to $CLAUDE_MD or the library stays inert:"
+    log "MANUAL ACTION REQUIRED - add this line to $CLAUDE_MD or the library stays inert:"
     log "    $IMPORT_LINE"
     return 0
   fi
-
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "[dry-run] append import line to $CLAUDE_MD (after backup)"
     return 0
   fi
-
   cp "$CLAUDE_MD" "${CLAUDE_MD}.backup.${TIMESTAMP}"
   log "Backing up existing $CLAUDE_MD -> ${CLAUDE_MD}.backup.${TIMESTAMP}"
   printf '\n%s\n' "$IMPORT_LINE" >> "$CLAUDE_MD"
@@ -203,20 +206,42 @@ verify_import() {
   fi
 }
 
+check_settings() {
+  # Read-only. The installer never edits settings.json, but --verify should
+  # say whether the hooks it depends on are wired, and whether v1 entries
+  # linger (they would point at retired scripts and fail on every event).
+  if [[ ! -f "$SETTINGS" ]]; then
+    log "NOTE: $SETTINGS not found - hooks are not enabled (see settings.example.json)"
+    return
+  fi
+  if grep -Eq "$V1_HOOK_PATTERN" "$SETTINGS"; then
+    log "STALE: $SETTINGS still references v1 hook scripts - replace the hooks block with settings.example.json"
+    DRIFT_COUNT=$((DRIFT_COUNT + 1))
+  fi
+  if grep -q 'pycheck.py' "$SETTINGS"; then
+    log "OK: $SETTINGS wires pycheck.py"
+  else
+    log "NOTE: $SETTINGS does not wire pycheck.py - hooks not enabled (merge settings.example.json)"
+  fi
+}
+
 if [[ "$VERIFY" -eq 0 ]]; then
-  run mkdir -p "$DEST_AGENTS"
-  run mkdir -p "$DEST_SKILLS"
-  run mkdir -p "$DEST_LIB/orchestration"
-  run mkdir -p "$DEST_LIB/scripts"
+  run mkdir -p "$DEST_AGENTS" "$DEST_SKILLS" "$DEST_LIB/scripts"
 fi
 
 for file in "$ROOT_DIR"/agents/*.md; do
   name="$(basename "$file")"
-  target="$DEST_AGENTS/$name"
   if [[ "$VERIFY" -eq 1 ]]; then
-    verify_file "$file" "$target"
+    verify_file "$file" "$DEST_AGENTS/$name"
   else
-    install_file "$file" "$target"
+    install_file "$file" "$DEST_AGENTS/$name"
+  fi
+done
+for name in "${RETIRED_AGENTS[@]}"; do
+  if [[ "$VERIFY" -eq 1 ]]; then
+    verify_retired "$DEST_AGENTS/$name.md"
+  else
+    retire_path "$DEST_AGENTS/$name.md"
   fi
 done
 
@@ -233,67 +258,48 @@ for skill_dir in "$ROOT_DIR"/skills/*/; do
   fi
 done
 
-if [[ "$VERIFY" -eq 1 ]]; then
-  verify_file "$ROOT_DIR/orchestration/handoff.md" "$DEST_LIB/orchestration/handoff.md"
-  verify_file "$ROOT_DIR/orchestration/handoff.schema.json" "$DEST_LIB/orchestration/handoff.schema.json"
-  verify_file "$ROOT_DIR/orchestration/worktree-rules.md" "$DEST_LIB/orchestration/worktree-rules.md"
-  verify_file "$ROOT_DIR/orchestration/team-lead.md" "$DEST_LIB/orchestration/team-lead.md"
-  verify_file "$ROOT_DIR/orchestration/delegation-rules.md" "$DEST_LIB/orchestration/delegation-rules.md"
-  verify_file "$ROOT_DIR/orchestration/playbooks.md" "$DEST_LIB/orchestration/playbooks.md"
-  verify_file "$ROOT_DIR/orchestration/principles.md" "$DEST_LIB/orchestration/principles.md"
-  verify_file "$ROOT_DIR/scripts/validate-handoff.py" "$DEST_LIB/scripts/validate-handoff.py"
-  verify_file "$ROOT_DIR/scripts/validate-handoff.sh" "$DEST_LIB/scripts/validate-handoff.sh"
-  verify_file "$ROOT_DIR/scripts/validate-handoff.ps1" "$DEST_LIB/scripts/validate-handoff.ps1"
-  verify_file "$ROOT_DIR/scripts/guard-readonly-bash.py" "$DEST_LIB/scripts/guard-readonly-bash.py"
-  verify_file "$ROOT_DIR/scripts/check-handoff-hook.py" "$DEST_LIB/scripts/check-handoff-hook.py"
-  verify_file "$ROOT_DIR/capabilities.md" "$DEST_LIB/capabilities.md"
-  verify_file "$ROOT_DIR/global-CLAUDE.md" "$DEST_LIB/global-CLAUDE.md"
-  verify_import
-else
-  install_file "$ROOT_DIR/orchestration/handoff.md" "$DEST_LIB/orchestration/handoff.md"
-  install_file "$ROOT_DIR/orchestration/handoff.schema.json" "$DEST_LIB/orchestration/handoff.schema.json"
-  install_file "$ROOT_DIR/orchestration/worktree-rules.md" "$DEST_LIB/orchestration/worktree-rules.md"
-  install_file "$ROOT_DIR/orchestration/team-lead.md" "$DEST_LIB/orchestration/team-lead.md"
-  install_file "$ROOT_DIR/orchestration/delegation-rules.md" "$DEST_LIB/orchestration/delegation-rules.md"
-  install_file "$ROOT_DIR/orchestration/playbooks.md" "$DEST_LIB/orchestration/playbooks.md"
-  install_file "$ROOT_DIR/orchestration/principles.md" "$DEST_LIB/orchestration/principles.md"
-  install_file "$ROOT_DIR/scripts/validate-handoff.py" "$DEST_LIB/scripts/validate-handoff.py"
-  install_file "$ROOT_DIR/scripts/validate-handoff.sh" "$DEST_LIB/scripts/validate-handoff.sh"
-  install_file "$ROOT_DIR/scripts/validate-handoff.ps1" "$DEST_LIB/scripts/validate-handoff.ps1"
-  install_file "$ROOT_DIR/scripts/guard-readonly-bash.py" "$DEST_LIB/scripts/guard-readonly-bash.py"
-  install_file "$ROOT_DIR/scripts/check-handoff-hook.py" "$DEST_LIB/scripts/check-handoff-hook.py"
-  install_file "$ROOT_DIR/capabilities.md" "$DEST_LIB/capabilities.md"
-  install_file "$ROOT_DIR/global-CLAUDE.md" "$DEST_LIB/global-CLAUDE.md"
-  ensure_import
-fi
+for rel in "${LIB_FILES[@]}"; do
+  if [[ "$VERIFY" -eq 1 ]]; then
+    verify_file "$ROOT_DIR/$rel" "$DEST_LIB/$rel"
+  else
+    install_file "$ROOT_DIR/$rel" "$DEST_LIB/$rel"
+  fi
+done
+for rel in "${RETIRED_LIB[@]}"; do
+  if [[ "$VERIFY" -eq 1 ]]; then
+    verify_retired "$DEST_LIB/$rel"
+  else
+    retire_path "$DEST_LIB/$rel"
+  fi
+done
 
 if [[ "$VERIFY" -eq 1 ]]; then
+  verify_import
+  check_settings
   echo
   if [[ "$DRIFT_COUNT" -eq 0 ]]; then
     echo "Verify result: OK (no drift)."
     exit 0
   fi
-  echo "Verify result: DRIFT detected in $DRIFT_COUNT file(s)."
+  echo "Verify result: DRIFT detected in $DRIFT_COUNT item(s)."
   exit 1
 fi
 
+ensure_import
+
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  chmod +x "$DEST_LIB/scripts/validate-handoff.sh"
-  chmod +x "$DEST_LIB/scripts/guard-readonly-bash.py"
-  chmod +x "$DEST_LIB/scripts/check-handoff-hook.py"
+  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py"
 else
-  log "[dry-run] chmod +x $DEST_LIB/scripts/validate-handoff.sh"
-  log "[dry-run] chmod +x $DEST_LIB/scripts/guard-readonly-bash.py"
-  log "[dry-run] chmod +x $DEST_LIB/scripts/check-handoff-hook.py"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py"
 fi
 
 echo
-echo "Claude Code global agents installed in: $DEST_AGENTS"
-echo "Claude Code skills (slash commands) installed in: $DEST_SKILLS"
-echo "Claude Code shared orchestration assets installed in: $DEST_LIB"
-echo "Operating rules imported into: $CLAUDE_MD"
+echo "Agents installed in:          $DEST_AGENTS  (explore, implement, review)"
+echo "Skills installed in:          $DEST_SKILLS  (/lost-mary, /validate, /pr)"
+echo "Hook scripts + rules in:      $DEST_LIB"
+echo "Operating rules imported by:  $CLAUDE_MD"
 echo
-echo "Hooks are NOT installed automatically (they live in settings.json, which"
-echo "this installer does not touch). Merge the 'hooks' block from"
-echo "settings.example.json into ~/.claude/settings.json to enable enforcement."
-echo "Restart the current Claude Code session only if this is the first time you created the agents directory."
+echo "Hooks are NOT installed automatically (they live in settings.json, which this"
+echo "installer never touches). Merge the 'hooks' block from settings.example.json"
+echo "into ~/.claude/settings.json, then restart Claude Code. Run ./install.sh --verify"
+echo "afterwards; it reports whether the hooks are wired."

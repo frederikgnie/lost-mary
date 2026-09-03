@@ -1,0 +1,259 @@
+name: ci
+
+on:
+  push:
+    paths:
+      - 'agents/**'
+      - 'skills/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'settings.example*.json'
+      - 'global-CLAUDE.md'
+      - 'capabilities.md'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'agents/**'
+      - 'skills/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'settings.example*.json'
+      - 'global-CLAUDE.md'
+      - 'capabilities.md'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python-version }}'
+      - name: Install the tools pycheck drives
+        run: pip install ruff ty
+      - name: Agent definitions are well-formed and keep their tool properties
+        run: python tests/test-agents.py
+      - name: Skill definitions are well-formed
+        run: python tests/test-skills.py
+      - name: Hooks behave (pycheck, check-evidence)
+        run: python tests/test-hooks.py
+      - name: Hooks survive a PowerShell pipe (UTF-8 BOM)
+        # PowerShell prepends a BOM when piping to a native exe. Both hooks fail
+        # open on unparseable stdin, so a BOM would silently disable them.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          '{"tool_name":"Edit","tool_input":{"file_path":"tests/fixtures/pycheck/bad.py"}}' | python scripts/pycheck.py --hook
+          if ($LASTEXITCODE -ne 2) { throw "pycheck did not report findings through a PowerShell pipe (exit $LASTEXITCODE)." }
+          '{"tool_name":"Edit","tool_input":{"file_path":"tests/fixtures/pycheck/good.py"}}' | python scripts/pycheck.py --hook
+          if ($LASTEXITCODE -ne 0) { throw "pycheck flagged a clean file (exit $LASTEXITCODE)." }
+          '{"agent_id":"nope","agent_type":"implement","transcript_path":"nope.jsonl","last_assistant_message":"tests pass"}' | python scripts/check-evidence.py
+          if ($LASTEXITCODE -ne 0) { throw "check-evidence must fail open when the transcript is missing (exit $LASTEXITCODE)." }
+          $global:LASTEXITCODE = 0
+
+  installer-posix:
+    # HERMETIC BY CONSTRUCTION. Every step points HOME at a sandbox inside the
+    # workspace and asserts the sandbox is not the real HOME before writing, so
+    # these steps are safe to copy-paste and run on a workstation. (Writing to
+    # the real HOME from a CI step run locally has destroyed a developer's
+    # Claude config once already.)
+    runs-on: ubuntu-latest
+    env:
+      FAKE_HOME: ${{ github.workspace }}/.testhome
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pre-existing global CLAUDE.md is preserved and the import lands
+        run: |
+          set -euo pipefail
+          test -n "${FAKE_HOME:-}"
+          test "$FAKE_HOME" != "$HOME" || { echo "ERROR: sandbox equals real HOME; refusing" >&2; exit 1; }
+          rm -rf "$FAKE_HOME"
+          mkdir -p "$FAKE_HOME/.claude"
+          printf '# Pre-existing user rules\nSENTINEL-DO-NOT-LOSE\n' > "$FAKE_HOME/.claude/CLAUDE.md"
+          HOME="$FAKE_HOME" bash ./install.sh
+          grep -qF 'SENTINEL-DO-NOT-LOSE' "$FAKE_HOME/.claude/CLAUDE.md"
+          grep -qF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md"
+          ls "$FAKE_HOME/.claude/" | grep -q 'CLAUDE.md.backup.'
+      - name: Agents, skills and hook scripts landed identical to source
+        run: |
+          set -euo pipefail
+          for a in explore implement review; do
+            cmp -s "agents/$a.md" "$FAKE_HOME/.claude/agents/$a.md" || { echo "ERROR: agent $a missing or differs" >&2; exit 1; }
+          done
+          for d in skills/*/; do
+            name="$(basename "$d")"
+            cmp -s "$d/SKILL.md" "$FAKE_HOME/.claude/skills/$name/SKILL.md" || { echo "ERROR: skill $name missing or differs" >&2; exit 1; }
+          done
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/pycheck.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/check-evidence.py"
+          test -f "$FAKE_HOME/.claude/agent-library/capabilities.md"
+      - name: Install is idempotent and --verify is clean
+        run: |
+          set -euo pipefail
+          HOME="$FAKE_HOME" bash ./install.sh
+          count="$(grep -cF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md")"
+          test "$count" = "1" || { echo "ERROR: import line appears $count times" >&2; exit 1; }
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+      - name: --verify detects a missing import line
+        run: |
+          set -euo pipefail
+          grep -vF '@~/.claude/agent-library/global-CLAUDE.md' "$FAKE_HOME/.claude/CLAUDE.md" > "$FAKE_HOME/cm"
+          mv "$FAKE_HOME/cm" "$FAKE_HOME/.claude/CLAUDE.md"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed while global-CLAUDE.md was inert" >&2
+            exit 1
+          fi
+      - name: Installer converges a duplicated import line
+        run: |
+          set -euo pipefail
+          IMPORT='@~/.claude/agent-library/global-CLAUDE.md'
+          HOME="$FAKE_HOME" bash ./install.sh
+          printf '\r\n%s\r\n\r\n%s\r\n' "$IMPORT" "$IMPORT" >> "$FAKE_HOME/.claude/CLAUDE.md"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with a duplicated import line" >&2
+            exit 1
+          fi
+          HOME="$FAKE_HOME" bash ./install.sh
+          count="$(grep -cF -- "$IMPORT" "$FAKE_HOME/.claude/CLAUDE.md")"
+          test "$count" = "1" || { echo "ERROR: import appears $count times after dedupe" >&2; exit 1; }
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+      - name: v1 files are retired (renamed), never deleted, and flagged by --verify
+        run: |
+          set -euo pipefail
+          mkdir -p "$FAKE_HOME/.claude/agent-library/orchestration"
+          echo v1 > "$FAKE_HOME/.claude/agents/reviewer.md"
+          echo v1 > "$FAKE_HOME/.claude/agent-library/orchestration/handoff.md"
+          echo v1 > "$FAKE_HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with stale v1 files installed" >&2
+            exit 1
+          fi
+          HOME="$FAKE_HOME" bash ./install.sh
+          test ! -e "$FAKE_HOME/.claude/agents/reviewer.md"
+          test ! -e "$FAKE_HOME/.claude/agent-library/orchestration"
+          test ! -e "$FAKE_HOME/.claude/agent-library/scripts/guard-readonly-bash.py"
+          ls "$FAKE_HOME/.claude/agents/" | grep -q 'reviewer.md.retired.'
+          ls "$FAKE_HOME/.claude/agent-library/" | grep -q 'orchestration.retired.'
+          grep -qx v1 "$FAKE_HOME/.claude/agent-library/scripts/guard-readonly-bash.py.retired."*
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+      - name: --verify flags a settings.json that still wires v1 hooks
+        run: |
+          set -euo pipefail
+          printf '{"hooks":{"SubagentStop":[{"hooks":[{"command":"python3 ~/.claude/agent-library/scripts/check-handoff-hook.py"}]}]}}\n' > "$FAKE_HOME/.claude/settings.json"
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with v1 hooks in settings.json" >&2
+            exit 1
+          fi
+          cp settings.example.json "$FAKE_HOME/.claude/settings.json"
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+
+  installer-windows:
+    # Also hermetic - see installer-posix. PowerShell resolves $HOME once at
+    # session start, so the installer runs in a CHILD pwsh whose home env vars
+    # point at the sandbox, and the child is GATED: it must report $HOME inside
+    # the sandbox before any destructive step runs.
+    runs-on: windows-latest
+    env:
+      FAKE_HOME: ${{ github.workspace }}\.testhome
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer scenarios in a sandboxed HOME
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fake = $env:FAKE_HOME
+          if (-not $fake) { throw 'FAKE_HOME not set.' }
+          if ($fake -eq $HOME) { throw 'Sandbox equals real HOME; refusing.' }
+
+          Remove-Item -Recurse -Force $fake -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Join-Path $fake '.claude') | Out-Null
+          Set-Content -Path (Join-Path $fake '.claude/CLAUDE.md') -Value "# Pre-existing user rules`nSENTINEL-DO-NOT-LOSE" -Encoding utf8
+
+          $env:USERPROFILE = $fake
+          $env:HOMEDRIVE = ''
+          $env:HOMEPATH = ''
+          $env:HOME = $fake
+
+          $probe = & pwsh -NoProfile -Command 'Write-Output $HOME'
+          if ($probe.Trim() -ne $fake) { throw "Sandbox ineffective: child HOME = '$probe', expected '$fake'. Refusing to run the installer." }
+          Write-Host "sandbox confirmed: $probe"
+
+          function Invoke-Installer([string]$InstallerArgs = '') {
+            # Out-Host is load-bearing: a PowerShell function returns ALL pipeline
+            # output, so without it the child's stdout would pollute the return
+            # value and the exit-code check would fire on success.
+            & pwsh -NoProfile -Command "& './install.ps1' $InstallerArgs" | Out-Host
+            return $LASTEXITCODE
+          }
+
+          Write-Host '--- pre-existing CLAUDE.md must be preserved ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Installer failed.' }
+          $mdPath = Join-Path $fake '.claude/CLAUDE.md'
+          $md = Get-Content $mdPath -Raw
+          if ($md -notmatch 'SENTINEL-DO-NOT-LOSE') { throw 'Existing user content was lost.' }
+          if ($md -notmatch [regex]::Escape('@~/.claude/agent-library/global-CLAUDE.md')) { throw 'Import line missing.' }
+          if (-not (Get-ChildItem (Join-Path $fake '.claude') -Filter 'CLAUDE.md.backup.*')) { throw 'No backup created.' }
+
+          Write-Host '--- agents and skills landed identical to source ---'
+          foreach ($a in @('explore', 'implement', 'review')) {
+            $installed = Join-Path $fake ".claude/agents/$a.md"
+            if (-not (Test-Path $installed)) { throw "Agent $a did not install." }
+            if ((Get-FileHash $installed).Hash -ne (Get-FileHash "./agents/$a.md").Hash) { throw "Installed agent $a differs from source." }
+          }
+          Get-ChildItem ./skills -Directory | ForEach-Object {
+            $installed = Join-Path $fake ".claude/skills/$($_.Name)/SKILL.md"
+            if (-not (Test-Path $installed)) { throw "Skill $($_.Name) did not install." }
+            if ((Get-FileHash $installed).Hash -ne (Get-FileHash (Join-Path $_.FullName 'SKILL.md')).Hash) { throw "Installed skill $($_.Name) differs from source." }
+          }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/pycheck.py'))) { throw 'pycheck.py did not install.' }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/check-evidence.py'))) { throw 'check-evidence.py did not install.' }
+
+          Write-Host '--- idempotent + -Verify clean ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Second install failed.' }
+          $n = (Select-String -Path $mdPath -Pattern 'agent-library/global-CLAUDE.md' -SimpleMatch).Count
+          if ($n -ne 1) { throw "Import line appears $n times, expected 1." }
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on a clean install.' }
+
+          Write-Host '--- -Verify detects a missing import ---'
+          (Get-Content $mdPath) | Where-Object { $_ -notmatch 'agent-library/global-CLAUDE' } | Set-Content $mdPath -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed while global-CLAUDE.md was inert.' }
+
+          Write-Host '--- duplicated import is converged ---'
+          if ((Invoke-Installer) -ne 0) { throw 'Reinstall failed.' }
+          Add-Content -Path $mdPath -Value "`r`n@~/.claude/agent-library/global-CLAUDE.md`r`n`r`n@~/.claude/agent-library/global-CLAUDE.md" -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with a duplicated import line.' }
+          if ((Invoke-Installer) -ne 0) { throw 'Dedupe install failed.' }
+          $n = (Select-String -Path $mdPath -Pattern 'agent-library/global-CLAUDE.md' -SimpleMatch).Count
+          if ($n -ne 1) { throw "Import appears $n times after dedupe." }
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after dedupe.' }
+
+          Write-Host '--- v1 files are retired, never deleted ---'
+          $stale = Join-Path $fake '.claude/agents/reviewer.md'
+          $staleDir = Join-Path $fake '.claude/agent-library/orchestration'
+          New-Item -ItemType Directory -Force -Path $staleDir | Out-Null
+          Set-Content -Path $stale -Value 'v1' -Encoding utf8
+          Set-Content -Path (Join-Path $staleDir 'handoff.md') -Value 'v1' -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with stale v1 files installed.' }
+          if ((Invoke-Installer) -ne 0) { throw 'Retiring install failed.' }
+          if (Test-Path $stale) { throw 'v1 agent was not retired.' }
+          if (Test-Path $staleDir) { throw 'v1 orchestration dir was not retired.' }
+          if (-not (Get-ChildItem (Join-Path $fake '.claude/agents') -Filter 'reviewer.md.retired.*')) { throw 'Retired agent backup missing.' }
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after retiring v1 files.' }
+
+          Write-Host '--- -Verify flags settings.json that still wires v1 hooks ---'
+          $settings = Join-Path $fake '.claude/settings.json'
+          Set-Content -Path $settings -Value '{"hooks":{"SubagentStop":[{"hooks":[{"command":"python check-handoff-hook.py"}]}]}}' -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with v1 hooks in settings.json.' }
+          Copy-Item ./settings.example.windows.json $settings -Force
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed with v2 hooks in settings.json.' }
+          Write-Host 'all installer scenarios passed'

@@ -1,30 +1,26 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
-  "teammateMode": "in-process",
   "hooks": {
-    "PreToolUse": [
+    "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/guard-readonly-bash.py\"",
-            "timeout": 10
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/pycheck.py\" --hook",
+            "timeout": 90
           }
         ]
       }
     ],
     "SubagentStop": [
       {
-        "matcher": "*",
+        "matcher": "implement|general-purpose",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-handoff-hook.py\"",
-            "timeout": 15
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
+            "timeout": 20
           }
         ]
       }
