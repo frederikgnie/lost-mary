@@ -513,6 +513,24 @@ p, a = make_session(
 rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
 expect("uv run / uvx / python.exe -m forms are recognised -> allow", rc, ALLOW, err)
 
+# A test script or the lint hook run directly with an interpreter is a validation run
+# (this repo's own suites are `python tests/test-*.py`); an arbitrary script is not.
+p, a = make_session(
+    [
+        *edit("src/x.py"),
+        *bash('"C:/py/python.exe" tests/test-hooks.py', "All hook tests passed."),
+        *bash("python scripts/pycheck.py src/x.py", "pycheck: no findings"),
+    ]
+)
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("python tests/test-*.py and python .../pycheck.py count as runs -> allow", rc, ALLOW, err)
+p, a = make_session([*edit("src/x.py"), *bash("python scripts/build_docs.py", "done")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("python <arbitrary script>.py is not validation -> block", rc, BLOCK, err)
+p, a = make_session([*edit("src/x.py"), *bash("python tests/test-hooks.py", "Exit code 1\nFAILED (1):", ok=False)])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("failed python tests/test-*.py run + success claim -> block", rc, BLOCK, err)
+
 p, a = make_session([*edit("src/x.py"), *edit("src/y.py")])
 rc, err = run_hook(EVIDENCE, stop_event(p, a, "Refactored the loader. CHANGED: src/x.py, src/y.py"))
 expect("edits, no run, no disclaimer -> block", rc, BLOCK, err)

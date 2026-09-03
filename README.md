@@ -32,7 +32,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | Piece | What it does |
 | --- | --- |
 | [`scripts/pycheck.py`](scripts/pycheck.py) | **PostToolUse hook.** After every `Edit`/`Write` of a `.py` file: `ruff check`, `ruff format --check`, `ty check`, using the venv that owns the file - a project `.venv`, or a shared `<workspace>/<env>/.venv` beside several package repos - and the diagnostics go straight back to the model while the edit is still in its working memory. Also a CLI (`pycheck.py --changed`, `pycheck.py <paths>`) used by `/validate`. |
-| [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop hook.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. One strike; then the lead judges both versions. |
+| [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop hook.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. Honours `stop_hook_active`, so the re-emitted stop after a bounce is allowed through - the lead sees both messages and judges. |
 | [`agents/explore.md`](agents/explore.md) | Read-only investigation on a cheap fast model (`sonnet`, medium effort). `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
 | [`agents/implement.md`](agents/implement.md) | Scoped change plus validation, on the session model. Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
 | [`agents/review.md`](agents/review.md) | Independent review at high effort with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
@@ -87,7 +87,8 @@ Files from v1 that this version no longer ships are **retired** - renamed to
 The installer never touches `settings.json`. Merge the `hooks` block from
 [`settings.example.json`](settings.example.json) (POSIX) or
 [`settings.example.windows.json`](settings.example.windows.json) (Windows) into
-`~/.claude/settings.json`, then restart Claude Code (settings load at startup).
+`~/.claude/settings.json`. A running Claude Code normally picks it up live;
+restart if it does not.
 
 Windows: hook commands run under Git Bash when it is installed (PowerShell
 otherwise); `$HOME` expands in both. Use an **absolute path to `python.exe`** -
@@ -123,8 +124,8 @@ per-package facts in each package's `CLAUDE.md` / `AGENT.md`.
   exact fields; re-run the smoke test in `GETTING-STARTED.md` §3 after upgrades.
 - **`check-evidence` verifies that commands ran and how they exited**, not that
   the tests are any good, and it depends on the (documented-as-internal)
-  transcript layout. It is one strike: a stubborn agent gets through on the
-  second stop and the lead sees both messages.
+  transcript layout. It honours `stop_hook_active`, so a stubborn agent gets
+  through on the second, re-emitted stop and the lead sees both messages.
 - **`pycheck` is Python-only.** Other languages get no edit-time feedback; add
   a sibling script on the same `PostToolUse` matcher.
 - **No Bash sandbox on Windows native**, so read-only roles have no Bash at
@@ -136,10 +137,11 @@ per-package facts in each package's `CLAUDE.md` / `AGENT.md`.
 ## Migration from v1
 
 Run the installer: it retires the seven v1 role files, `agent-library/orchestration/`
-and the three v1 scripts. Then **replace the `hooks` block** in
+and the five v1 scripts. Then **replace the `hooks` block** in
 `~/.claude/settings.json` - the v1 `PreToolUse` Bash guard and `SubagentStop`
 handoff validator now point at retired scripts, and `--verify` flags that as
-drift until you do. Restart Claude Code.
+drift until you do. A running Claude Code normally picks up the replaced block
+live; restart if it does not.
 
 | v1 | v2 | Why |
 | --- | --- | --- |

@@ -26,7 +26,8 @@ v1 is renamed `*.retired.<timestamp>`, not deleted.
 
 The installer never edits `settings.json`. Copy the `hooks` block from
 `settings.example.windows.json` (Windows) or `settings.example.json`
-(macOS/Linux) into `~/.claude/settings.json`, then **restart Claude Code**.
+(macOS/Linux) into `~/.claude/settings.json`. A running Claude Code normally
+picks it up live; restart if it does not.
 
 Windows: replace `C:/ABSOLUTE/PATH/TO/python.exe` with a real interpreter. The
 `python` on PATH is often the Microsoft Store stub, and a hook that cannot
@@ -117,11 +118,11 @@ library's defaults.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| No hook message after editing a `.py` file | interpreter path wrong, `settings.json` not merged, or session not restarted | pipe a payload into the hook by hand: `echo '{"tool_name":"Edit","tool_input":{"file_path":"tests/fixtures/pycheck/bad.py"}}' \| python scripts/pycheck.py --hook` from the repo; want exit 2 |
+| No hook message after editing a `.py` file | interpreter path wrong, `settings.json` not merged, or the hook not yet picked up (a running Claude Code normally picks up a `settings.json` change live; restart if it did not) | pipe a payload into the hook by hand: `echo '{"tool_name":"Edit","tool_input":{"file_path":"tests/fixtures/pycheck/bad.py"}}' \| python scripts/pycheck.py --hook` from the repo; want exit 2 |
 | Hook says `ruff: not found` / `ty: not found` | tools not in the file's venv, PATH, or `uvx` | install them in the project venv (`uv add --dev ruff ty`) or globally |
 | `pycheck` uses the wrong venv | the terminal that launched Claude Code has another env active | the file's own `.venv` wins; the ambient `VIRTUAL_ENV` is only a fallback - check for a stray `.venv` above the file |
 | `check-evidence` never bounces anything | matcher does not include the agent type, or the transcript layout changed | `--verify` shows the wiring; `capabilities.md` lists the layout the hook expects |
-| `/validate` or `/pr` missing from the `/` menu | session started before install | restart; skills are discovered at startup |
+| `/validate` or `/pr` missing from the `/` menu | skills normally register live, but discovery can lag | start a new session; restart if it still does not appear |
 | A retired v1 role still appears | `~/.claude/agents/<role>.md` re-created by hand or by another tool | `--verify` flags it as `STALE`; re-run the installer |
 
 ## 8. Honest limits
@@ -129,7 +130,8 @@ library's defaults.
 - Hooks **fail open** on any payload they cannot read. A Claude Code upgrade
   can switch them off silently; redo §3 afterwards.
 - `check-evidence` checks that validation commands ran and how they exited,
-  not that the tests were meaningful. One strike, then the lead decides.
+  not that the tests were meaningful. It honours `stop_hook_active`, so the
+  second, re-emitted stop after a bounce goes through and the lead decides.
 - `pycheck` is Python-only.
 - On Windows there is no Bash sandbox, so read-only roles have no Bash; when
   `explore` needs `git log`, the lead runs it.

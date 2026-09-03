@@ -55,6 +55,14 @@ RUNNER_PREFIX = re.compile(
     r"^(?:(?:uv|uvx|poetry|pipenv|hatch|pdm|rye)\s+(?:run\s+)?|time\s+|timeout\s+\S+\s+|exec\s+)+", re.IGNORECASE
 )
 PYTHON_M = re.compile(r"""^["']?\S*?python[\d.]*(?:\.exe)?["']?\s+-m\s+(\S+)(.*)$""", re.IGNORECASE)
+# `python tests/test_x.py`, `python test-foo.py`, `python scripts/pycheck.py`: a test
+# script or the lint hook run directly. Any other `python script.py` is not validation.
+PYTHON_SCRIPT = re.compile(
+    r"""^["']?\S*?python[\d.]*(?:\.exe)?["']?\s+["']?"""
+    r"""(?P<script>[^\s"']*?(?:tests?[\\/][^\s"']*\.py|test[_-][^\s"']*\.py|[^\s"']*[_-]tests?\.py|pycheck\.py))"""
+    r"""["']?(?P<rest>.*)$""",
+    re.IGNORECASE,
+)
 TOOL_TOKEN = re.compile(
     r"""^["']?(?:[A-Za-z]:)?[^\s"']*?[\\/]?"""
     r"(?P<tool>pytest|py\.test|ty|ruff|mypy|pyright|tox|nox|tsc|eslint|jest|vitest|npm|pnpm|yarn|cargo|go|make|dotnet|gradlew?|mvn|pycheck\.py)"
@@ -130,6 +138,9 @@ def classify(command: str) -> list[tuple[str, str]]:
         m = PYTHON_M.match(segment)
         if m:
             tool, rest = m.group(1).lower(), m.group(2)
+        elif m := PYTHON_SCRIPT.match(segment):
+            tool = "pycheck.py" if m.group("script").lower().endswith("pycheck.py") else "test-script"
+            rest = m.group("rest")
         else:
             m = TOOL_TOKEN.match(segment)
             if not m:
@@ -138,7 +149,7 @@ def classify(command: str) -> list[tuple[str, str]]:
         if NOT_A_RUN.search(rest):
             continue
         kind: str | None = None
-        if tool in ("pytest", "py.test", "unittest", "tox", "nox", "jest", "vitest"):
+        if tool in ("pytest", "py.test", "unittest", "tox", "nox", "jest", "vitest", "test-script"):
             kind = "test"
         elif tool == "ty":
             kind = "type" if re.match(r"\s*check\b", rest) else None

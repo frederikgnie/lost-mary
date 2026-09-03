@@ -14,16 +14,19 @@ transcripts on disk.
 | Script | Event / matcher | Runtime fields relied on | Status |
 | --- | --- | --- | --- |
 | `scripts/pycheck.py --hook` | `PostToolUse`, matcher `Edit\|Write\|MultiEdit` | `tool_name`, `tool_input.file_path`. Exit 2 = stderr shown to the model (non-blocking; the edit already happened). | Documented |
-| `scripts/check-evidence.py` | `SubagentStop`, matcher on agent type (`implement\|general-purpose`) | `agent_id`, `agent_type`, `transcript_path` (the **parent** session's file), `last_assistant_message`; `stop_hook_active` honoured if present. Exit 2 = block the stop, stderr returned to the subagent. | Fields documented. Exit-2 blocking is documented for `Stop`; for `SubagentStop` it is inferred and must be confirmed live (see log below). |
+| `scripts/check-evidence.py` | `SubagentStop`, matcher on agent type (`implement\|general-purpose`) | `agent_id`, `agent_type`, `agent_transcript_path` (preferred), `transcript_path` (the **parent** session's file, used to derive the subagent's transcript when `agent_transcript_path` is absent), `last_assistant_message`, `stop_hook_active`. Exit 2 = block the stop, stderr returned to the subagent. | Confirmed live (see log below): `SubagentStop` exit 2 blocks the stop and the derived transcript path resolves. |
 
-**Subagent transcript location** (relied on by `check-evidence.py`, observed,
-not documented): `<parent-dir>/<parent-stem>/subagents/agent-<agent_id>.jsonl`.
-Records are JSONL with `type: assistant|user` and `message.content[]` items of
-type `tool_use` `{id, name, input}` and `tool_result` `{tool_use_id, content,
-is_error}`; a failing Bash result has `is_error: true` and text starting with
-`Exit code N`. The docs call this format internal and unstable. The hook falls
-back to searching the project directory for `agent-<id>.jsonl`, then fails open
-with a notice. `tests/test-hooks.py` pins the observed shape.
+**Subagent transcript location.** The hook reads `agent_transcript_path`
+directly when the payload carries it. Otherwise it derives (relied on by
+`check-evidence.py`, observed, not documented)
+`<parent-dir>/<parent-stem>/subagents/agent-<agent_id>.jsonl` from
+`transcript_path`. Records are JSONL with `type: assistant|user` and
+`message.content[]` items of type `tool_use` `{id, name, input}` and
+`tool_result` `{tool_use_id, content, is_error}`; a failing Bash result has
+`is_error: true` and text starting with `Exit code N`. The docs call this
+format internal and unstable. If neither resolves, the hook falls back to
+searching the project directory for `agent-<id>.jsonl`, then fails open with a
+notice. `tests/test-hooks.py` pins the observed shape.
 
 **Both hooks fail open, loudly.** An unreadable payload, a missing transcript
 or a missing tool prints a one-line notice on stderr and exits 0. That is the
