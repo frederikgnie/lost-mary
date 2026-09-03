@@ -109,5 +109,5 @@ Fill this in after a real session confirms behaviour; the test suite cannot.
 | Date | Claude Code | Check | Result |
 | --- | --- | --- | --- |
 | 2026-09-03 | 2.1.259 | `pycheck --hook` on a real monorepo file: shared-sibling venv discovered, ruff + ty diagnostics returned | OK (manual invocation of the hook script) |
-| _pending_ | | `pycheck` feedback appears after an `Edit` inside a live session | |
+| 2026-09-03 | 2.1.259 | `pycheck` feedback appears after an `Edit` inside a live session | OK - the hook fired on an `Edit` of `tests/fixtures/pycheck/bad.py` and the F401 + `invalid-assignment` findings came back as tool feedback. Observed along the way: the running session picked up the new `hooks` block from `settings.json` without a restart. |
 | _pending_ | | `check-evidence` bounces an `implement` subagent that claims a run it never made | |
