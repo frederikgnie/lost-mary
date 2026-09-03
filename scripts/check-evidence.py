@@ -4,80 +4,168 @@
 Why this exists
 ---------------
 "Never claim tests passed unless you ran them" is a rule; rules get forgotten.
-The transcript is the evidence. This hook reads the subagent's own JSONL
-transcript and blocks the stop when:
+The transcript is the evidence. When a subagent that EDITED files tries to
+stop, this hook reads its own JSONL transcript and blocks the stop when:
 
-  1. the final message claims validation (tests pass, typecheck clean, ...)
-     but no validation command was run;
-  2. the final message claims validation but the last run of that kind failed;
-  3. files were edited, nothing was run, and the message does not say so
-     explicitly ("validation not run because ...").
+  A. the last run of any validation kind (test / lint / type) failed and the
+     final message does not report a failure - whatever the wording;
+  B. the message claims validation but no validation command was run;
+  C. files were edited, nothing was run, and the message does not say so.
 
-One strike: after a block the agent re-emits, and the second stop is allowed
-even if the message is still wrong. That keeps a confused agent from looping;
-the lead sees both messages and judges.
+A subagent that edited nothing has nothing to prove; read-only briefs may quote
+the state of the tests they found. One strike: Claude Code re-invokes the hook
+on the re-emitted stop with `stop_hook_active: true`, and that stop is allowed,
+so a confused agent cannot loop - the lead sees both messages and judges.
 
-Wiring: SubagentStop, matcher restricted to roles that write code
-(e.g. "implement|general-purpose"). Exit 2 blocks the stop and returns stderr
-to the subagent. Exit 0 allows. Fails OPEN, with a notice on stderr, whenever
-the payload or transcript cannot be read - enforcement must never wedge a
-session, and must never vanish in silence either.
+What counts as a validation run: a Bash command whose executable is a test,
+lint or type-check tool - bare, `.exe`, quoted, path-prefixed (`EU_env/.venv/
+Scripts/ty.exe check`), `python -m <tool>`, or behind `uv run`/`uvx` - and
+that actually checks something (`--collect-only`, `--version`, `--help` do not).
+`grep pytest` or `cat tox.ini` mention a tool; they do not run it. Pass/fail is
+read from the tool result's error flag AND its text, because `pytest ... | tail`
+hands bash the exit code of `tail`.
 
-Declared runtime dependencies (see capabilities.md): SubagentStop stdin fields
-`agent_id`, `agent_type`, `transcript_path` (parent session), and
-`last_assistant_message`; subagent transcript stored at
-`<parent-dir>/<parent-stem>/subagents/agent-<agent_id>.jsonl` with
-`message.content[]` entries of type `tool_use` / `tool_result`. The transcript
-format is internal to Claude Code; tests/test-hooks.py pins the observed shape.
+Wiring: SubagentStop with a matcher for roles that write (e.g.
+"implement|general-purpose"). Exit 2 blocks the stop and returns stderr to the
+subagent; exit 0 allows. Fails OPEN, with a notice on stderr, when the payload
+or transcript cannot be read.
+
+Runtime dependencies (see capabilities.md): SubagentStop stdin fields
+`agent_id`, `agent_type`, `agent_transcript_path` (preferred), `transcript_path`
+(parent session; the subagent file is derived from it as a fallback),
+`last_assistant_message`, `stop_hook_active`; JSONL records whose
+`message.content[]` holds `tool_use` / `tool_result` items.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
-VALIDATION_RE = re.compile(
-    r"\b(?:pytest|py\.test|unittest|ty\s+check|ruff\s+(?:check|format)|mypy|pyright|"
-    r"pycheck\.py|npm\s+(?:test|run\s+(?:test|lint|typecheck|check))|pnpm\s+(?:test|lint)|"
-    r"yarn\s+(?:test|lint)|cargo\s+(?:test|check|clippy)|go\s+(?:test|vet)|"
-    r"make\s+(?:test|check|lint)|tox|nox|dotnet\s+test|gradle\w*\s+test|mvn\s+test|"
-    r"tsc|eslint|jest|vitest)\b"
+# --- what is a validation run -------------------------------------------------------------
+SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+RUNNER_PREFIX = re.compile(
+    r"^(?:(?:uv|uvx|poetry|pipenv|hatch|pdm|rye)\s+(?:run\s+)?|time\s+|timeout\s+\S+\s+|exec\s+)+", re.IGNORECASE
 )
-
-# A claim is a validation noun near a success verb, or the usual summary idioms.
-CLAIM_RE = re.compile(
-    r"\b(?:tests?|suite|checks?|lint(?:ing)?|type[ -]?check(?:s|ing)?|ty|ruff|pytest|mypy|"
-    r"pyright|ci|build|validation)\b[^.\n]{0,40}?\b(?:pass(?:es|ed|ing)?|green|clean|"
-    r"succeed(?:s|ed)?|ok)\b"
-    r"|\b(?:all|\d+)\s+tests?\s+(?:pass|passed|passing)\b"
-    r"|\bno\s+(?:type\s+)?errors?\b|\b0\s+(?:errors?|failures?|failed)\b"
-    r"|\b(?:validated|verified)\b",
+PYTHON_M = re.compile(r"""^["']?\S*?python[\d.]*(?:\.exe)?["']?\s+-m\s+(\S+)(.*)$""", re.IGNORECASE)
+TOOL_TOKEN = re.compile(
+    r"""^["']?(?:[A-Za-z]:)?[^\s"']*?[\\/]?"""
+    r"(?P<tool>pytest|py\.test|ty|ruff|mypy|pyright|tox|nox|tsc|eslint|jest|vitest|npm|pnpm|yarn|cargo|go|make|dotnet|gradlew?|mvn|pycheck\.py)"
+    r"""(?:\.exe)?["']?(?=\s|$)(?P<rest>.*)$""",
     re.IGNORECASE,
 )
+NOT_A_RUN = re.compile(
+    r"(?:^|\s)(?:--collect-only|--co|--version|-V|--help|-h|--fixtures|--markers|--list|--show-settings)(?=\s|$)"
+)
 
-# Honest statements that validation did not happen. Stripped from the message
-# before claim matching, so "not verified" is a disclaimer, not a claim.
+# --- did a run fail ------------------------------------------------------------------------
+FAIL_TEXT_RE = re.compile(
+    r"(?im)^\s*(?:Exit code\s+[1-9]\d*|FAILED\b|ERROR\b|error\[|.+?:\d+:\d+: error\b)"
+    r"|\b[1-9]\d*\s+(?:failed|errors?)\b"
+    r"|\bFound\s+[1-9]\d*\s+errors?\b"
+    r"|\bwould reformat\b|\b[1-9]\d*\s+files?\s+would be reformatted\b"
+    r"|\bexit(?:\s*code)?\s*[=:]?\s*[1-9]\d*\b"
+    r"|\bTraceback \(most recent call last\)"
+    r"|\bInterrupted:\s+[1-9]\d*\s+errors?"
+)
+
+# --- what the final message says -------------------------------------------------------------
+CLAIM_RE = re.compile(
+    r"\b(?:tests?|suite|checks?|lint(?:ing)?|type[ -]?check(?:s|ing)?|typecheck|ty|ruff|pytest|mypy|"
+    r"pyright|ci|build|validation)\b[^.\n]{0,40}?\b(?:pass(?:es|ed|ing)?|green|clean|succeed(?:s|ed)?|ok|\d+\s*/\s*\d+)\b"
+    r"|\b(?:all|\d+)\s+tests?\s+(?:pass|passed|passing)\b"
+    r"|\bno\s+(?:type\s+)?errors?\b|\b0\s+(?:errors?|failures?|failed)\b|\bno\s+failures?\b"
+    r"|\bexit\s*(?:code\s*)?0\b",
+    re.IGNORECASE,
+)
+# Honest statements that validation did not happen or did not pass.
 DISCLAIMER_RE = re.compile(
     r"\b(?:not|never|didn'?t|did not|could not|couldn'?t|unable to|without)\s+"
-    r"(?:run(?:ning)?|execut(?:e|ing)|verif(?:y|ied|ying)|validat(?:e|ed|ing)|test(?:ed|ing)?)\b"
-    r"|\bunverified\b|\bunvalidated\b|\bnot\s+(?:run|verified|validated|tested|checked)\b"
-    r"|\bno\s+(?:tests?|validation|checks?)\s+(?:were\s+|was\s+)?run\b"
+    r"(?:run(?:ning)?|execut(?:e|ing)|verif(?:y|ied|ying)|validat(?:e|ed|ing)|test(?:ed|ing)?|check(?:ed|ing)?)\b"
+    r"|\bunverified\b|\bunvalidated\b|\bnot\s+(?:run|verified|validated|tested|checked|met)\b"
+    r"|\bno\s+(?:tests?|validation|checks?)\s+(?:were\s+|was\s+)?run\b|\bnothing\s+to\s+run\b"
+    r"|\bno\s+tests?\s+(?:exist|to\s+run|in\s+this\s+repo)\b|\bdoc(?:umentation)?[- ]only\b"
     r"|\bvalidation\s+(?:was\s+)?skipped\b|\bskipped\s+(?:the\s+)?(?:tests?|validation)\b"
     r"|\bran\s+nothing\b|\bnothing\s+(?:was\s+)?(?:run|executed)\b",
+    re.IGNORECASE,
+)
+REPORTS_FAILURE_RE = re.compile(
+    # "no failures" / "0 failed" / "without failures" report success, not failure.
+    r"(?<!\bno\s)(?<!\bno\stests\s)(?<!\bzero\s)(?<!\bwithout\s)(?<!\b0\s)"
+    r"\b(?:failed|failing|failures?|not met|not checked|not run|unverified|broken|does not pass|"
+    r"FAIL\b|errors?\s+(?:remain|found|reported)|[1-9]\d*\s+errors?)\b",
     re.IGNORECASE,
 )
 
 
 @dataclass
+class Run:
+    command: str
+    kind: str
+    ok: bool
+    snippet: str
+
+
+@dataclass
 class Evidence:
     edited: list[str] = field(default_factory=list)
-    runs: list[tuple[str, bool, str]] = field(default_factory=list)  # (command, ok, snippet)
+    runs: list[Run] = field(default_factory=list)
+
+
+def classify(command: str) -> list[tuple[str, str]]:
+    """Validation segments of a shell command as (segment, kind); kind in test/lint/type."""
+    found: list[tuple[str, str]] = []
+    for segment in SEGMENT_SPLIT.split(command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        segment = RUNNER_PREFIX.sub("", ENV_PREFIX.sub("", segment))
+        m = PYTHON_M.match(segment)
+        if m:
+            tool, rest = m.group(1).lower(), m.group(2)
+        else:
+            m = TOOL_TOKEN.match(segment)
+            if not m:
+                continue
+            tool, rest = m.group("tool").lower(), m.group("rest")
+        if NOT_A_RUN.search(rest):
+            continue
+        kind: str | None = None
+        if tool in ("pytest", "py.test", "unittest", "tox", "nox", "jest", "vitest"):
+            kind = "test"
+        elif tool == "ty":
+            kind = "type" if re.match(r"\s*check\b", rest) else None
+        elif tool in ("mypy", "pyright", "tsc"):
+            kind = "type"
+        elif tool == "ruff":
+            if re.match(r"\s*check\b", rest) or (re.match(r"\s*format\b", rest) and "--check" in rest):
+                kind = "lint"
+        elif tool in ("eslint", "pycheck.py"):
+            kind = "lint"
+        elif tool in ("npm", "pnpm", "yarn"):
+            kind = "test" if re.match(r"\s*(?:run\s+)?(?:test|lint|typecheck|check)\b", rest) else None
+        elif tool == "cargo":
+            kind = "test" if re.match(r"\s*(?:test|check|clippy)\b", rest) else None
+        elif tool == "go":
+            kind = "test" if re.match(r"\s*(?:test|vet)\b", rest) else None
+        elif tool == "make":
+            kind = "test" if re.match(r"\s*(?:test|check|lint)\b", rest) else None
+        elif tool in ("dotnet", "gradle", "gradlew", "mvn"):
+            kind = "test" if re.match(r"\s*test\b", rest) else None
+        if kind:
+            found.append((segment, kind))
+    return found
+
+
+def run_failed(is_error: Any, text: str) -> bool:
+    return bool(is_error) or text.lstrip().startswith("Exit code") or bool(FAIL_TEXT_RE.search(text))
 
 
 def _text_of(content: Any) -> str:
@@ -123,11 +211,13 @@ def read_transcript(path: Path) -> Evidence:
                     if use is None or use[0] != "Bash":
                         continue
                     command = str(use[1].get("command", ""))
-                    if not VALIDATION_RE.search(command):
+                    segments = classify(command)
+                    if not segments:
                         continue
                     text = _text_of(item.get("content"))
-                    ok = not item.get("is_error") and not text.lstrip().startswith("Exit code")
-                    evidence.runs.append((command.strip(), ok, text.strip()[:300]))
+                    ok = not run_failed(item.get("is_error"), text)
+                    for segment, run_kind in segments:
+                        evidence.runs.append(Run(segment.strip(), run_kind, ok, text.strip()[:300]))
     return evidence
 
 
@@ -143,7 +233,6 @@ def subagent_transcript(event: dict[str, Any]) -> Path | None:
     derived = parent_path.parent / parent_path.stem / "subagents" / f"agent-{agent_id}.jsonl"
     if derived.is_file():
         return derived
-    # Layout changed? Search the project directory for the agent's file.
     project_dir = parent_path.parent
     if project_dir.is_dir():
         for candidate in project_dir.rglob(f"agent-{agent_id}.jsonl"):
@@ -151,22 +240,30 @@ def subagent_transcript(event: dict[str, Any]) -> Path | None:
     return None
 
 
-def strike_marker(agent_id: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", agent_id)
-    return Path(tempfile.gettempdir()) / "claude-check-evidence" / safe
-
-
-def read_stdin_json() -> Any:
-    """Bytes + utf-8-sig: PowerShell prepends a BOM when piping to a native exe."""
-    buffer = getattr(sys.stdin, "buffer", None)
-    raw = buffer.read().decode("utf-8-sig", "replace") if buffer is not None else sys.stdin.read()
-    return json.loads(raw.strip())
+def strip_negative_lines(message: str) -> str:
+    return "\n".join(
+        line for line in message.splitlines() if not (REPORTS_FAILURE_RE.search(line) or DISCLAIMER_RE.search(line))
+    )
 
 
 def decide(message: str, evidence: Evidence) -> str | None:
     """Return the block reason, or None to allow."""
-    disclaims = bool(DISCLAIMER_RE.search(message))
-    claims = bool(CLAIM_RE.search(DISCLAIMER_RE.sub(" ", message)))
+    if not evidence.edited:
+        return None
+
+    last_by_kind: dict[str, Run] = {}
+    for run in evidence.runs:
+        last_by_kind[run.kind] = run
+    failed = [r for r in last_by_kind.values() if not r.ok]
+    if failed and not REPORTS_FAILURE_RE.search(message):
+        r = failed[0]
+        return (
+            f"The last {r.kind} run in your transcript failed, but your message does not say so:\n"
+            f"  $ {r.command}\n  {r.snippet[:200]}\n"
+            "Fix and re-run, or report the failure honestly."
+        )
+
+    claims = bool(CLAIM_RE.search(strip_negative_lines(message)))
     if claims and not evidence.runs:
         return (
             "Your final message claims validation, but the transcript contains no "
@@ -174,17 +271,7 @@ def decide(message: str, evidence: Evidence) -> str | None:
             "the exact command and result, or remove the claim and state plainly "
             "that you did not verify."
         )
-    if claims:
-        failed = [r for r in evidence.runs if not r[1]]
-        last_ok = evidence.runs[-1][1]
-        if failed and not last_ok:
-            cmd, _, snippet = evidence.runs[-1]
-            return (
-                "Your final message claims validation, but the last validation "
-                f"command failed:\n  $ {cmd}\n  {snippet[:200]}\n"
-                "Fix and re-run, or report the failure honestly."
-            )
-    if evidence.edited and not evidence.runs and not disclaims:
+    if not evidence.runs and not DISCLAIMER_RE.search(message):
         files = sorted(set(evidence.edited))
         shown = "\n".join(f"  - {f}" for f in files[:8])
         more = f"\n  ... {len(files) - 8} more" if len(files) > 8 else ""
@@ -197,7 +284,21 @@ def decide(message: str, evidence: Evidence) -> str | None:
     return None
 
 
+def read_stdin_json() -> Any:
+    """Bytes + utf-8-sig: PowerShell prepends a BOM when piping to a native exe."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    raw = buffer.read().decode("utf-8-sig", "replace") if buffer is not None else sys.stdin.read()
+    return json.loads(raw.strip())
+
+
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except ValueError:
+                pass
     try:
         event = read_stdin_json()
     except (json.JSONDecodeError, ValueError) as exc:
@@ -211,27 +312,21 @@ def main() -> int:
 
     agent_id = event.get("agent_id")
     message = event.get("last_assistant_message")
-    if not isinstance(agent_id, str) or not isinstance(message, str):
-        return 0
-
-    marker = strike_marker(agent_id)
-    if marker.exists():
-        # Second stop after a block: let it through and clean up.
-        try:
-            marker.unlink()
-        except OSError:
-            pass
+    missing = [k for k, v in (("agent_id", agent_id), ("last_assistant_message", message)) if not isinstance(v, str)]
+    if missing:
+        print(
+            f"check-evidence: payload lacks {missing} (keys: {sorted(event)}); allowing (claims unverified).",
+            file=sys.stderr,
+        )
         return 0
 
     transcript = subagent_transcript(event)
     if transcript is None:
         print(
-            "check-evidence: subagent transcript not found for "
-            f"agent_id={agent_id!r}; allowing (claims unverified).",
+            f"check-evidence: subagent transcript not found for agent_id={agent_id!r}; allowing (claims unverified).",
             file=sys.stderr,
         )
         return 0
-
     try:
         evidence = read_transcript(transcript)
     except OSError as exc:
@@ -241,12 +336,6 @@ def main() -> int:
     reason = decide(message, evidence)
     if reason is None:
         return 0
-
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("blocked once\n", encoding="utf-8")
-    except OSError:
-        pass
     print(f"Evidence check failed ({event.get('agent_type', 'subagent')}).\n{reason}", file=sys.stderr)
     return 2
 

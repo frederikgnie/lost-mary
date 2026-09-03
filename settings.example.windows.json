@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:/ABSOLUTE/PATH/TO/python.exe\" \"$HOME/.claude/agent-library/scripts/pycheck.py\" --hook",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/pycheck.py\" --hook",
             "timeout": 90
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:/ABSOLUTE/PATH/TO/python.exe\" \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
             "timeout": 20
           }
         ]

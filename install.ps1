@@ -5,6 +5,8 @@ param(
 )
 
 # Install the agent library (v2) into ~/.claude. See README.md.
+# Exit codes: 0 ok; 1 drift (-Verify); 3 install incomplete (-NoOverwrite left
+# the library inert or v1 files in place).
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -19,21 +21,33 @@ $ClaudeMd = Join-Path $HOME '.claude/CLAUDE.md'
 $ImportLine = '@~/.claude/agent-library/global-CLAUDE.md'
 $Timestamp = Get-Date -Format 'yyyyMMddHHmmss'
 $DriftCount = 0
+$IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
 $LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
+# Agent files are retired ONLY when their content is provably v1 (every v1 role
+# referenced the handoff schema); a user's own reviewer.md is left alone.
 $RetiredAgents = @('architect', 'researcher', 'implementer', 'debugger', 'tester', 'reviewer', 'security-reviewer')
+$V1AgentSignature = 'agent-library/orchestration/handoff.schema.json'
 $RetiredLib = @('orchestration', 'scripts/check-handoff-hook.py', 'scripts/guard-readonly-bash.py', 'scripts/validate-handoff.py', 'scripts/validate-handoff.sh', 'scripts/validate-handoff.ps1')
 $V1HookPattern = 'check-handoff-hook\.py|guard-readonly-bash\.py'
 
-function Write-Utf8NoBom {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Text
-    )
-    $encoding = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($Path, $Text, $encoding)
+function Get-FileEncoding {
+    # Detect how to write a text file back without changing its bytes:
+    # UTF-8 with BOM, strict UTF-8, else Windows-1252 (the common legacy case).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return New-Object System.Text.UTF8Encoding $true
+    }
+    $strict = New-Object System.Text.UTF8Encoding($false, $true)
+    try {
+        [void]$strict.GetString($bytes)
+        return New-Object System.Text.UTF8Encoding $false
+    } catch {
+        return [System.Text.Encoding]::GetEncoding(1252)
+    }
 }
 
 function Get-ImportLineCount {
@@ -41,7 +55,8 @@ function Get-ImportLineCount {
     # Exact-line count, not substring: a mention of the path inside prose must
     # not satisfy the import requirement. ReadAllLines strips CR/LF endings.
     $n = 0
-    foreach ($l in [System.IO.File]::ReadAllLines($Path)) {
+    $enc = Get-FileEncoding -Path $Path
+    foreach ($l in [System.IO.File]::ReadAllLines($Path, $enc)) {
         if ($l -eq $ImportLine) { $n++ }
     }
     return $n
@@ -49,9 +64,11 @@ function Get-ImportLineCount {
 
 function Set-LibraryImport {
     # Additive, idempotent and self-healing: converge to exactly one import
-    # line without ever rewriting the user's own content.
+    # line. The user's own bytes are appended to or filtered line-by-line in
+    # their original encoding, never re-encoded.
     if (Test-Path -LiteralPath $ClaudeMd -PathType Leaf) {
-        $existing = [System.IO.File]::ReadAllText($ClaudeMd)
+        $enc = Get-FileEncoding -Path $ClaudeMd
+        $existing = [System.IO.File]::ReadAllText($ClaudeMd, $enc)
         $count = Get-ImportLineCount -Path $ClaudeMd
         if ($count -eq 1) {
             Write-Host "Unchanged: import already present in $ClaudeMd"
@@ -72,14 +89,14 @@ function Set-LibraryImport {
             $newline = "`n"
             if ($existing.Contains("`r`n")) { $newline = "`r`n" }
             $seen = $false
-            $kept = foreach ($l in [System.IO.File]::ReadAllLines($ClaudeMd)) {
+            $kept = foreach ($l in [System.IO.File]::ReadAllLines($ClaudeMd, $enc)) {
                 if ($l -eq $ImportLine) {
                     if ($seen) { continue }
                     $seen = $true
                 }
                 $l
             }
-            Write-Utf8NoBom -Path $ClaudeMd -Text (($kept -join $newline) + $newline)
+            [System.IO.File]::WriteAllText($ClaudeMd, (($kept -join $newline) + $newline), $enc)
             Write-Host "Deduplicated import line in $ClaudeMd ($count -> 1)"
             return
         }
@@ -87,6 +104,7 @@ function Set-LibraryImport {
             Write-Host "Skipped (-NoOverwrite): $ClaudeMd not modified"
             Write-Host "MANUAL ACTION REQUIRED - add this line to $ClaudeMd or the library stays inert:"
             Write-Host "    $ImportLine"
+            $script:IncompleteCount++
             return
         }
         if ($DryRun) {
@@ -97,8 +115,9 @@ function Set-LibraryImport {
         Write-Host "Backing up existing $ClaudeMd -> $backup"
         Copy-Item -LiteralPath $ClaudeMd -Destination $backup -Force
         $separator = "`n"
-        if (-not $existing.EndsWith("`n")) { $separator = "`n`n" }
-        Write-Utf8NoBom -Path $ClaudeMd -Text ($existing + $separator + $ImportLine + "`n")
+        if ($existing.Length -gt 0 -and -not $existing.EndsWith("`n")) { $separator = "`n`n" }
+        # Append ASCII bytes only; the existing content is not rewritten.
+        [System.IO.File]::AppendAllText($ClaudeMd, ($separator + $ImportLine + "`n"), [System.Text.Encoding]::ASCII)
         Write-Host "Appended agent-library import to $ClaudeMd"
         return
     }
@@ -107,7 +126,8 @@ function Set-LibraryImport {
         return
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $ClaudeMd) -Force | Out-Null
-    Write-Utf8NoBom -Path $ClaudeMd -Text ("# Global Claude Code Instructions`n`n" + $ImportLine + "`n")
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($ClaudeMd, ("# Global Claude Code Instructions`n`n" + $ImportLine + "`n"), $utf8)
     Write-Host "Created $ClaudeMd with agent-library import"
 }
 
@@ -129,22 +149,76 @@ function Test-LibraryImport {
     }
 }
 
+function Get-HookCommands {
+    param($Hooks, [string]$EventName)
+    $out = @()
+    if ($null -eq $Hooks) { return $out }
+    $event = $Hooks.PSObject.Properties[$EventName]
+    if ($null -eq $event -or $null -eq $event.Value) { return $out }
+    foreach ($entry in @($event.Value)) {
+        $matcher = ''
+        if ($entry.PSObject.Properties['matcher']) { $matcher = [string]$entry.matcher }
+        $inner = $entry.PSObject.Properties['hooks']
+        if ($null -eq $inner -or $null -eq $inner.Value) { continue }
+        foreach ($h in @($inner.Value)) {
+            $cmd = ''
+            if ($h.PSObject.Properties['command']) { $cmd = [string]$h.command }
+            $out += [pscustomobject]@{ Command = $cmd; Matcher = $matcher }
+        }
+    }
+    return $out
+}
+
 function Test-Settings {
-    # Read-only. The installer never edits settings.json, but -Verify should say
-    # whether the hooks are wired and whether v1 entries linger.
+    # Read-only. The installer never edits settings.json, but -Verify must say
+    # whether the hooks the library depends on are actually wired.
     if (-not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
-        Write-Host "NOTE: $Settings not found - hooks are not enabled (see settings.example.windows.json)"
+        Write-Host "DRIFT: $Settings not found - hooks are not enabled (see settings.example.windows.json)"
+        $script:DriftCount++
         return
     }
     $text = [System.IO.File]::ReadAllText($Settings)
-    if ($text -match $V1HookPattern) {
-        Write-Host "STALE: $Settings still references v1 hook scripts - replace the hooks block with settings.example.windows.json"
+    try {
+        $data = $text | ConvertFrom-Json
+    } catch {
+        Write-Host "DRIFT: $Settings is not valid JSON ($($_.Exception.Message))"
+        $script:DriftCount++
+        return
+    }
+    if ($data.PSObject.Properties['disableAllHooks'] -and $data.disableAllHooks -eq $true) {
+        Write-Host "DRIFT: disableAllHooks is true in $Settings - every hook is off"
         $script:DriftCount++
     }
-    if ($text -match 'pycheck\.py') {
-        Write-Host "OK: $Settings wires pycheck.py"
-    } else {
-        Write-Host "NOTE: $Settings does not wire pycheck.py - hooks not enabled (merge settings.example.windows.json)"
+    $hooks = $null
+    if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'))
+    foreach ($pair in $wanted) {
+        $eventName = $pair[0]
+        $scriptName = $pair[1]
+        $found = @(Get-HookCommands -Hooks $hooks -EventName $eventName | Where-Object { $_.Command -like "*$scriptName*" })
+        if ($found.Count -eq 0) {
+            Write-Host "DRIFT: $eventName does not run $scriptName - merge the hooks block from settings.example.windows.json [$Settings]"
+            $script:DriftCount++
+            continue
+        }
+        foreach ($f in $found) {
+            if ($f.Command -like '*ABSOLUTE/PATH/TO*') {
+                Write-Host "DRIFT: $eventName $scriptName still has the placeholder interpreter path [$Settings]"
+                $script:DriftCount++
+            } else {
+                Write-Host "OK: $eventName runs $scriptName (matcher '$($f.Matcher)') [$Settings]"
+            }
+        }
+    }
+    if ($null -ne $hooks) {
+        foreach ($prop in $hooks.PSObject.Properties) {
+            foreach ($c in @(Get-HookCommands -Hooks $hooks -EventName $prop.Name)) {
+                if ($c.Command -match $V1HookPattern) {
+                    Write-Host "DRIFT: $($prop.Name) still references a v1 hook script (retired) - remove it [$Settings]"
+                    $script:DriftCount++
+                }
+            }
+        }
     }
 }
 
@@ -157,28 +231,29 @@ function Invoke-Step {
     }
 }
 
+function Test-SameContent {
+    param([string]$A, [string]$B)
+    if (-not (Test-Path -LiteralPath $A -PathType Leaf) -or -not (Test-Path -LiteralPath $B -PathType Leaf)) { return $false }
+    try {
+        return ((Get-FileHash -Algorithm SHA256 -LiteralPath $A).Hash -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $B).Hash)
+    } catch {
+        return $false
+    }
+}
+
 function Install-ManagedFile {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Target
     )
     if (Test-Path -LiteralPath $Target) {
-        $same = $false
-        if (Test-Path -LiteralPath $Target -PathType Leaf) {
-            try {
-                $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash
-                $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Target).Hash
-                $same = ($srcHash -eq $dstHash)
-            } catch {
-                $same = $false
-            }
-        }
-        if ($same) {
+        if (Test-SameContent -A $Source -B $Target) {
             Write-Host "Unchanged: $Target"
             return
         }
         if ($NoOverwrite) {
-            Write-Host "Skipped (exists): $Target"
+            Write-Host "Skipped (exists, differs): $Target"
+            $script:IncompleteCount++
             return
         }
         $backup = "$Target.backup.$Timestamp"
@@ -203,19 +278,18 @@ function Test-ManagedFile {
         $script:DriftCount++
         return
     }
-    try {
-        $srcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash
-        $dstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Target).Hash
-        if ($srcHash -eq $dstHash) {
-            Write-Host "OK: $Target"
-        } else {
-            Write-Host "DRIFT: $Target"
-            $script:DriftCount++
-        }
-    } catch {
+    if (Test-SameContent -A $Source -B $Target) {
+        Write-Host "OK: $Target"
+    } else {
         Write-Host "DRIFT: $Target"
         $script:DriftCount++
     }
+}
+
+function Test-V1Agent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return ([System.IO.File]::ReadAllText($Path).Contains($V1AgentSignature))
 }
 
 function Retire-Path {
@@ -223,6 +297,7 @@ function Retire-Path {
     if (-not (Test-Path -LiteralPath $Target)) { return }
     if ($NoOverwrite) {
         Write-Host "WARNING: v1 file still installed: $Target (-NoOverwrite: leaving as is)"
+        $script:IncompleteCount++
         return
     }
     $moved = "$Target.retired.$Timestamp"
@@ -230,11 +305,30 @@ function Retire-Path {
     Invoke-Step -Description "Move-Item '$Target' '$moved'" -Script { Move-Item -LiteralPath $Target -Destination $moved -Force }
 }
 
+function Retire-Agent {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    if (-not (Test-Path -LiteralPath $Target)) { return }
+    if (Test-V1Agent -Path $Target) {
+        Retire-Path -Target $Target
+    } else {
+        Write-Host "NOTE: $Target has a v1 role name but is not a v1 file - left in place (your own agent?)"
+    }
+}
+
 function Test-Retired {
     param([Parameter(Mandatory = $true)][string]$Target)
     if (Test-Path -LiteralPath $Target) {
         Write-Host "STALE: $Target (v1 file still installed; run the installer to retire it)"
         $script:DriftCount++
+    }
+}
+
+function Test-RetiredAgent {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    if (Test-V1Agent -Path $Target) {
+        Test-Retired -Target $Target
+    } elseif (Test-Path -LiteralPath $Target) {
+        Write-Host "NOTE: $Target is not a v1 file; not managed by this installer"
     }
 }
 
@@ -252,8 +346,8 @@ Get-ChildItem -Path (Join-Path $RootDir 'agents') -Filter '*.md' -File | ForEach
     }
 }
 foreach ($name in $RetiredAgents) {
-    if ($Verify) { Test-Retired -Target (Join-Path $DestAgents "$name.md") }
-    else { Retire-Path -Target (Join-Path $DestAgents "$name.md") }
+    if ($Verify) { Test-RetiredAgent -Target (Join-Path $DestAgents "$name.md") }
+    else { Retire-Agent -Target (Join-Path $DestAgents "$name.md") }
 }
 
 # Skills become slash commands (~/.claude/skills/<name>/SKILL.md -> /<name>).
@@ -287,7 +381,7 @@ if ($Verify) {
     Test-Settings
     Write-Host ''
     if ($DriftCount -eq 0) {
-        Write-Host 'Verify result: OK (no drift).'
+        Write-Host 'Verify result: OK (files match, import present, hooks wired).'
         exit 0
     }
     Write-Host "Verify result: DRIFT detected in $DriftCount item(s)."
@@ -297,13 +391,18 @@ if ($Verify) {
 Set-LibraryImport
 
 Write-Host ''
+if ($IncompleteCount -gt 0) {
+    Write-Host "Install INCOMPLETE: $IncompleteCount item(s) skipped under -NoOverwrite (see WARNING/Skipped lines above)."
+    Write-Host 'Re-run without -NoOverwrite, or resolve them by hand; then .\install.ps1 -Verify.'
+    exit 3
+}
 Write-Host "Agents installed in:          $DestAgents  (explore, implement, review)"
 Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr)"
 Write-Host "Hook scripts + rules in:      $DestLib"
 Write-Host "Operating rules imported by:  $ClaudeMd"
 Write-Host ''
 Write-Host 'Hooks are NOT installed automatically (they live in settings.json, which this'
-Write-Host "installer never touches). Merge the 'hooks' block from settings.example.windows.json"
+Write-Host "installer never edits). Merge the 'hooks' block from settings.example.windows.json"
 Write-Host 'into ~/.claude/settings.json (use an absolute interpreter path: `python` on PATH is'
-Write-Host 'often the Microsoft Store stub), then restart Claude Code. Run .\install.ps1 -Verify'
-Write-Host 'afterwards; it reports whether the hooks are wired.'
+Write-Host 'often the Microsoft Store stub); a running Claude Code normally picks it up live.'
+Write-Host 'Then run .\install.ps1 -Verify - it fails until the hooks are wired.'

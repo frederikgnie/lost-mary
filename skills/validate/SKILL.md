@@ -23,13 +23,15 @@ Target from the user (may be empty): $ARGUMENTS
    beside several package repos:
 
    ```bash
-   python ~/.claude/agent-library/scripts/pycheck.py --changed      # inside a git repo
+   python ~/.claude/agent-library/scripts/pycheck.py --changed      # the repo containing the cwd, from any directory in it
    python ~/.claude/agent-library/scripts/pycheck.py <paths...>     # explicit paths
+   python ~/.claude/agent-library/scripts/pycheck.py --all <paths>  # include pre-existing findings, not just new ones
    ```
 
    Use the project's own interpreter if plain `python` is not a real
    installation. In a multi-repo workspace (the root is not a git repo), run
-   `--changed` inside each package that has changes.
+   `--changed` once per package that has changes; the first output line names
+   the repository it looked at.
 3. **Run the tests that cover the touched packages** - the documented test roots
    for those packages, not the whole world, unless the whole suite is small.
    Discover first with `--collect-only -q` when unsure.

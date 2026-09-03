@@ -28,6 +28,8 @@ FINDINGS:   numbered, each with path:line or URL
 OPTIONS:    viable approaches, one line each, with the trade-off
 RECOMMEND:  the option you would take and why
 UNKNOWNS:   what you could not determine and how the lead can check it
+PLAN:       (only when asked to decompose) tasks, each with OWNED / OFF-LIMITS /
+            DEPENDS ON globs and the check that proves it
 ```
 
 No preamble, no restating the task. If the answer is simply "here is where it

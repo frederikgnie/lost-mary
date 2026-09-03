@@ -27,25 +27,33 @@ the number of agents. Everything below fits on one screen on purpose.
 | Signal | Do |
 |---|---|
 | Small, local, or tightly coupled | Do it yourself. Spawn nothing. |
-| Need to understand code, history, or a library first | `explore` (cheap model, read-only, returns `path:line` anchors) |
+| Need to understand code, history, or a library first | `explore` (cheap model, read-only, returns `path:line` anchors; ask it for a `PLAN` when the work must be split) |
 | A change you will not make yourself | `implement`, with the spawn block below |
-| Want an independent check before merge, or a trust boundary is touched | `review` - hand it the diff; it cannot run anything |
-| Genuinely separable scopes with concurrent writes | several `implement`, each `isolation: worktree`, disjoint `OWNED` |
+| A bug whose cause is unclear | `implement` with a reproduce-first brief: reproduce, find the root cause, smallest fix, keep the reproduction as the regression test |
+| Want an independent check before merge, or a trust boundary is touched | `review` - paste it the `git diff`; it cannot run anything |
+| Genuinely separable scopes with concurrent writes | several `implement`, disjoint `OWNED`, each `isolation: worktree` - see the caveat below |
+
+`isolation: worktree` needs the session cwd inside a git repository (at a
+multi-repo workspace root it fails: spawn with the package as cwd instead), and
+it branches from the repository's default branch unless `worktree.baseRef` is
+`head` - check which one the task needs. If neither works, run the
+implementers one at a time in the shared checkout.
 
 Add an agent only to remove a risk you can name. Reassess after each result.
 
-## 3. Every `implement` spawn carries all of these
+## 3. Every `implement` spawn carries these
 
 ```text
-GOAL:
-SCOPE:
-OWNED:        globs this agent may change
-OFF-LIMITS:   globs it must not touch
-DEPENDS ON:
-DONE MEANS:   <the predicate from step 1>
-VALIDATION:   exact commands to run (from the project's CLAUDE.md)
+OWNED:        globs this agent may change                     (required)
+OFF-LIMITS:   globs it must not touch                          (required)
+DONE MEANS:   <the predicate from step 1>                      (required)
+VALIDATION:   exact commands to run (from the project's CLAUDE.md)  (required)
+GOAL / SCOPE / DEPENDS ON:  when they add information beyond the task text
 REPORT:       CHANGED / RAN / DONE MEANS / RISKS
 ```
+
+A spawn missing a required field comes back as `MISSING: <field>` - fill it in
+and respawn; do not argue.
 
 ## 4. Gate on evidence
 
@@ -53,6 +61,9 @@ Read `RAN`, then **re-run the decisive check yourself** (or `/validate`). A
 report is a claim; the re-run is the evidence. Hooks already run ruff/ty on
 every edit and bounce a report whose claims the transcript does not support -
 they cannot tell you whether a truthful report means the predicate holds.
+
+A failed or partial second attempt means re-plan - smaller scope, `explore`
+first - never respawn the same prompt.
 
 Hand `review` the diff when the change is more than trivial or touches a
 boundary. Findings at HIGH or above are resolved before "done".
