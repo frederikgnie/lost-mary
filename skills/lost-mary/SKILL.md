@@ -57,10 +57,11 @@ and respawn; do not argue.
 
 ## 4. Gate on evidence
 
-Read `RAN`, then **re-run the decisive check yourself** (or `/validate`). A
-report is a claim; the re-run is the evidence. Hooks already run ruff/ty on
-every edit and bounce a report whose claims the transcript does not support -
-they cannot tell you whether a truthful report means the predicate holds.
+Read `RAN`, then **re-run the decisive check yourself**: `/validate` for a
+Python change, otherwise the predicate's own command. A report is a claim; the
+re-run is the evidence. Hooks already run ruff/ty on every edit and bounce a
+report whose claims the transcript does not support - they cannot tell you
+whether a truthful report means the predicate holds.
 
 A failed or partial second attempt means re-plan - smaller scope, `explore`
 first - never respawn the same prompt.
@@ -72,7 +73,9 @@ boundary. Findings at HIGH or above are resolved before "done".
 
 Shrink the diff to what the predicate needs. Re-check the predicate. Report:
 what changed, what you ran (exact commands, results), residual risk. No agent
-transcripts.
+transcripts. If the branch is meant to become a pull request, `/pr` opens it
+with the account that owns the repository and carries those results into the
+body.
 
 ## Task
 
