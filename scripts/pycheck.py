@@ -157,35 +157,48 @@ def venv_anchor(start: Path) -> Path:
     return start
 
 
+def _is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:  # e.g. PermissionError on another user's dir under /tmp
+        return False
+
+
 def _venv_at(candidate: Path) -> Path | None:
-    return candidate if (candidate / "pyvenv.cfg").is_file() else None
+    try:
+        return candidate if (candidate / "pyvenv.cfg").is_file() else None
+    except OSError:
+        return None
 
 
 def site_packages(venv: Path) -> list[Path]:
     found = []
     windows = venv / "Lib" / "site-packages"
-    if windows.is_dir():
+    if _is_dir(windows):
         found.append(windows)
-    found.extend(p for p in (venv / "lib").glob("python*/site-packages") if p.is_dir())
+    found.extend(p for p in (venv / "lib").glob("python*/site-packages") if _is_dir(p))
     return found
 
 
 def venv_owns(venv: Path, target: Path) -> bool:
     """True when an editable-install .pth in `venv` points at a directory that
     contains `target` - the signal that this env is the project's own."""
-    for packages in site_packages(venv):
-        for pth in packages.glob("*.pth"):
-            try:
-                lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith(("import ", "#")):
+    try:
+        for packages in site_packages(venv):
+            for pth in packages.glob("*.pth"):
+                try:
+                    lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
                     continue
-                candidate = Path(line)
-                if candidate.is_absolute() and candidate.is_dir() and same_or_under(target, candidate):
-                    return True
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith(("import ", "#")):
+                        continue
+                    candidate = Path(line)
+                    if candidate.is_absolute() and _is_dir(candidate) and same_or_under(target, candidate):
+                        return True
+    except (OSError, ValueError):  # unreadable env, or a .pth line that is not a path
+        return False
     return False
 
 
@@ -205,7 +218,7 @@ def find_venv(start: Path) -> tuple[Path | None, str]:
 
     for anc in chain:
         try:
-            children = [c for c in anc.iterdir() if c.is_dir() and not c.name.startswith(".")]
+            children = [c for c in anc.iterdir() if not c.name.startswith(".") and _is_dir(c)]
         except OSError:
             children = []
         for child in children:
