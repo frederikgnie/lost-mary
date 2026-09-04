@@ -12,6 +12,9 @@
       "Bash(python tests/test-skills.py*)",
       "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -Verify*)",
       "Bash(./install.sh --verify*)"
+    ],
+    "deny": [
+      "AskUserQuestion"
     ]
   }
 }
