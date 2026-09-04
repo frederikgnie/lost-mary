@@ -286,7 +286,7 @@ for event in hooks:
 perms = data.get("permissions") or {}
 auto = data.get("autoMode") or {}
 allow_rules = auto.get("allow") if isinstance(auto, dict) else None
-if isinstance(allow_rules, list) and "$defaults" not in allow_rules:
+if allow_rules is not None and (not isinstance(allow_rules, list) or "$defaults" not in allow_rules):
     print('DRIFT autoMode.allow replaces the built-in classifier rules - add "$defaults" (see settings.example.json)')
 elif allow_rules is None and isinstance(perms, dict) and perms.get("defaultMode") == "auto":
     print("NOTE: auto mode without autoMode.allow - the classifier runs on its built-in rules only; template in settings.example.json")

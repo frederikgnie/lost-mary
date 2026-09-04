@@ -1,6 +1,6 @@
 # Getting started - a 101
 
-What this is: two hooks that make Claude Code check its own Python work, three
+What this is: hooks that check Claude Code's own work, three
 lean agent roles with cost routing, three slash commands, and one short page of
 rules. Read time ~5 minutes, setup ~3.
 

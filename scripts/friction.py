@@ -43,6 +43,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True  # read-only means no __pycache__ either, not even for the no-punt import
+
+NOASK_BLOCK = "blocked while this session runs under /lost-mary"  # first sentence of no-punt's sibling, no-ask
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # transcript text goes to a terminal; strip escapes
 REFUSAL_MARKERS = (
     "denied by the Claude Code auto mode classifier",
     "requested permissions",
@@ -60,6 +64,7 @@ class ProjectStats:
     sessions: int = 0
     questions: int = 0
     recommended: int = 0
+    blocked: int = 0  # menus no-ask stopped before they reached the user
     refusals: int = 0
     hand_backs: int = 0
 
@@ -92,6 +97,10 @@ class Report:
     @property
     def hand_backs(self) -> int:
         return sum(p.hand_backs for p in self.projects.values())
+
+    @property
+    def blocked(self) -> int:
+        return sum(p.blocked for p in self.projects.values())
 
 
 def load_punt_check() -> tuple[Any, str | None]:
@@ -147,6 +156,7 @@ def has_recommended(question: Any) -> bool:
 
 def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase: Any) -> None:
     pending: dict[str, tuple[str, str]] = {}  # tool_use id -> (tool name, command)
+    asked: dict[str, tuple[int, int]] = {}  # AskUserQuestion id -> (questions, of which with a recommended option)
     seen: set[str] = set()  # streaming writes one message as several records; count it once
     project = path.parent.name
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -171,8 +181,9 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
                     if phrase:
                         stats.hand_backs += 1
                         if len(report.hand_back_examples) < 8:
-                            snippet = " ".join(text.split())
-                            report.hand_back_examples.append(f"[{project}] {phrase!r}  {snippet[:110]}")
+                            snippet = CONTROL.sub("", " ".join(text.split()))
+                            clean_phrase = CONTROL.sub("", phrase)
+                            report.hand_back_examples.append(f"[{project}] {clean_phrase!r}  {snippet[:110]}")
             for item in content:
                 if not isinstance(item, dict):
                     continue
@@ -180,21 +191,47 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
                     name = str(item.get("name", ""))
                     tool_input = item.get("input")
                     command = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
-                    pending[str(item.get("id"))] = (name, command)
+                    uid = str(item.get("id"))
+                    pending[uid] = (name, command)
                     if name == "AskUserQuestion":
                         questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
                         if not isinstance(questions, list):
                             questions = [None]
-                        stats.questions += len(questions)
-                        stats.recommended += sum(1 for q in questions if has_recommended(q))
+                        # Counted when the result arrives: a menu that no-ask blocked was never asked.
+                        if uid in asked:  # no result ever came for the earlier one - it was still asked
+                            count, recommended = asked.pop(uid)
+                            stats.questions += count
+                            stats.recommended += recommended
+                        asked[uid] = (len(questions), sum(1 for q in questions if has_recommended(q)))
                 elif item.get("type") == "tool_result":
-                    body = text_of(item.get("content")) if not isinstance(item.get("content"), str) else item["content"]
-                    if any(marker in body for marker in REFUSAL_MARKERS):
+                    uid = str(item.get("tool_use_id"))
+                    raw = item.get("content")
+                    body = raw if isinstance(raw, str) else text_of(raw)
+                    if uid in asked:
+                        count, recommended = asked.pop(uid)
+                        if NOASK_BLOCK in body:
+                            stats.blocked += count
+                            continue
+                        if not refused(body):
+                            stats.questions += count
+                            stats.recommended += recommended
+                            continue
+                    if refused(body):
                         stats.refusals += 1
-                        name, command = pending.get(str(item.get("tool_use_id")), ("?", ""))
+                        name, command = pending.get(uid, ("?", ""))
                         report.refused_tools[name] += 1
                         if command:
                             report.refused_commands[leading_token(command)] += 1
+    # Menus whose result never arrived (session cut off) were still asked.
+    for count, recommended in asked.values():
+        stats.questions += count
+        stats.recommended += recommended
+
+
+def refused(body: str) -> bool:
+    """A refusal is the result itself, so its marker sits at the start; a Read of a file that merely mentions
+    one does not count."""
+    return any(marker in body[:300] for marker in REFUSAL_MARKERS)
 
 
 def scan_settings(path: Path, report: Report) -> None:
@@ -215,21 +252,34 @@ def scan_settings(path: Path, report: Report) -> None:
     ]
 
 
+def mtime(path: Path) -> float | None:
+    """Modification time, or None for a file that vanished or a dangling symlink."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def build_report(projects_dir: Path, settings: Path, sessions: int) -> Report:
     report = Report()
     punt_phrase, note = load_punt_check()
     if note:
         report.notes.append(note)
-    files = sorted(projects_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     # Only the lead's own transcripts: subagents (<project>/<session>/subagents/) and
     # Workflow agents (wf_* project dirs) cannot ask the user anything.
-    files = [f for f in files if f.parent.name != "subagents" and not f.parent.name.startswith("wf_")]
-    files = files[:sessions]
+    by_mtime: dict[Path, float] = {}
+    for candidate in projects_dir.rglob("*.jsonl"):
+        if candidate.parent.name == "subagents" or candidate.parent.name.startswith("wf_"):
+            continue
+        stamp = mtime(candidate)
+        if stamp is not None:
+            by_mtime[candidate] = stamp
+    files = sorted(by_mtime, key=by_mtime.__getitem__, reverse=True)[:sessions]
     if not files:
         report.notes.append(f"no transcripts under {projects_dir}")
         return report
     report.sessions = len(files)
-    stamps = sorted(f.stat().st_mtime for f in files)
+    stamps = sorted(by_mtime[f] for f in files)
     report.first = datetime.fromtimestamp(stamps[0], UTC).date().isoformat()
     report.last = datetime.fromtimestamp(stamps[-1], UTC).date().isoformat()
     for path in files:
@@ -250,6 +300,7 @@ def as_json(report: Report) -> dict[str, Any]:
         "last": report.last,
         "questions": report.questions,
         "recommended": report.recommended,
+        "blocked": report.blocked,
         "refusals": report.refusals,
         "hand_backs": report.hand_backs,
         "allow_total": report.allow_total,
@@ -261,6 +312,7 @@ def as_json(report: Report) -> dict[str, Any]:
                 "sessions": p.sessions,
                 "questions": p.questions,
                 "recommended": p.recommended,
+                "blocked": p.blocked,
                 "refusals": p.refusals,
                 "hand_backs": p.hand_backs,
             }
@@ -278,8 +330,9 @@ def pct(part: int, whole: int) -> str:
 def as_text(report: Report) -> str:
     lines = [f"friction report - {report.sessions} session(s), {report.first}..{report.last}", ""]
     lines.append(
-        f"questions     {report.questions} AskUserQuestion call(s), "
-        f'{report.recommended} with a "(Recommended)" option ({pct(report.recommended, report.questions)})'
+        f"questions     {report.questions} asked via menus (AskUserQuestion), "
+        f'{report.recommended} with a "(Recommended)" option ({pct(report.recommended, report.questions)}); '
+        f"{report.blocked} blocked by no-ask"
     )
     tools = ", ".join(f"{n} {c}" for n, c in report.refused_tools.most_common(4))
     lines.append(f"refusals      {report.refusals} tool call(s) refused" + (f"  ({tools})" if tools else ""))
@@ -292,7 +345,8 @@ def as_text(report: Report) -> str:
         for name, p in sorted(report.projects.items()):
             lines.append(
                 f"  {name[:48]:<{width}}  sessions {p.sessions:>3}  questions {p.questions:>3} "
-                f"({p.recommended} recommended)  refusals {p.refusals:>3}  hand-backs {p.hand_backs:>3}"
+                f"({p.recommended} recommended, {p.blocked} blocked)  "
+                f"refusals {p.refusals:>3}  hand-backs {p.hand_backs:>3}"
             )
     if report.refused_commands:
         lines += ["", "refused commands (leading token)"]
@@ -303,7 +357,7 @@ def as_text(report: Report) -> str:
         lines += [f"  {example}" for example in report.hand_back_examples]
     if report.dead_allow:
         lines += ["", "dead allow rules (exact Bash entries - prefer `Bash(cmd *)`)"]
-        lines += [f"  {rule[:110]}" for rule in report.dead_allow[:12]]
+        lines += [f"  {CONTROL.sub('', rule)[:110]}" for rule in report.dead_allow[:12]]
         if len(report.dead_allow) > 12:
             lines.append(f"  ... and {len(report.dead_allow) - 12} more")
     if report.notes:
@@ -335,4 +389,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a CLI, not a hook: say what broke, exit non-zero, no traceback
+        print(f"friction: unexpected error ({exc!r})", file=sys.stderr)
+        sys.exit(1)

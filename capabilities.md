@@ -30,14 +30,14 @@ format internal and unstable. If neither resolves, the hook falls back to
 searching the project directory for `agent-<id>.jsonl`, then fails open with a
 notice. `tests/test-hooks.py` pins the observed shape.
 
-**Both hooks fail open, loudly.** An unreadable payload, a missing transcript
+**Every hook fails open, loudly.** An unreadable payload, a missing transcript
 or a missing tool prints a one-line notice on stderr and exits 0. That is the
 right call for availability and the wrong one for enforcement: if Claude Code
 renames a field, the hooks stop acting and only the notice tells you. After an
 upgrade, re-run `tests/test-hooks.py` (catches our bugs, not theirs) **and** the
 live smoke test in `GETTING-STARTED.md` §3 (catches theirs).
 
-**Stdin encoding.** Both hooks read `sys.stdin.buffer` and decode `utf-8-sig`.
+**Stdin encoding.** All hooks read `sys.stdin.buffer` and decode `utf-8-sig`.
 PowerShell prepends a UTF-8 BOM when piping to a native executable; text-mode
 stdin on Windows would turn it into mojibake and the hook would fail open.
 
@@ -154,4 +154,4 @@ Fill this in after a real session confirms behaviour; the test suite cannot.
 | 2026-09-04 | 2.1.260 | Claude writes `~/.claude/settings.json` in auto mode (Bash heredoc, Python `write_text`, Write tool) | BLOCKED by the auto-mode classifier on every route. Scratchpad scripts that assigned `permissions.deny` / `autoMode` keys, or wrote prose about doing so into this file, were blocked as well (content-aware). Writing the project's own `.claude/settings.json` via the Write tool succeeded; the Edit tool on this file succeeded. |
 | 2026-09-04 | 2.1.260 | `install.ps1` from a Bash tool call in auto mode (writes `~/.claude/skills`, `~/.claude/agent-library`) | OK - ran unprompted, installed the three changed files, wrote `.backup.<ts>` copies. |
 | 2026-09-04 | 2.1.260 | `no-ask` blocks `AskUserQuestion` in a session that ran `/lost-mary` | **NOT YET VERIFIED LIVE.** `tests/test-hooks.py` covers the script; the docs do not say whether `PreToolUse` fires for this tool. To verify: fresh session, `/lost-mary <anything>`, then ask the lead to present an option menu - expect the block message in its reply, not a menu. Record the result here. |
-| 2026-09-04 | 2.1.260 | `no-punt` bounces a lead message containing "I'll leave that for you" | **NOT YET VERIFIED LIVE.** `tests/test-hooks.py` covers the script (5 hand-backs blocked, 6 closing messages allowed, one-strike, transcript fallback). To verify: ask the lead to end a turn with that sentence; expect the bounce and a re-emitted message. |
+| 2026-09-04 | 2.1.260 | `no-punt` bounces a lead message containing "I'll leave that for you" | **NOT YET VERIFIED LIVE.** `tests/test-hooks.py` covers the script (hand-backs blocked - pronoun, noun phrase or backticked object; closing, quoted and negated messages allowed; one-strike; streamed-message fallback). To verify: ask the lead to end a turn with that sentence; expect the bounce and a re-emitted message. |

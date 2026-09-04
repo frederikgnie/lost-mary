@@ -161,13 +161,13 @@ live; restart if it does not.
 | 13-key JSON handoff envelope + schema + validator + `SubagentStop` format hook | 4-line prose report + `check-evidence` transcript hook | Nothing downstream parsed the JSON except the hook; it enforced the *shape* of a claim, not its truth. The transcript is the evidence. |
 | `PreToolUse` regex denylist keeping review roles from writing via Bash | Review roles have no Bash | A denylist over shell text is bypassable (v1 said so itself); no sandbox exists on Windows; the lead can paste `git diff`. |
 | 7 persona roles, no model routing | 3 roles with `model`/`effort` in frontmatter | Persona text moves modern models little; routing moves cost a lot. |
-| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~1.4 KB) | Rules compete for attention; one canonical copy, on demand. |
+| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~2.2 KB) | Rules compete for attention; one canonical copy, on demand. |
 | Manual `git worktree add` convention | Agent tool `isolation: worktree` | The runtime does it. |
 | Nothing runs on edit | `pycheck` PostToolUse hook | The single highest-leverage mechanism for a typed codebase. |
 
 ## Tests and CI
 
-`python tests/test-hooks.py` (both hooks, real `ruff`/`ty`, synthetic
+`python tests/test-hooks.py` (every hook and the friction CLI, real `ruff`/`ty`, synthetic
 transcripts in the observed format, BOM cases), `python tests/test-agents.py`
 (frontmatter, tool properties, report formats), `python tests/test-skills.py`
 (frontmatter, no `@` imports). [`ci.yml`](.github/workflows/ci.yml) runs them on

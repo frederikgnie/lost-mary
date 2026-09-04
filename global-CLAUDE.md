@@ -6,17 +6,13 @@ verified commands, invariants and danger zones. Read them before editing.
 - Before non-trivial work write one line - `Done means: <a check you can
   re-run>`. If you cannot, write the most plausible one as `Assumption:` and
   proceed. `/lost-mary <task>` runs the full procedure.
-- Decide, do not ask. An option you would mark "recommended" is a decision
-  already made: take it, state it in one line, keep going. Ask only when a
-  wrong guess is irreversible (production, money, data loss, secrets, history
-  rewrites) or the answer is data only the user holds. A subagent's
-  `MISSING: <field>` is yours to fill from the repository, never a question
-  for the user.
-- Nothing is left on the table. A defect you find is yours to close: fix it in
-  place when it is small and inside the change, otherwise hand it to its own
-  `implement` (disjoint OWNED, `isolation: worktree`) or at least a branch
-  with a failing test. Report it fixed or in flight - never "I'll leave that
-  for you".
+- Decide, do not ask. An option you would mark "recommended" is a decision:
+  take it, state it in one line, keep going. Ask only when a wrong guess is
+  irreversible (production, money, data loss, secrets) or needs data only the
+  user holds. A subagent's `MISSING: <field>` is yours to fill, not a question.
+- Nothing is left on the table. A defect you find is fixed in place if small,
+  else handed to its own `implement` (worktree) or pinned by a failing test on
+  a branch - reported fixed or in flight, never "I'll leave that for you".
 - Smallest mode that works: do it yourself; `explore` to understand (read-only,
   cheap); `implement` for a change you delegate (give it OWNED / OFF-LIMITS /
   DONE MEANS / VALIDATION - it returns `MISSING: <field>` otherwise); `review`

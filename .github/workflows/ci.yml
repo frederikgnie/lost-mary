@@ -145,6 +145,29 @@ jobs:
           fi
           cp settings.example.json "$FAKE_HOME/.claude/settings.json"
           HOME="$FAKE_HOME" bash ./install.sh --verify
+      - name: --verify flags autoMode.allow without "$defaults" (list and scalar), passes with the example
+        run: |
+          set -euo pipefail
+          python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
+          import json, sys
+          p = sys.argv[1]; d = json.load(open(p, encoding="utf-8"))
+          d["autoMode"] = {"allow": ["Pushing to feature branches is fine"]}
+          json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+          PY
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with autoMode.allow lacking \$defaults" >&2; exit 1
+          fi
+          python3 - "$FAKE_HOME/.claude/settings.json" <<'PY'
+          import json, sys
+          p = sys.argv[1]; d = json.load(open(p, encoding="utf-8"))
+          d["autoMode"] = {"allow": "just a string"}
+          json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+          PY
+          if HOME="$FAKE_HOME" bash ./install.sh --verify; then
+            echo "ERROR: --verify passed with a scalar autoMode.allow" >&2; exit 1
+          fi
+          cp settings.example.json "$FAKE_HOME/.claude/settings.json"
+          HOME="$FAKE_HOME" bash ./install.sh --verify
       - name: --no-overwrite leaves a differing file alone and exits 3 (INCOMPLETE)
         run: |
           set -euo pipefail
@@ -332,6 +355,19 @@ jobs:
           if ($global:InstallerOutput -notmatch 'placeholder') { throw '-Verify failed but did not name the placeholder path.' }
           (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on a clean, wired install.' }
+
+          Write-Host '--- -Verify flags autoMode.allow without $defaults (list and scalar), passes with the example ---'
+          $j = Get-Content $settings -Raw | ConvertFrom-Json
+          $j | Add-Member -NotePropertyName autoMode -NotePropertyValue ([pscustomobject]@{ allow = @('Pushing to feature branches is fine') }) -Force
+          $j | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with autoMode.allow lacking $defaults.' }
+          if ($global:InstallerOutput -notmatch 'autoMode.allow') { throw '-Verify failed but did not name autoMode.allow.' }
+          $j.autoMode = [pscustomobject]@{ allow = 'just a string' }
+          $j | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with a scalar autoMode.allow.' }
+          Copy-Item ./settings.example.windows.json $settings -Force
+          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after restoring the example settings.' }
 
           Write-Host '--- -NoOverwrite leaves a differing file alone and exits 3 ---'
           $explore = Join-Path $fake '.claude/agents/explore.md'

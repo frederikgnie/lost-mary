@@ -13,9 +13,11 @@ report again. One strike: Claude Code re-invokes the hook on the re-emitted
 stop with `stop_hook_active: true`, and that stop is allowed, so a message that
 legitimately needs the phrase goes through on the second try.
 
-Quoted text is ignored (straight or curly double quotes, backticks, markdown
-`>` lines), so restating the rule - never "I'll leave that for you" - is not a
-violation.
+Quoted text is neutralised (straight or curly double quotes and backtick spans
+become the word QUOTED; markdown `>` lines are dropped), so restating the rule -
+never "I'll leave that for you" - is not a violation, while "I'll leave
+`loader.py` for you" still is. A negated hand-back ("nothing is left for you",
+"nothing for you to decide") is the opposite claim and is allowed.
 
 Wiring: Stop (the lead) and optionally SubagentStop (implement should write
 `FOUND: <path> - <one line>`, not hand back). Exit 2 blocks the stop and
@@ -23,8 +25,9 @@ returns stderr to the model; exit 0 allows. Fails OPEN, with a notice on
 stderr, when the payload cannot be read or no final message can be found.
 
 Runtime dependencies (see capabilities.md): stdin fields `stop_hook_active`,
-`last_assistant_message` (preferred); otherwise the last `type: assistant`
-record of `agent_transcript_path` / `transcript_path` is used.
+`last_assistant_message` (preferred); otherwise the last assistant message of
+`agent_transcript_path` / `transcript_path`, joining the records a streamed
+message is split into (same `message.id`).
 """
 
 from __future__ import annotations
@@ -37,16 +40,21 @@ from typing import Any
 
 # A hand-back names the user as the one who will act. Each pattern needs the
 # "you" (or a stand-in) so that "left as a follow-up in PR #12" does not match.
-# "leave/left <thing> for you" accepts a pronoun or a short noun phrase
-# ("the flaky test", "that one"), up to four words.
-THING = r"(?:[\w'`./-]+\s+){1,4}?"
+# "leave/left <thing> for you" accepts a pronoun, the QUOTED placeholder or a
+# short noun phrase (up to four words) - but not a note or a message, and not
+# "for you to inspect/review": showing something is not handing work back.
+THING = (
+    r"(?!(?:a|an|the|this)\s+(?:note|message|summary|link|comment|write-?up|report|list|pointer)\b)"
+    r"(?:[\w'`./-]+\s+){1,4}?"
+)
+YOU = r"you\b(?!\s+to\s+(?:inspect|review|read|see|check|verify|compare|confirm|skim|browse)\b)"
 PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:i(?:'ll| will|'d| would)?\s+)?leav(?:e|ing)\s+" + THING + r"(?:for|to|up to|with)\s+you\b",
-        r"\bleft\s+" + THING + r"(?:for|to|with)\s+you\b",
+        r"\b(?:i(?:'ll| will|'d| would)?\s+)?leav(?:e|ing)\s+" + THING + r"(?:for|to|up to|with)\s+" + YOU,
+        r"\bleft\s+" + THING + r"(?:for|to|with)\s+" + YOU,
         r"\bfor\s+you\s+to\s+(?:fix|handle|address|resolve|decide|sort\s+out|look\s+(?:at|into)|follow\s+up(?:\s+on)?|take\s+(?:a\s+look|care\s+of))\b",
-        r"\b(?:you|someone|somebody)\s+(?:may|might|should|could|will)\s+want\s+to\s+(?:fix|address|resolve|handle|look\s+(?:at|into)|follow\s+up|take\s+a\s+look)\b",
+        r"\b(?:you|someone|somebody)\s+(?:may|might|should|could|will)\s+want\s+to\s+(?:fix|address|resolve|handle|follow\s+up)\b",
         r"\b(?:did\s+not|didn't|haven't|have\s+not|won't|will\s+not)\s+(?:fix|address|touch)\s+(?:that|this|it|them)\b[^.\n]{0,60}\b(?:for\s+you|yourself|on\s+your\s+(?:side|end))\b",
         r"\b(?:over|up)\s+to\s+you\s+(?:to\s+)?(?:fix|decide|handle|address)\b",
     )
@@ -54,6 +62,16 @@ PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 
 QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
 QUOTE_LINE = re.compile(r"(?m)^\s*>.*$")
+
+# Only a negative subject (with its verb, if any) or a negated copula right
+# before the match counts as negating the hand-back itself: "Nothing is left for
+# you" and "is not left to you" are allowed, "the fix is not small so I'll leave
+# that for you" is still a hand-back.
+NEGATED = re.compile(
+    r"(?:\b(?:nothing|none|no\s+one|nobody)\s+(?:(?:is|was|are|were|remains|gets|else)\s+)?"
+    r"|\b(?:is|are|was|were)\s+not\s+|\b(?:isn't|aren't|wasn't|weren't)\s+)$",
+    re.IGNORECASE,
+)
 
 BLOCK_HEADER = "Nothing is left on the table (no-punt)."
 BLOCK_BODY = (
@@ -69,7 +87,8 @@ def notice(text: str) -> None:
 
 
 def read_payload() -> dict[str, Any] | None:
-    raw = sys.stdin.buffer.read()
+    buffer = getattr(sys.stdin, "buffer", None)
+    raw = buffer.read() if buffer is not None else sys.stdin.read().encode("utf-8")
     try:
         data = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -88,7 +107,9 @@ def text_of(content: Any) -> str:
 
 
 def last_assistant_text(transcript: Path) -> str | None:
-    """The text of the last assistant record in a JSONL transcript, or None."""
+    """The text of the last assistant message, joining the records a streamed message is split into."""
+    current_id: object = None
+    parts: list[str] = []
     found: str | None = None
     with transcript.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -100,9 +121,18 @@ def last_assistant_text(transcript: Path) -> str | None:
                 continue
             if not isinstance(record, dict) or record.get("type") != "assistant":
                 continue
-            text = text_of((record.get("message") or {}).get("content"))
-            if text.strip():
-                found = text
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            # Records of one streamed message share message.id; without ids each record stands alone.
+            message_id: object = message.get("id") or record.get("uuid") or object()
+            if message_id != current_id:
+                if any(part.strip() for part in parts):
+                    found = "\n".join(parts)
+                current_id, parts = message_id, []
+            parts.append(text_of(message.get("content")))
+    if any(part.strip() for part in parts):
+        found = "\n".join(parts)
     return found
 
 
@@ -124,18 +154,12 @@ def final_message(payload: dict[str, Any]) -> str | None:
 
 
 def strip_quoted(text: str) -> str:
-    return QUOTED.sub(" ", QUOTE_LINE.sub(" ", text))
-
-
-# "Nothing is left for you", "nothing for you to decide": a negated hand-back is
-# the opposite claim. Look a few words back from the match for the negation.
-NEGATED = re.compile(
-    r"\b(?:nothing|no|not|never|without|isn't|aren't|wasn't|is not|are not)\s+(?:[\w'-]+\s+){0,3}$", re.IGNORECASE
-)
+    """Quoted spans become the word QUOTED - still an object for "leave ... for you", never a match themselves."""
+    return QUOTED.sub(" QUOTED ", QUOTE_LINE.sub(" ", text))
 
 
 def punt_phrase(text: str) -> str | None:
-    """The first non-negated hand-back phrase in the unquoted text, or None."""
+    """The first non-negated hand-back phrase in the neutralised text, or None."""
     clean = strip_quoted(text)
     for pattern in PUNT_PATTERNS:
         for match in pattern.finditer(clean):
@@ -164,4 +188,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a hook fails open, loudly - never with a traceback
+        notice(f"unexpected error ({exc!r}) - allowing")
+        sys.exit(0)

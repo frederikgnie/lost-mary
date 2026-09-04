@@ -696,6 +696,10 @@ t = session_file(
 rc, err = run_hook(NOASK, ask_event(t))
 expect("the tag quoted in prose or in a tool call is not an invocation -> allow", rc, ALLOW, err)
 
+t = session_file([{"type": "user", "message": "<command-name>/lost-mary</command-name>"}, command("lost-mary", "a")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("a malformed record (message is a string) is skipped, the real invocation still counts -> block", rc, BLOCK, err)
+
 t = session_file([command("lost-mary", "a")])
 rc, err = run_hook(NOASK, ask_event(t, tool="Bash"))
 expect("another tool under /lost-mary -> allow", rc, ALLOW, err)
@@ -733,6 +737,8 @@ PUNTS = [
     "Done. The flaky test in test_io.py is left for you to look at.",
     "There is a similar bug in sync.py - you may want to fix that separately.",
     "I did not touch the config validation; that one is for you to handle.",
+    "Fixed the parser. I'll leave `loader.py` for you.",
+    "The fix is not small so I'll leave that for you.",
     "Done. I'll leave the flaky test for you.",
     "The retry logic is wrong too, but that's up to you to decide.",
 ]
@@ -752,6 +758,9 @@ OK_MESSAGES = [
     "Left the default timeout in place for now; both bugs are fixed.",
     "Nothing is left as a decision for you - everything I implemented is additive.",
     "No polling, nothing for you to decide; I'll push when they finish.",
+    "I'll leave the worktree in place for you to inspect.",
+    "I left a note for you in NOTES.md with the commands I ran.",
+    "You may want to take a look at the PR description before merging.",
 ]
 for i, msg in enumerate(OK_MESSAGES):
     rc, err = run_hook(NOPUNT, stop_payload(msg))
@@ -776,6 +785,42 @@ t.write_text(
 )
 rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(t)))
 expect("no last_assistant_message -> read transcript -> block", rc, BLOCK, err)
+
+
+def streamed(message_id: str, text: str) -> dict[str, object]:
+    content = [{"type": "text", "text": text}]
+    return {
+        "type": "assistant",
+        "uuid": uuid.uuid4().hex,
+        "message": {"id": message_id, "role": "assistant", "content": content},
+    }
+
+
+t = NP / "lead2.jsonl"
+t.write_text(
+    "\n".join(
+        json.dumps(r)
+        for r in [
+            streamed("m1", "Working."),
+            streamed("m1", PUNTS[1]),
+            streamed("m2", "All fixed."),
+            streamed("m2", "FOUND: a.py - typo, fixed."),
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(t)))
+expect("fallback judges the last message only, not an earlier turn -> allow", rc, ALLOW, err)
+t.write_text(
+    "\n".join(
+        json.dumps(r) for r in [streamed("m1", "Working."), streamed("m2", PUNTS[1]), streamed("m2", "Let me know.")]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(t)))
+expect("hand-back in an earlier record of the last streamed message -> block", rc, BLOCK, err)
 
 rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(NP / "missing.jsonl")))
 expect("no message anywhere fails open", rc, ALLOW, err)
@@ -826,6 +871,16 @@ def jsonl(records: list[dict[str, object]]) -> str:
             *refused("r1", "cd /repo && EU_env/.venv/Scripts/python.exe -m pytest -q"),
             said("Done. I'll leave the flaky test for you."),
             said("Done. I'll leave the flaky test for you."),  # streamed twice - one hand-back
+            assistant(
+                tool_use(
+                    "q9",
+                    "AskUserQuestion",
+                    {"questions": [{"question": "Menu?", "options": [{"label": "A (Recommended)"}]}]},
+                )
+            ),
+            result("q9", "AskUserQuestion is blocked while this session runs under /lost-mary. Decide.", is_error=True),
+            assistant(tool_use("rd", "Read", {"file_path": "capabilities.md"})),
+            result("rd", "x" * 400 + "denied by the Claude Code auto mode classifier"),
         ]
     ),
     encoding="utf-8",
@@ -862,8 +917,9 @@ expect("friction --json exits 0", proc.returncode, ALLOW, proc.stderr.decode())
 data = json.loads(proc.stdout.decode("utf-8"))
 expect_true("two sessions counted; subagent and wf_* transcripts skipped", data["sessions"] == 2, str(data))
 expect_true("questions 2, one recommended", data["questions"] == 2 and data["recommended"] == 1, str(data))
+expect_true("a menu blocked by no-ask is counted as blocked, not asked", data["blocked"] == 1, str(data))
 expect_true(
-    "two refusals, attributed past `cd` to the real command",
+    "two refusals (a Read that merely mentions a marker is not one), attributed past `cd` to the real command",
     data["refusals"] == 2
     and data["refused_commands"].get("EU_env/.venv/Scripts/python.exe") == 1
     and data["refused_commands"].get("Stop-ScheduledTask") == 1,

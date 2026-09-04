@@ -47,7 +47,8 @@ def notice(text: str) -> None:
 
 
 def read_payload() -> dict[str, Any] | None:
-    raw = sys.stdin.buffer.read()
+    buffer = getattr(sys.stdin, "buffer", None)
+    raw = buffer.read() if buffer is not None else sys.stdin.read().encode("utf-8")
     try:
         data = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -65,7 +66,8 @@ def command_of(line: str) -> str | None:
         return None
     if not isinstance(record, dict) or record.get("type") != "user":
         return None
-    content = (record.get("message") or {}).get("content")
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
         return None
     text = content.lstrip()
@@ -118,4 +120,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a hook fails open, loudly - never with a traceback
+        notice(f"unexpected error ({exc!r}) - allowing")
+        sys.exit(0)
