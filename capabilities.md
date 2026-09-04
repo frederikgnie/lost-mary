@@ -90,9 +90,20 @@ context for the rest of the session - bodies are kept short for that reason.
 
 ## Settings (`settings.example*.json`)
 
-Only the `hooks` block is prescribed. Agent Teams
+The `hooks` block is prescribed; `autoMode` is a template (below). Agent Teams
 (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) are no longer part of the library's
 model; the Agent tool's `isolation: worktree` covers concurrent writers.
+
+**`autoMode` template and the extra `--verify` checks (2026-09-04).** The
+examples carry `autoMode.allow` with `"$defaults"` plus two prose rules; auto
+mode reads it from `~/.claude/settings.json` only. `--verify` reports DRIFT when
+`autoMode.allow` exists without `"$defaults"` (the list would replace the
+built-in classifier rules), a NOTE when `defaultMode` is `auto` with no
+`autoMode.allow`, and a NOTE when five or more `Bash(...)` allow rules are exact
+strings (they match one command forever - the shape that keeps prompts coming).
+`scripts/friction.py` is the read-only CLI behind that last number: it counts
+questions, refusals, hand-backs and dead allow rules over the last N transcripts
+and depends on the same transcript shape as `check-evidence`.
 
 **Permissions and auto mode** (verified 2026-09-04 against
 `code.claude.com/docs/en/auto-mode-config` and `permissions`):

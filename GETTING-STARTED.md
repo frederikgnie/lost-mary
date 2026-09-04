@@ -124,6 +124,8 @@ library's defaults.
 | `check-evidence` never bounces anything | matcher does not include the agent type, or the transcript layout changed | `--verify` shows the wiring; `capabilities.md` lists the layout the hook expects |
 | The lead still shows option menus under `/lost-mary` | `no-ask` not wired (`--verify` shows it), or `PreToolUse` does not fire for `AskUserQuestion` on this version | pipe a payload by hand: `echo '{"tool_name":"AskUserQuestion","transcript_path":"<session .jsonl>"}' \| python scripts/no-ask.py`; want exit 2 when that transcript holds a `/lost-mary` turn. Fallback: `"deny": ["AskUserQuestion"]` under `permissions` |
 | The lead still ends with "I'll leave that for you" | `no-punt` not wired (`--verify` shows it), or the phrasing is one the patterns miss | pipe the message by hand: `echo '{"last_assistant_message":"I will leave that for you"}' \| python scripts/no-punt.py`; want exit 2. Add the missed phrasing to `PUNT_PATTERNS` with a test |
+| `--verify` prints `NOTE: N exact Bash allow rules ...` | you clicked "always allow" on exact commands; those rules never fire again | replace them with prefix rules (`Bash(git push *)`); `scripts/friction.py` lists them |
+| `--verify` prints `DRIFT: autoMode.allow replaces the built-in classifier rules` | your `autoMode.allow` list has no `"$defaults"` entry, so it replaced the built-ins | add `"$defaults"` as the first entry (see `settings.example.json`) |
 | `/validate` or `/pr` missing from the `/` menu | skills normally register live, but discovery can lag | start a new session; restart if it still does not appear |
 | A retired v1 role still appears | `~/.claude/agents/<role>.md` re-created by hand or by another tool | `--verify` flags it as `STALE`; re-run the installer |
 

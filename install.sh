@@ -19,7 +19,7 @@ DRIFT_COUNT=0
 INCOMPLETE_COUNT=0
 
 # What v2 manages under ~/.claude/agent-library.
-LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py global-CLAUDE.md capabilities.md)
+LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py scripts/friction.py global-CLAUDE.md capabilities.md)
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
@@ -282,6 +282,19 @@ for event in hooks:
     for cmd, _ in commands(event):
         if "check-handoff-hook.py" in cmd or "guard-readonly-bash.py" in cmd:
             print(f"DRIFT {event} still references a v1 hook script (retired) - remove it")
+# Auto mode: custom classifier rules must extend the built-ins, not replace them.
+perms = data.get("permissions") or {}
+auto = data.get("autoMode") or {}
+allow_rules = auto.get("allow") if isinstance(auto, dict) else None
+if isinstance(allow_rules, list) and "$defaults" not in allow_rules:
+    print('DRIFT autoMode.allow replaces the built-in classifier rules - add "$defaults" (see settings.example.json)')
+elif allow_rules is None and isinstance(perms, dict) and perms.get("defaultMode") == "auto":
+    print("NOTE: auto mode without autoMode.allow - the classifier runs on its built-in rules only; template in settings.example.json")
+# Exact Bash allow rules match one command string forever; prefix rules are what reduce prompts.
+allow = perms.get("allow") if isinstance(perms, dict) else None
+dead = [r for r in (allow or []) if isinstance(r, str) and r.startswith("Bash(") and "*" not in r]
+if len(dead) >= 5:
+    print(f"NOTE: {len(dead)} exact Bash allow rules never match a different command - prefer Bash(cmd *); scripts/friction.py lists them")
 PYEOF
     return
   fi
@@ -375,9 +388,9 @@ fi
 ensure_import
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" 2>/dev/null || true
+  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" "$DEST_LIB/scripts/friction.py" 2>/dev/null || true
 else
-  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py $DEST_LIB/scripts/friction.py"
 fi
 
 echo

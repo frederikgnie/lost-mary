@@ -35,6 +35,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop hook.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. Honours `stop_hook_active`, so the re-emitted stop after a bounce is allowed through - the lead sees both messages and judges. |
 | [`scripts/no-ask.py`](scripts/no-ask.py) | **PreToolUse hook.** While a session runs under `/lost-mary` (invoked since the last `/clear`), an `AskUserQuestion` call is blocked and the model is told to take the option it would have marked recommended, record an `Assumption:` line and continue; a genuinely irreversible choice is asked in plain text. Outside the procedure the option menus work as usual. |
 | [`scripts/no-punt.py`](scripts/no-punt.py) | **Stop hook.** Bounces a final message that hands work back to you - "I'll leave that for you", "for you to fix", "you may want to look at" - once, with the three ways to close it: fix in place, delegate to an `implement` in a worktree, or commit a failing test. Quoted text is ignored; the re-emitted stop goes through (`stop_hook_active`). |
+| [`scripts/friction.py`](scripts/friction.py) | **CLI, not a hook.** Reads your last N session transcripts and reports how often Claude asked (and how often the menu already had a "(Recommended)" option), how many tool calls were refused and by which command, how many messages handed work back to you, and which `Bash(...)` allow rules are exact one-offs that can never match again. Run it before and after changing the rules. |
 | [`agents/explore.md`](agents/explore.md) | Read-only investigation on a cheap fast model (`sonnet`, medium effort). `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
 | [`agents/implement.md`](agents/implement.md) | Scoped change plus validation, on the session model. Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
 | [`agents/review.md`](agents/review.md) | Independent review at high effort with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
@@ -53,7 +54,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 ├── capabilities.md               # runtime dependencies + degradation
 ├── agents/       explore.md  implement.md  review.md
 ├── skills/       lost-mary/  validate/  pr/            (each a SKILL.md)
-├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py
+├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py  friction.py
 ├── tests/        test-hooks.py  test-agents.py  test-skills.py  fixtures/pycheck/
 ├── settings.example.json         # hooks block, POSIX
 ├── settings.example.windows.json # hooks block, Windows (absolute interpreter path)
@@ -92,6 +93,12 @@ The installer never touches `settings.json`. Merge the `hooks` block from
 `~/.claude/settings.json`. A running Claude Code normally picks it up live;
 restart if it does not.
 
+The examples also carry an `autoMode` template: two prose rules the auto-mode
+classifier reads, alongside `"$defaults"`, which keeps the built-in rules -
+without it your list *replaces* them, and `--verify` flags that as drift. Edit
+the placeholders or drop the block; auto mode reads `autoMode` from
+`~/.claude/settings.json` only, never from a project's `.claude/settings.json`.
+
 Windows: hook commands run under Git Bash when it is installed (PowerShell
 otherwise); `$HOME` expands in both. Use an **absolute path to `python.exe`** -
 `python` on PATH is often the Microsoft Store stub, which would make the hooks
@@ -107,6 +114,10 @@ Kill switches: `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
 findings if there are any; fix them in place. Before calling it done, `/validate`
 runs the project's checks and reports exact commands and counts. `/pr` pushes
 and opens the PR with the right account.
+
+**Measuring it.** `python ~/.claude/agent-library/scripts/friction.py` reads your
+last 50 sessions and prints how often Claude asked, was refused, or handed work
+back, plus the allow rules that can never match again. `--json` for diffing.
 
 **Delegating.** `explore` to understand, `implement` to change, `review` to
 critique. Every `implement` spawn carries `GOAL / SCOPE / OWNED / OFF-LIMITS /

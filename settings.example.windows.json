@@ -48,5 +48,12 @@
         ]
       }
     ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Pushing to a git branch that is not main or master, in repositories under <YOUR REPO ROOT>, is routine and pre-approved; pushes to main or master, force-pushes and history rewrites are not covered.",
+      "Running a project's own tests, lint and type-check through its virtual environment (pytest, ruff, ty) is pre-approved, including when chained after cd or with output redirected to a log file under the repository."
+    ]
   }
 }

@@ -37,12 +37,14 @@ from typing import Any
 
 # A hand-back names the user as the one who will act. Each pattern needs the
 # "you" (or a stand-in) so that "left as a follow-up in PR #12" does not match.
+# "leave/left <thing> for you" accepts a pronoun or a short noun phrase
+# ("the flaky test", "that one"), up to four words.
+THING = r"(?:[\w'`./-]+\s+){1,4}?"
 PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:i(?:'ll| will|'d| would)?\s+)?leav(?:e|ing)\s+"
-        r"(?:that|this|it|them|those|these)\s+(?:for|to|up to|with)\s+you\b",
-        r"\bleft\s+(?:that|this|it|them|those|these)\s+(?:for|to|with)\s+you\b",
+        r"\b(?:i(?:'ll| will|'d| would)?\s+)?leav(?:e|ing)\s+" + THING + r"(?:for|to|up to|with)\s+you\b",
+        r"\bleft\s+" + THING + r"(?:for|to|with)\s+you\b",
         r"\bfor\s+you\s+to\s+(?:fix|handle|address|resolve|decide|sort\s+out|look\s+(?:at|into)|follow\s+up(?:\s+on)?|take\s+(?:a\s+look|care\s+of))\b",
         r"\b(?:you|someone|somebody)\s+(?:may|might|should|could|will)\s+want\s+to\s+(?:fix|address|resolve|handle|look\s+(?:at|into)|follow\s+up|take\s+a\s+look)\b",
         r"\b(?:did\s+not|didn't|haven't|have\s+not|won't|will\s+not)\s+(?:fix|address|touch)\s+(?:that|this|it|them)\b[^.\n]{0,60}\b(?:for\s+you|yourself|on\s+your\s+(?:side|end))\b",
@@ -125,12 +127,20 @@ def strip_quoted(text: str) -> str:
     return QUOTED.sub(" ", QUOTE_LINE.sub(" ", text))
 
 
+# "Nothing is left for you", "nothing for you to decide": a negated hand-back is
+# the opposite claim. Look a few words back from the match for the negation.
+NEGATED = re.compile(
+    r"\b(?:nothing|no|not|never|without|isn't|aren't|wasn't|is not|are not)\s+(?:[\w'-]+\s+){0,3}$", re.IGNORECASE
+)
+
+
 def punt_phrase(text: str) -> str | None:
-    """The first hand-back phrase in the unquoted text, or None."""
+    """The first non-negated hand-back phrase in the unquoted text, or None."""
     clean = strip_quoted(text)
     for pattern in PUNT_PATTERNS:
-        match = pattern.search(clean)
-        if match:
+        for match in pattern.finditer(clean):
+            if NEGATED.search(clean[max(0, match.start() - 48) : match.start()]):
+                continue
             return " ".join(match.group(0).split())
     return None
 

@@ -24,7 +24,7 @@ $DriftCount = 0
 $IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
-$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'global-CLAUDE.md', 'capabilities.md')
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
@@ -219,6 +219,29 @@ function Test-Settings {
                 }
             }
         }
+    }
+    # Auto mode: custom classifier rules must extend the built-ins, not replace them.
+    $perms = $null
+    if ($data.PSObject.Properties['permissions']) { $perms = $data.permissions }
+    $auto = $null
+    if ($data.PSObject.Properties['autoMode']) { $auto = $data.autoMode }
+    $allowRules = $null
+    if ($null -ne $auto -and $auto.PSObject.Properties['allow'] -and $null -ne $auto.allow) { $allowRules = @($auto.allow) }
+    $defaultMode = ''
+    if ($null -ne $perms -and $perms.PSObject.Properties['defaultMode']) { $defaultMode = [string]$perms.defaultMode }
+    if ($null -ne $allowRules -and -not ($allowRules -contains '$defaults')) {
+        Write-Host ('DRIFT: autoMode.allow replaces the built-in classifier rules - add "$defaults" (see settings.example.windows.json) [' + $Settings + ']')
+        $script:DriftCount++
+    } elseif ($null -eq $allowRules -and $defaultMode -eq 'auto') {
+        Write-Host ('NOTE: auto mode without autoMode.allow - the classifier runs on its built-in rules only; template in settings.example.windows.json [' + $Settings + ']')
+    }
+    # Exact Bash allow rules match one command string forever; prefix rules are what reduce prompts.
+    $dead = @()
+    if ($null -ne $perms -and $perms.PSObject.Properties['allow'] -and $null -ne $perms.allow) {
+        $dead = @(@($perms.allow) | Where-Object { ($_ -is [string]) -and $_.StartsWith('Bash(') -and -not $_.Contains('*') })
+    }
+    if ($dead.Count -ge 5) {
+        Write-Host ('NOTE: ' + $dead.Count + ' exact Bash allow rules never match a different command - prefer Bash(cmd *); scripts/friction.py lists them [' + $Settings + ']')
     }
 }
 

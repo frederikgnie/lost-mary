@@ -35,6 +35,7 @@ PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
 NOPUNT = ROOT / "scripts" / "no-punt.py"
+FRICTION = ROOT / "scripts" / "friction.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -732,6 +733,7 @@ PUNTS = [
     "Done. The flaky test in test_io.py is left for you to look at.",
     "There is a similar bug in sync.py - you may want to fix that separately.",
     "I did not touch the config validation; that one is for you to handle.",
+    "Done. I'll leave the flaky test for you.",
     "The retry logic is wrong too, but that's up to you to decide.",
 ]
 for i, msg in enumerate(PUNTS):
@@ -747,6 +749,9 @@ OK_MESSAGES = [
     'The rule says: never "I\'ll leave that for you". Both findings are fixed.',
     "> quoted from the old report: left that for you\n\nBoth items are now fixed.",
     "Left the feature flag default at `false` - see `config.py`.",
+    "Left the default timeout in place for now; both bugs are fixed.",
+    "Nothing is left as a decision for you - everything I implemented is additive.",
+    "No polling, nothing for you to decide; I'll push when they finish.",
 ]
 for i, msg in enumerate(OK_MESSAGES):
     rc, err = run_hook(NOPUNT, stop_payload(msg))
@@ -781,6 +786,118 @@ expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
 
 proc = subprocess.run([sys.executable, str(NOPUNT)], input=b"\xef\xbb\xbfnot json", capture_output=True)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
+
+# --------------------------------------------------------------------------- friction
+print()
+print("friction.py - read-only report over transcripts and settings")
+FR = SCRATCH / "friction"
+PROJ_A = FR / "projects" / "c--repo-a"
+PROJ_B = FR / "projects" / "c--repo-b"
+PROJ_A.mkdir(parents=True)
+PROJ_B.mkdir(parents=True)
+(PROJ_A / "s1" / "subagents").mkdir(parents=True)
+
+
+def ask(recommended: bool) -> dict[str, object]:
+    label = "Keep (Recommended)" if recommended else "Keep"
+    questions = [{"question": "Which?", "options": [{"label": label}, {"label": "Drop"}]}]
+    return assistant(tool_use("q1", "AskUserQuestion", {"questions": questions}))
+
+
+def refused(uid: str, command: str) -> list[dict[str, object]]:
+    text = "Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked."
+    return [assistant(tool_use(uid, "Bash", {"command": command})), result(uid, text, is_error=True)]
+
+
+def said(text: str) -> dict[str, object]:
+    return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def jsonl(records: list[dict[str, object]]) -> str:
+    return "\n".join(json.dumps(r) for r in records) + "\n"
+
+
+(PROJ_A / "s1.jsonl").write_text(
+    jsonl(
+        [
+            prose("do x"),
+            ask(True),
+            ask(False),
+            *refused("r1", "cd /repo && EU_env/.venv/Scripts/python.exe -m pytest -q"),
+            said("Done. I'll leave the flaky test for you."),
+            said("Done. I'll leave the flaky test for you."),  # streamed twice - one hand-back
+        ]
+    ),
+    encoding="utf-8",
+)
+# A subagent transcript with a question in it must not be counted: subagents cannot ask.
+(PROJ_A / "s1" / "subagents" / "agent-a1.jsonl").write_text(jsonl([ask(True)]), encoding="utf-8")
+(FR / "projects" / "wf_abc123").mkdir(parents=True)
+(FR / "projects" / "wf_abc123" / "w.jsonl").write_text(jsonl([ask(True)]), encoding="utf-8")
+(PROJ_B / "s2.jsonl").write_text(
+    jsonl(
+        [
+            prose("do y"),
+            *refused("r2", "# restart the run role\n$p = Get-Process -Id 1\nStop-ScheduledTask -TaskName OBF-run"),
+            said("All fixed; FOUND: a.py - typo, fixed."),
+        ]
+    ),
+    encoding="utf-8",
+)
+fr_settings = FR / "settings.json"
+fr_settings.write_text(
+    json.dumps(
+        {
+            "permissions": {
+                "allow": ["Bash(git push *)", 'Bash(python -c "import x")', "Bash(./run.sh --once)", "Read(//c//**)"]
+            }
+        }
+    ),
+    encoding="utf-8",
+)
+
+fr_args = ["--projects-dir", str(FR / "projects"), "--settings", str(fr_settings)]
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--json"], capture_output=True)
+expect("friction --json exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true("two sessions counted; subagent and wf_* transcripts skipped", data["sessions"] == 2, str(data))
+expect_true("questions 2, one recommended", data["questions"] == 2 and data["recommended"] == 1, str(data))
+expect_true(
+    "two refusals, attributed past `cd` to the real command",
+    data["refusals"] == 2
+    and data["refused_commands"].get("EU_env/.venv/Scripts/python.exe") == 1
+    and data["refused_commands"].get("Stop-ScheduledTask") == 1,
+    str(data),
+)
+expect_true("one hand-back (streamed twice); the FOUND: line is not one", data["hand_backs"] == 1, str(data))
+expect_true(
+    "the example names the matched phrase",
+    data["hand_back_examples"] and "leave the flaky test for you" in data["hand_back_examples"][0],
+    str(data),
+)
+expect_true(
+    "dead allow rules: exact Bash entries only",
+    data["dead_allow"] == ['Bash(python -c "import x")', "Bash(./run.sh --once)"],
+    str(data),
+)
+expect_true(
+    "per-project breakdown",
+    data["projects"]["c--repo-a"]["questions"] == 2 and data["projects"]["c--repo-b"]["refusals"] == 1,
+    str(data),
+)
+
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args], capture_output=True)
+out = proc.stdout.decode("utf-8")
+expect("friction text mode exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true(
+    "text report has the four headline lines",
+    all(k in out for k in ("questions", "refusals", "hand-backs", "allow rules")),
+    out,
+)
+
+proc = subprocess.run([sys.executable, str(FRICTION), "--projects-dir", str(FR / "nowhere")], capture_output=True)
+expect("missing projects dir -> exit 0 with a notice", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true("... naming the directory", "nowhere" in proc.stderr.decode(), proc.stderr.decode())
 
 nuke(SCRATCH)
 
