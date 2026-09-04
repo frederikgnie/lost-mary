@@ -33,6 +33,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | --- | --- |
 | [`scripts/pycheck.py`](scripts/pycheck.py) | **PostToolUse hook.** After every `Edit`/`Write` of a `.py` file: `ruff check`, `ruff format --check`, `ty check`, using the venv that owns the file - a project `.venv`, or a shared `<workspace>/<env>/.venv` beside several package repos - and the diagnostics go straight back to the model while the edit is still in its working memory. Also a CLI (`pycheck.py --changed`, `pycheck.py <paths>`) used by `/validate`. |
 | [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop hook.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. Honours `stop_hook_active`, so the re-emitted stop after a bounce is allowed through - the lead sees both messages and judges. |
+| [`scripts/no-ask.py`](scripts/no-ask.py) | **PreToolUse hook.** While a session runs under `/lost-mary` (invoked since the last `/clear`), an `AskUserQuestion` call is blocked and the model is told to take the option it would have marked recommended, record an `Assumption:` line and continue; a genuinely irreversible choice is asked in plain text. Outside the procedure the option menus work as usual. |
 | [`agents/explore.md`](agents/explore.md) | Read-only investigation on a cheap fast model (`sonnet`, medium effort). `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
 | [`agents/implement.md`](agents/implement.md) | Scoped change plus validation, on the session model. Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
 | [`agents/review.md`](agents/review.md) | Independent review at high effort with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
@@ -51,7 +52,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 ├── capabilities.md               # runtime dependencies + degradation
 ├── agents/       explore.md  implement.md  review.md
 ├── skills/       lost-mary/  validate/  pr/            (each a SKILL.md)
-├── scripts/      pycheck.py  check-evidence.py
+├── scripts/      pycheck.py  check-evidence.py  no-ask.py
 ├── tests/        test-hooks.py  test-agents.py  test-skills.py  fixtures/pycheck/
 ├── settings.example.json         # hooks block, POSIX
 ├── settings.example.windows.json # hooks block, Windows (absolute interpreter path)

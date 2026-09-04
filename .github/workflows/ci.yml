@@ -129,6 +129,7 @@ jobs:
           done
           test -x "$FAKE_HOME/.claude/agent-library/scripts/pycheck.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/check-evidence.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/no-ask.py"
           test -f "$FAKE_HOME/.claude/agent-library/capabilities.md"
       - name: Install is idempotent and --verify is clean once hooks are wired
         run: |
@@ -314,6 +315,7 @@ jobs:
           }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/pycheck.py'))) { throw 'pycheck.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/check-evidence.py'))) { throw 'check-evidence.py did not install.' }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/no-ask.py'))) { throw 'no-ask.py did not install.' }
 
           Write-Host '--- idempotent; -Verify fails until hooks are wired, then passes ---'
           if ((Invoke-Installer) -ne 0) { throw 'Second install failed.' }

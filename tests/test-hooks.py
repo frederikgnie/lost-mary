@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavioural tests for the two hooks. Exit 0 = all passed.
+"""Behavioural tests for the hooks. Exit 0 = all passed.
 
 pycheck (PostToolUse) needs `ruff`, `ty` and `git` on PATH (or ruff/ty via
 `uvx`); CI installs the tools. Scratch projects live under <repo>/.tmp-pycheck,
@@ -33,6 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
+NOASK = ROOT / "scripts" / "no-ask.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -624,6 +625,92 @@ p, a = make_session(
 )
 rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
 expect("list-form tool_result with a failure -> block", rc, BLOCK, err)
+
+# --------------------------------------------------------------------------- no-ask
+print()
+print("no-ask.py - PreToolUse: AskUserQuestion blocked under /lost-mary")
+NA = SCRATCH / "no-ask"
+NA.mkdir(parents=True)
+
+
+def command(name: str, args: str = "") -> dict[str, object]:
+    """A slash-command turn as Claude Code 2.1.260 records it (observed shape)."""
+    text = (
+        f"<command-name>/{name}</command-name>\n"
+        f"            <command-message>{name}</command-message>\n"
+        f"            <command-args>{args}</command-args>"
+    )
+    return {"type": "user", "isSidechain": False, "message": {"role": "user", "content": text}}
+
+
+def prose(text: str) -> dict[str, object]:
+    return {"type": "user", "isSidechain": False, "message": {"role": "user", "content": text}}
+
+
+def session_file(records: list[dict[str, object]]) -> Path:
+    path = NA / f"{uuid.uuid4().hex}.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def ask_event(transcript: Path, tool: str = "AskUserQuestion") -> dict[str, object]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": transcript.stem,
+        "transcript_path": str(transcript),
+        "cwd": str(ROOT),
+        "tool_name": tool,
+        "tool_input": {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    }
+
+
+t = session_file([prose("fix the bug in x.py"), *edit("src/x.py")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("no /lost-mary in the session -> allow", rc, ALLOW, err)
+
+t = session_file([command("lost-mary", "fix the bug in x.py"), *edit("src/x.py")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("/lost-mary invoked -> block", rc, BLOCK, err)
+expect_true(
+    "block message says decide, record an Assumption, plain text for the rest",
+    "Assumption" in err and "plain text" in err,
+    err,
+)
+
+t = session_file([command("lost-mary", "a"), *edit("src/x.py"), command("clear"), prose("now something else")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("/lost-mary then /clear -> allow", rc, ALLOW, err)
+
+t = session_file([command("lost-mary", "a"), command("clear"), command("lost-mary", "b")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("/clear then /lost-mary again -> block", rc, BLOCK, err)
+
+t = session_file(
+    [
+        prose("please run <command-name>/lost-mary</command-name> later"),
+        assistant(tool_use("t1", "Bash", {"command": "echo '<command-name>/lost-mary</command-name>'"})),
+    ]
+)
+rc, err = run_hook(NOASK, ask_event(t))
+expect("the tag quoted in prose or in a tool call is not an invocation -> allow", rc, ALLOW, err)
+
+t = session_file([command("lost-mary", "a")])
+rc, err = run_hook(NOASK, ask_event(t, tool="Bash"))
+expect("another tool under /lost-mary -> allow", rc, ALLOW, err)
+
+rc, err = run_hook(NOASK, ask_event(NA / "missing.jsonl"))
+expect("missing transcript fails open", rc, ALLOW, err)
+expect_true("... and names the transcript", "transcript" in err, err)
+
+rc, err = run_hook(NOASK, {"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion"})
+expect("no transcript_path fails open", rc, ALLOW, err)
+
+t = session_file([command("lost-mary", "a")])
+rc, err = run_hook(NOASK, ask_event(t), bom=True)
+expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
+
+proc = subprocess.run([sys.executable, str(NOASK)], input=b"\xef\xbb\xbfnot json", capture_output=True)
+expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
 
 nuke(SCRATCH)
 
