@@ -60,6 +60,23 @@ venv. Within a second of the edit you should see a hook message quoting
 `settings.json` is wrong (see §7). Record the date in `capabilities.md`'s
 "Verified-live log" so the next upgrade has a baseline.
 
+Two more live checks, one minute each, for the hooks the suite can only
+simulate:
+
+- **no-ask.** In a fresh session run `/lost-mary <anything small>` and then ask
+  Claude to present you an option menu (an `AskUserQuestion`). You should get a
+  plain-text reply that says the menu was blocked and states an `Assumption:`
+  instead. Outside a `/lost-mary` session the menu should appear as usual.
+- **no-punt.** Ask Claude to end a turn with the sentence "I'll leave that for
+  you." You should see it bounce once and re-emit without the hand-back. The
+  second stop always goes through (`stop_hook_active`), so this cannot wedge.
+
+Then take the baseline the rules will be judged against:
+
+```bash
+python3 ~/.claude/agent-library/scripts/friction.py     # last 50 sessions; --json to diff later
+```
+
 ## 4. Daily use
 
 - **Just ask.** The hook feedback arrives on its own; fix findings in place.
