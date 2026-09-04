@@ -37,8 +37,8 @@ jobs:
         python-version: ['3.11', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '${{ matrix.python-version }}'
       - name: Install the tools pycheck drives (pinned - their output format is parsed)
@@ -94,7 +94,7 @@ jobs:
       IMPORT: '@~/.claude/agent-library/global-CLAUDE.md'
       V1SIG: 'agent-library/orchestration/handoff.schema.json'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: --dry-run writes nothing
         run: |
           set -euo pipefail
@@ -265,7 +265,7 @@ jobs:
     env:
       FAKE_HOME: ${{ github.workspace }}\.testhome
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Installer scenarios in a sandboxed HOME (Windows PowerShell 5.1)
         shell: powershell
         run: |
