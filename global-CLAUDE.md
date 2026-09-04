@@ -4,7 +4,14 @@ Project files win: each repository's `CLAUDE.md` / `AGENT.md` carries its
 verified commands, invariants and danger zones. Read them before editing.
 
 - Before non-trivial work write one line - `Done means: <a check you can
-  re-run>`. If you cannot, ask. `/lost-mary <task>` runs the full procedure.
+  re-run>`. If you cannot, write the most plausible one as `Assumption:` and
+  proceed. `/lost-mary <task>` runs the full procedure.
+- Decide, do not ask. An option you would mark "recommended" is a decision
+  already made: take it, state it in one line, keep going. Ask only when a
+  wrong guess is irreversible (production, money, data loss, secrets, history
+  rewrites) or the answer is data only the user holds. A subagent's
+  `MISSING: <field>` is yours to fill from the repository, never a question
+  for the user.
 - Smallest mode that works: do it yourself; `explore` to understand (read-only,
   cheap); `implement` for a change you delegate (give it OWNED / OFF-LIMITS /
   DONE MEANS / VALIDATION - it returns `MISSING: <field>` otherwise); `review`

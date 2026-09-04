@@ -19,8 +19,9 @@ Notes from the user (may be empty): $ARGUMENTS
 ## Steps
 
 1. **Refuse to proceed** - say what is blocking and stop - if the context above
-   shows `not a git repository` (a multi-repo workspace root: ask which package
-   repository to use, or run every `git`/`gh` step with `-C <package>`), if the
+   shows `not a git repository` (a multi-repo workspace root: run every
+   `git`/`gh` step with `-C <package>` against the package holding the
+   unpushed work; only if several do, name them and stop), if the
    current branch is the default branch, or if the tree has uncommitted
    changes. Never commit or stash on the user's behalf here.
 2. **Pick the account.** Derive `owner/repo` from the remote URL and note the
