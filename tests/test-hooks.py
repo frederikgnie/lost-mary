@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
+NOPUNT = ROOT / "scripts" / "no-punt.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -710,6 +711,75 @@ rc, err = run_hook(NOASK, ask_event(t), bom=True)
 expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
 
 proc = subprocess.run([sys.executable, str(NOASK)], input=b"\xef\xbb\xbfnot json", capture_output=True)
+expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
+
+# --------------------------------------------------------------------------- no-punt
+print()
+print("no-punt.py - Stop: a final message that hands work back to the user is bounced once")
+NP = SCRATCH / "no-punt"
+NP.mkdir(parents=True)
+
+
+def stop_payload(message: str | None, **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {"hook_event_name": "Stop", "session_id": "s", "cwd": str(ROOT), **extra}
+    if message is not None:
+        payload["last_assistant_message"] = message
+    return payload
+
+
+PUNTS = [
+    "Fixed the parser. I also noticed the date handling in loader.py is off by one; I'll leave that for you.",
+    "Done. The flaky test in test_io.py is left for you to look at.",
+    "There is a similar bug in sync.py - you may want to fix that separately.",
+    "I did not touch the config validation; that one is for you to handle.",
+    "The retry logic is wrong too, but that's up to you to decide.",
+]
+for i, msg in enumerate(PUNTS):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"hand-back #{i + 1} -> block", rc, BLOCK, err)
+expect_true("block message quotes the phrase", "up to you" in err.lower(), err)
+expect_true("... and names the three ways to close", "implement" in err and "failing test" in err, err)
+
+OK_MESSAGES = [
+    "Fixed the parser. FOUND: loader.py - date handling off by one; fixed in place, test added.",
+    "Fixed the parser. The loader bug is in flight: implement agent on branch fix/loader-dst, worktree isolation.",
+    "Fixed the parser. Residual risk: the DST path is untested here; a failing test is committed on fix/loader-dst.",
+    'The rule says: never "I\'ll leave that for you". Both findings are fixed.',
+    "> quoted from the old report: left that for you\n\nBoth items are now fixed.",
+    "Left the feature flag default at `false` - see `config.py`.",
+]
+for i, msg in enumerate(OK_MESSAGES):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"closing message #{i + 1} -> allow", rc, ALLOW, err)
+
+rc, err = run_hook(NOPUNT, stop_payload(PUNTS[0], stop_hook_active=True))
+expect("re-emitted stop (stop_hook_active) -> allow, one strike", rc, ALLOW, err)
+
+# No last_assistant_message: fall back to the transcript's last assistant record.
+t = NP / "lead.jsonl"
+t.write_text(
+    "\n".join(
+        json.dumps(r)
+        for r in [
+            prose("fix x"),
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Working."}]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": PUNTS[1]}]}},
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(t)))
+expect("no last_assistant_message -> read transcript -> block", rc, BLOCK, err)
+
+rc, err = run_hook(NOPUNT, stop_payload(None, transcript_path=str(NP / "missing.jsonl")))
+expect("no message anywhere fails open", rc, ALLOW, err)
+expect_true("... and says so", "no final message" in err, err)
+
+rc, err = run_hook(NOPUNT, stop_payload(PUNTS[0]), bom=True)
+expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
+
+proc = subprocess.run([sys.executable, str(NOPUNT)], input=b"\xef\xbb\xbfnot json", capture_output=True)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
 
 nuke(SCRATCH)

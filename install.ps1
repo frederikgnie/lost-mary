@@ -24,7 +24,7 @@ $DriftCount = 0
 $IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
-$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'global-CLAUDE.md', 'capabilities.md')
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
@@ -191,7 +191,7 @@ function Test-Settings {
     }
     $hooks = $null
     if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
-    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'))
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'))
     foreach ($pair in $wanted) {
         $eventName = $pair[0]
         $scriptName = $pair[1]

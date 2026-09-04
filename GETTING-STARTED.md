@@ -123,6 +123,7 @@ library's defaults.
 | `pycheck` uses the wrong venv | the terminal that launched Claude Code has another env active | the file's own `.venv` wins; the ambient `VIRTUAL_ENV` is only a fallback - check for a stray `.venv` above the file |
 | `check-evidence` never bounces anything | matcher does not include the agent type, or the transcript layout changed | `--verify` shows the wiring; `capabilities.md` lists the layout the hook expects |
 | The lead still shows option menus under `/lost-mary` | `no-ask` not wired (`--verify` shows it), or `PreToolUse` does not fire for `AskUserQuestion` on this version | pipe a payload by hand: `echo '{"tool_name":"AskUserQuestion","transcript_path":"<session .jsonl>"}' \| python scripts/no-ask.py`; want exit 2 when that transcript holds a `/lost-mary` turn. Fallback: `"deny": ["AskUserQuestion"]` under `permissions` |
+| The lead still ends with "I'll leave that for you" | `no-punt` not wired (`--verify` shows it), or the phrasing is one the patterns miss | pipe the message by hand: `echo '{"last_assistant_message":"I will leave that for you"}' \| python scripts/no-punt.py`; want exit 2. Add the missed phrasing to `PUNT_PATTERNS` with a test |
 | `/validate` or `/pr` missing from the `/` menu | skills normally register live, but discovery can lag | start a new session; restart if it still does not appear |
 | A retired v1 role still appears | `~/.claude/agents/<role>.md` re-created by hand or by another tool | `--verify` flags it as `STALE`; re-run the installer |
 
@@ -137,5 +138,7 @@ library's defaults.
 - `no-ask` keys on the `/lost-mary` turn in the session transcript - an
   undocumented shape - and only removes the option-menu tool; a plain-text
   question still reaches you.
+- `no-punt` matches phrasing, not intent: a hand-back worded in a way the
+  patterns do not cover goes through, and it bounces only once per turn.
 - On Windows there is no Bash sandbox, so read-only roles have no Bash; when
   `explore` needs `git log`, the lead runs it.
