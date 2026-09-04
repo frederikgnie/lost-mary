@@ -42,6 +42,7 @@ repository, never a question for the user.
 | A bug whose cause is unclear | `implement` with a reproduce-first brief: reproduce, find the root cause, smallest fix, keep the reproduction as the regression test |
 | Want an independent check before merge, or a trust boundary is touched | `review` - paste it the `git diff`; it cannot run anything |
 | Genuinely separable scopes with concurrent writes | several `implement`, disjoint `OWNED`, each `isolation: worktree` - see the caveat below |
+| A defect found along the way, outside the current scope | never park it: fix it in place if it is a few lines, otherwise a second `implement` with its own `OWNED` and `isolation: worktree`, gated like the main change |
 
 `isolation: worktree` needs the session cwd inside a git repository (at a
 multi-repo workspace root it fails: spawn with the package as cwd instead), and
@@ -82,8 +83,10 @@ boundary. Findings at HIGH or above are resolved before "done".
 ## 5. Close
 
 Shrink the diff to what the predicate needs. Re-check the predicate. Report:
-what changed, what you ran (exact commands, results), residual risk. No agent
-transcripts. If the branch is meant to become a pull request, `/pr` opens it
+what changed, what you ran (exact commands, results), residual risk. Residual
+risk is what you could not verify - never a defect you saw and skipped: every
+finding is fixed, in flight under a named agent or branch, or has a failing
+test committed for it. No agent transcripts. If the branch is meant to become a pull request, `/pr` opens it
 with the account that owns the repository and carries those results into the
 body.
 

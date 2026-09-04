@@ -55,5 +55,7 @@ RISKS:      what could still be wrong; off-limits files touched: none | list
   "passed" is not.
 - Stay inside `OWNED`. If correctness requires touching `OFF-LIMITS`, stop and
   say why rather than doing it quietly.
+- A defect you notice outside `OWNED` is neither fixed silently nor dropped:
+  list it under `RISKS` as `FOUND: <path> - <one line>` so the lead can act.
 - Do not delete or weaken a test to make it pass. Do not weaken a security
   control to make a check pass.

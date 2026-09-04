@@ -12,6 +12,11 @@ verified commands, invariants and danger zones. Read them before editing.
   rewrites) or the answer is data only the user holds. A subagent's
   `MISSING: <field>` is yours to fill from the repository, never a question
   for the user.
+- Nothing is left on the table. A defect you find is yours to close: fix it in
+  place when it is small and inside the change, otherwise hand it to its own
+  `implement` (disjoint OWNED, `isolation: worktree`) or at least a branch
+  with a failing test. Report it fixed or in flight - never "I'll leave that
+  for you".
 - Smallest mode that works: do it yourself; `explore` to understand (read-only,
   cheap); `implement` for a change you delegate (give it OWNED / OFF-LIMITS /
   DONE MEANS / VALIDATION - it returns `MISSING: <field>` otherwise); `review`
