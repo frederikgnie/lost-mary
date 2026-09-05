@@ -36,6 +36,7 @@ EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
 NOPUNT = ROOT / "scripts" / "no-punt.py"
 FRICTION = ROOT / "scripts" / "friction.py"
+LEDGERPY = ROOT / "scripts" / "ledger.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -954,6 +955,121 @@ expect_true(
 proc = subprocess.run([sys.executable, str(FRICTION), "--projects-dir", str(FR / "nowhere")], capture_output=True)
 expect("missing projects dir -> exit 0 with a notice", proc.returncode, ALLOW, proc.stderr.decode())
 expect_true("... naming the directory", "nowhere" in proc.stderr.decode(), proc.stderr.decode())
+
+# ---------------------------------------------------------------------------- ledger
+print()
+print("ledger.py - SubagentStop record / SessionStart recall")
+LG = SCRATCH / "ledger"
+REPO = LG / "repo"
+REPO.mkdir(parents=True)
+
+
+def meta_for(parent: Path, agent_id: str, agent_type: str, description: str) -> None:
+    meta = parent.parent / parent.stem / "subagents" / f"agent-{agent_id}.meta.json"
+    meta.write_text(
+        json.dumps({"agentType": agent_type, "description": description, "spawnDepth": 1}), encoding="utf-8"
+    )
+
+
+def recall_out(cwd: Path, *args: str) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        [sys.executable, str(LEDGERPY), "recall", *args],
+        input=json.dumps({"hook_event_name": "SessionStart", "source": "startup", "cwd": str(cwd)}).encode("utf-8"),
+        capture_output=True,
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")
+
+
+p, a = make_session(
+    [prose("Fix the loader DST bug in src/x.py"), *edit("src/x.py"), *bash("pytest tests -q", "12 passed in 0.4s")]
+)
+meta_for(p, a, "implement", "Fix loader DST")
+rc, err = run_hook(LEDGERPY, stop_event(p, a, CLAIM, cwd=str(REPO)), "record")
+expect("record -> exit 0", rc, ALLOW, err)
+ledger = REPO / ".claude" / "ledger.md"
+
+
+def ledger_text() -> str:
+    return ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+
+
+expect_true("ledger created under <cwd>/.claude", ledger.is_file(), err)
+text = ledger_text()
+expect_true("header says generated, a record", text.startswith("# Ledger") and "not instructions" in text, text)
+expect_true(
+    "entry names role, description and agent", "implement" in text and "Fix loader DST" in text and a[:12] in text, text
+)
+expect_true("asked = the subagent's first user record", "Fix the loader DST bug" in text, text)
+expect_true("edited from the transcript", "edited:   src/x.py" in text, text)
+expect_true("ran with outcome", "pytest tests -q -> ok" in text, text)
+expect_true("report head keeps the keyed lines", "CHANGED: src/x.py" in text and "DONE MEANS: met" in text, text)
+expect_true("no NOTE when the report names every edited file", "NOTE:" not in text, text)
+
+p2, a2 = make_session(
+    [prose("tidy"), *edit("src/x.py"), *edit("src/y.py"), *bash("ruff check src", "Exit code 1\nF401", ok=False)]
+)
+meta_for(p2, a2, "implement", "Tidy imports")
+rc, err = run_hook(
+    LEDGERPY,
+    stop_event(p2, a2, "CHANGED: src/x.py\nRAN: ruff check src -> ok\nDONE MEANS: met", cwd=str(REPO)),
+    "record",
+)
+text = ledger_text()
+expect("second record appends", rc, ALLOW, err)
+expect_true("two entries", text.count("\n## ") == 2, text)
+expect_true("a failed run is recorded as FAILED whatever the report says", "ruff check src -> FAILED" in text, text)
+expect_true(
+    "silent edit flagged: y.py edited, not in the report",
+    "NOTE:" in text and "src/y.py" in text.split("NOTE:")[-1],
+    text,
+)
+
+rc, err = run_hook(LEDGERPY, stop_event(p2, a2, CLAIM, cwd=str(REPO), stop_hook_active=True), "record")
+text = ledger_text()
+expect_true(
+    "re-emitted stop is recorded and labelled", text.count("\n## ") == 3 and "re-emitted after a bounce" in text, text
+)
+
+rc, out, err = recall_out(REPO)
+expect("recall -> exit 0", rc, ALLOW, err)
+expect_true(
+    "recall prints the ledger with the record-not-instructions framing",
+    "Ledger for repo" in out and "not instructions" in out,
+    out,
+)
+expect_true("recall shows all three entries", "Last 3 of 3 entries" in out and out.count("## ") == 3, out)
+rc, out, err = recall_out(REPO, "--count", "1")
+expect_true("--count limits the tail", "Last 1 of 3 entries" in out and out.count("## ") == 1, out)
+
+empty = LG / "empty"
+empty.mkdir()
+rc, out, err = recall_out(empty)
+expect("recall with no ledger -> exit 0", rc, ALLOW, err)
+expect_true("... and prints nothing (nothing injected)", out == "", out)
+
+rc, err = run_hook(LEDGERPY, stop_event(PROJECT / "nope.jsonl", "a0000000000000000", CLAIM, cwd=str(REPO)), "record")
+expect("missing transcript -> exit 0", rc, ALLOW, err)
+expect_true(
+    "... says so and records nothing",
+    "not found" in err and ledger_text().count("\n## ") == 3,
+    err,
+)
+
+rc, err = run_hook(
+    LEDGERPY, {"hook_event_name": "SubagentStop", "agent_id": a, "last_assistant_message": CLAIM}, "record"
+)
+expect("no cwd -> exit 0 with a notice", rc, ALLOW, err)
+expect_true("... naming the problem", "cwd" in err, err)
+
+rc, err = run_hook(LEDGERPY, stop_event(p, a, CLAIM, cwd=str(REPO)), "record", bom=True)
+expect("BOM-prefixed payload still records", rc, ALLOW, err)
+expect_true("... (entry count grew)", ledger_text().count("\n## ") == 4, err)
+
+proc = subprocess.run([sys.executable, str(LEDGERPY), "record"], input=b"\xef\xbb\xbfnot json", capture_output=True)
+expect("garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode())
+proc = subprocess.run([sys.executable, str(LEDGERPY)], input=b"{}", capture_output=True)
+expect("no mode -> exit 0 with usage on stderr", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true("... usage names both modes", "record|recall" in proc.stderr.decode(), proc.stderr.decode())
 
 nuke(SCRATCH)
 

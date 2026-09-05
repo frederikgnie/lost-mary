@@ -31,6 +31,8 @@ env/
 .claude/projects/
 .claude/logs/
 .claude/*.log
+# scripts/ledger.py writes here: derived from transcripts, regenerated, never hand-edited
+.claude/ledger.md
 
 # --- Local, machine-specific settings ---
 # settings.example.json is the versioned template; a real settings.json with
