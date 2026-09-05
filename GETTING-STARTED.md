@@ -72,9 +72,10 @@ simulate:
   second stop always goes through (`stop_hook_active`), so this cannot wedge.
 
 - **ledger.** Spawn any `implement` (or run `/lost-mary` on something small).
-  When it finishes, `<repo>/.claude/ledger.md` should hold one entry with the
-  files it edited and the commands it ran. Start a new session in the same
-  repo: the first context it sees is "Ledger for <repo> ..." with that entry.
+  When it finishes, `~/.claude/agent-library/ledger/<project>/` should hold one
+  new file with the files it edited and the commands it ran. Start a new session
+  in the same repo: the first context it sees is "Ledger for <project> ..."
+  with that entry.
 
 Then take the baseline the rules will be judged against:
 
@@ -165,6 +166,7 @@ library's defaults.
 - `no-punt` matches phrasing, not intent: a hand-back worded in a way the
   patterns do not cover goes through, and it bounces only once per turn.
 - The ledger records subagents only. The lead's own edits and runs are not
-  written to it yet, and it grows without bound (`recall` shows the tail).
+  written to it yet, and it grows without bound (`recall` shows the tail;
+  delete old files under `~/.claude/agent-library/ledger/` freely).
 - On Windows there is no Bash sandbox, so read-only roles have no Bash; when
   `explore` needs `git log`, the lead runs it.
