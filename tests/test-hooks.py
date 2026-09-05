@@ -987,6 +987,10 @@ def entries(slug: str = "proj") -> list[Path]:
     return sorted(d.glob("*.md")) if d.is_dir() else []
 
 
+def jsonl_lines(records: list[dict[str, object]]) -> str:
+    return "\n".join(json.dumps(r) for r in records) + "\n"
+
+
 def ledger_text(slug: str = "proj") -> str:
     return "\n".join(f.read_text(encoding="utf-8") for f in entries(slug))
 
@@ -1142,6 +1146,100 @@ expect_true("... naming the slug", "slug" in err, err)
 rc, err = run_hook(LEDGERPY, stop_event(p, a, CLAIM, cwd=str(REPO)), "record", bom=True, env=LENV)
 expect("BOM-prefixed payload still records", rc, ALLOW, err)
 expect_true("... (entry count grew)", len(entries()) == n_before + 1, err)
+
+
+# The lead's own turn (Stop payload: no agent_id). Records of a turn share a promptId; assistant records carry none.
+def lead_prompt(text: str, pid: str) -> dict[str, object]:
+    return {"type": "user", "promptId": pid, "gitBranch": "feature/lead", "message": {"role": "user", "content": text}}
+
+
+def tagged(records: list[dict[str, object]], pid: str) -> list[dict[str, object]]:
+    for r in records:
+        if r.get("type") == "user":
+            r["promptId"] = pid
+    return records
+
+
+lead = PROJECT / "lead-session.jsonl"
+lead.write_text(
+    jsonl_lines(
+        [
+            lead_prompt("Fix the DST bug", "p1"),
+            *tagged(edit(X), "p1"),
+            *tagged(bash("pytest tests -q", "12 passed"), "p1"),
+            lead_prompt("Thanks, what did you change?", "p2"),
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "I changed x.py."}]},
+            },
+            lead_prompt("Now tidy y.py", "p3"),
+            *tagged(edit(Y), "p3"),
+        ]
+    ),
+    encoding="utf-8",
+)
+
+
+def lead_stop(pid: str | None, message: str, **extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "hook_event_name": "Stop",
+        "session_id": "sess12345678",
+        "transcript_path": str(lead),
+        "cwd": str(REPO),
+        "last_assistant_message": message,
+        **extra,
+    }
+    if pid is not None:
+        payload["prompt_id"] = pid
+    return payload
+
+
+n_lead0 = len(entries())
+rc, err = run_hook(
+    LEDGERPY, lead_stop("p1", "Done. CHANGED: src/x.py\nRAN: pytest tests -q -> 12 passed"), "record", env=LENV
+)
+expect("lead turn with edits -> exit 0", rc, ALLOW, err)
+lead_files = [f for f in entries() if "lead-" in f.name]
+text = "\n".join(f.read_text(encoding="utf-8") for f in lead_files)
+expect_true("one lead entry, named lead-<prompt>", len(lead_files) == 1 and "lead-p1" in lead_files[0].name, err)
+expect_true(
+    "header: lead · turn · session · branch",
+    "lead  · turn p1  · session sess1234" in text and "branch feature/lead" in text,
+    text,
+)
+expect_true("asked = the user's prompt for that turn", "Fix the DST bug" in text, text)
+expect_true(
+    "edited/ran are the turn's, not the session's",
+    "edited:   src/x.py" in text and "src/y.py" not in text and "pytest tests -q -> ok" in text,
+    text,
+)
+
+rc, err = run_hook(LEDGERPY, lead_stop("p2", "I changed x.py."), "record", env=LENV)
+expect("conversation-only turn -> exit 0", rc, ALLOW, err)
+expect_true("... and no entry", len([f for f in entries() if "lead-" in f.name]) == 1, err)
+
+rc, err = run_hook(LEDGERPY, lead_stop("p3", "Tidied y.py.", stop_hook_active=True), "record", env=LENV)
+expect_true(
+    "re-emitted lead stop (after a bounce) -> no duplicate entry",
+    len([f for f in entries() if "lead-" in f.name]) == 1,
+    err,
+)
+
+rc, err = run_hook(LEDGERPY, lead_stop(None, "Tidied y.py."), "record", env=LENV)
+lead_files = [f for f in entries() if "lead-" in f.name]
+text = lead_files[-1].read_text(encoding="utf-8") if lead_files else ""
+expect_true(
+    "no prompt_id -> the last prompt's turn (p3: y.py edited)",
+    len(lead_files) == 2 and "edited:   src/y.py" in text and "src/x.py" not in text,
+    text,
+)
+
+rc, err = run_hook(
+    LEDGERPY, lead_stop("p1", "x", transcript_path=str(PROJECT / "missing-session.jsonl")), "record", env=LENV
+)
+expect("lead stop with a missing session transcript -> exit 0", rc, ALLOW, err)
+expect_true("... says so", "session transcript not found" in err, err)
+
 
 proc = subprocess.run(
     [sys.executable, str(LEDGERPY), "record"], input=b"\xef\xbb\xbfnot json", capture_output=True, env=LENV

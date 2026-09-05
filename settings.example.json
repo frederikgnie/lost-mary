@@ -34,6 +34,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "PostToolUse": [

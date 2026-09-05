@@ -11,12 +11,17 @@ record. This script keeps that record and hands it back.
 
 Two modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
 
-  record   SubagentStop hook. Reads the subagent's own transcript and writes
-           one entry: when, which role (agent-<id>.meta.json), what it was
+  record   SubagentStop hook: reads the subagent's own transcript and writes
+           one entry - when, which role (agent-<id>.meta.json), what it was
            asked (its first user record), which files it edited - confirmed by
            a non-error tool result, not by the call - which validation
            commands it ran and how they exited (check-evidence's reader), its
            own claims, and any edited file its report does not name.
+           Stop hook (no agent_id in the payload): the same for the lead's own
+           turn - the records from the first one carrying the payload's
+           `prompt_id` to the end of the session transcript - written only
+           when the turn edited a file or ran a validation command, so
+           conversation-only turns leave nothing.
   recall   SessionStart hook (startup, resume, clear, compact). Prints the
            last entries to stdout, which Claude Code adds to the session's
            context. Whole entries only, bounded; nothing without a ledger.
@@ -38,10 +43,12 @@ subagent's words (claimed) - never to obey any of it.
 
 Runtime dependencies (see capabilities.md): SubagentStop stdin fields
 `agent_id`, `agent_type`, `agent_transcript_path` / `transcript_path`,
-`last_assistant_message`, `stop_hook_active`, `cwd`; SessionStart
-`transcript_path`; SessionStart stdout added to context (documented);
-`agent-<id>.meta.json` beside the transcript with `agentType` and
-`description`, and `gitBranch` on records (observed 2.1.260, not documented).
+`last_assistant_message`, `stop_hook_active`, `cwd`; Stop `transcript_path`,
+`prompt_id`, `session_id`, `last_assistant_message`, `stop_hook_active`;
+SessionStart `transcript_path`; SessionStart stdout added to context
+(documented); `agent-<id>.meta.json` beside the transcript with `agentType`
+and `description`, `gitBranch` on records, and `promptId` on the user and
+tool-result records of a turn (observed 2.1.260, not documented).
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ import os
 import re
 import sys
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,12 +148,18 @@ class Entry:
     unreported: list[str] = field(default_factory=list)
     reemitted: bool = False
     repeat: bool = False
+    session: str = ""  # lead entries: the session the turn belongs to
 
     def render(self) -> str:
         head = f"## {self.when}  {self.agent_type}"
         if self.description:
             head += f' · "{self.description}"'
-        head += f"  · agent {self.agent_id[:12]}"
+        if self.agent_type == "lead":
+            head += f"  · turn {self.agent_id.removeprefix('lead-')[:8]}"
+            if self.session:
+                head += f"  · session {self.session[:8]}"
+        else:
+            head += f"  · agent {self.agent_id[:12]}"
         if self.branch:
             head += f"  · branch {self.branch}"
         if self.reemitted:
@@ -193,35 +207,95 @@ def transcript_meta(transcript: Path) -> tuple[dict[str, Any], str, str]:
     return meta, prompt, branch
 
 
-def confirmed_edits(transcript: Path) -> list[str]:
-    """Files an Edit/Write/... call targeted AND whose tool result was not an error - a failed Edit changed nothing."""
-    pending: dict[str, str] = {}
-    edited: list[str] = []
+def iter_records(transcript: Path) -> Iterator[dict[str, Any]]:
     with transcript.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            if '"tool_use"' not in line and '"tool_result"' not in line:
-                continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            message = record.get("message") if isinstance(record, dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
+            if isinstance(record, dict):
+                yield record
+
+
+def is_user_prompt(record: dict[str, Any]) -> bool:
+    message = record.get("message")
+    return record.get("type") == "user" and isinstance(message, dict) and isinstance(message.get("content"), str)
+
+
+def turn_records(transcript: Path, prompt_id: str | None) -> list[dict[str, Any]]:
+    """The lead's current turn: from the first record carrying prompt_id to the next user prompt, or the end.
+
+    Assistant records carry no promptId; every record between a prompt and the next prompt belongs to that turn.
+    Without a prompt_id, the last prompt's turn. Mid-turn user interjections are not prompt records (observed).
+    """
+    turn: list[dict[str, Any]] = []
+    collecting = False
+    for record in iter_records(transcript):
+        if prompt_id:
+            pid = record.get("promptId")
+            if not collecting and pid == prompt_id:
+                collecting = True
+            elif collecting and is_user_prompt(record) and pid not in (None, prompt_id):
+                break
+            if collecting:
+                turn.append(record)
+        elif is_user_prompt(record):
+            turn = [record]
+        elif turn:
+            turn.append(record)
+    return turn
+
+
+def paired_tools(records: Iterable[dict[str, Any]]) -> Iterator[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """(tool name, tool input, tool_result item) for every tool call in the records that got a result."""
+    pending: dict[str, tuple[str, dict[str, Any]]] = {}
+    for record in records:
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
                 continue
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "tool_use" and item.get("name") in EDIT_TOOLS:
-                    tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
-                    target = tool_input.get("file_path") or tool_input.get("notebook_path")
-                    if isinstance(target, str) and isinstance(item.get("id"), str):
-                        pending[item["id"]] = target
-                elif item.get("type") == "tool_result":
-                    target = pending.pop(str(item.get("tool_use_id")), None)
-                    if target is not None and not item.get("is_error") and target not in edited:
-                        edited.append(target)
+            if item.get("type") == "tool_use" and isinstance(item.get("id"), str) and isinstance(item.get("name"), str):
+                tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
+                pending[item["id"]] = (item["name"], tool_input)
+            elif item.get("type") == "tool_result":
+                use = pending.pop(str(item.get("tool_use_id")), None)
+                if use is not None:
+                    yield use[0], use[1], item
+
+
+def edits_from(records: Iterable[dict[str, Any]]) -> list[str]:
+    """Files an Edit/Write/... call targeted AND whose tool result was not an error - a failed Edit changed nothing."""
+    edited: list[str] = []
+    for name, tool_input, result in paired_tools(records):
+        if name not in EDIT_TOOLS or result.get("is_error"):
+            continue
+        target = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if isinstance(target, str) and target not in edited:
+            edited.append(target)
     return edited
+
+
+def runs_from(records: Iterable[dict[str, Any]], evidence_mod: Any) -> list[str]:
+    """Validation commands (check-evidence's notion) with their outcome, one line each."""
+    ran: list[str] = []
+    for name, tool_input, result in paired_tools(records):
+        if name != "Bash":
+            continue
+        command = str(tool_input.get("command", ""))
+        segments = evidence_mod.classify(command)
+        if not segments:
+            continue
+        text = text_of(result.get("content"))
+        ok = not evidence_mod.run_failed(result.get("is_error"), text)
+        for segment, _kind in segments:
+            line = f"{clean(segment, 70)} -> {'ok' if ok else 'FAILED'}"
+            if line not in ran:
+                ran.append(line)
+    return ran
 
 
 def relative(path: str, root: Path | None) -> str:
@@ -273,21 +347,22 @@ def unreported_edits(edited: list[str], message: str) -> list[str]:
     return missing
 
 
-def build_entry(payload: dict[str, Any], transcript: Path, evidence_mod: Any, root: Path | None, repeat: bool) -> Entry:
-    evidence = evidence_mod.read_transcript(transcript)
-    meta, prompt, branch = transcript_meta(transcript)
-    message = payload.get("last_assistant_message")
-    message = message if isinstance(message, str) else ""
+def relative_edits(paths: Iterable[str], root: Path | None) -> list[str]:
     edited: list[str] = []
-    for path in confirmed_edits(transcript):
+    for path in paths:
         rel = relative(path, root)
         if rel and rel not in edited:
             edited.append(rel)
-    ran: list[str] = []
-    for run in evidence.runs:
-        line = f"{clean(run.command, 70)} -> {'ok' if run.ok else 'FAILED'}"
-        if line not in ran:
-            ran.append(line)
+    return edited
+
+
+def build_entry(payload: dict[str, Any], transcript: Path, evidence_mod: Any, root: Path | None, repeat: bool) -> Entry:
+    """A subagent's entry, from its whole transcript."""
+    meta, prompt, branch = transcript_meta(transcript)
+    message = payload.get("last_assistant_message")
+    message = message if isinstance(message, str) else ""
+    records = list(iter_records(transcript))
+    edited = relative_edits(edits_from(records), root)
     agent_type = payload.get("agent_type") if isinstance(payload.get("agent_type"), str) else ""
     return Entry(
         when=datetime.now(UTC).strftime("%Y-%m-%d %H:%MZ"),
@@ -297,11 +372,41 @@ def build_entry(payload: dict[str, Any], transcript: Path, evidence_mod: Any, ro
         branch=clean(branch, 60),
         asked=clean(prompt, 160),
         edited=edited[:12],
-        ran=ran[:6],
+        ran=runs_from(records, evidence_mod)[:6],
         claimed=claimed(message),
         unreported=unreported_edits(edited, message)[:8] if message else [],
         reemitted=payload.get("stop_hook_active") is True,
         repeat=repeat,
+    )
+
+
+def build_lead_entry(payload: dict[str, Any], transcript: Path, evidence_mod: Any, root: Path | None) -> Entry | None:
+    """The lead's current turn, or None when the turn edited nothing and ran nothing."""
+    prompt_id = payload.get("prompt_id") if isinstance(payload.get("prompt_id"), str) else None
+    turn = turn_records(transcript, prompt_id)
+    if not turn:
+        return None
+    edited = relative_edits(edits_from(turn), root)
+    ran = runs_from(turn, evidence_mod)
+    if not edited and not ran:
+        return None
+    message = payload.get("last_assistant_message")
+    message = message if isinstance(message, str) else ""
+    prompt = next((text_of(r["message"].get("content")) for r in turn if is_user_prompt(r)), "")
+    branch = next((r["gitBranch"] for r in turn if isinstance(r.get("gitBranch"), str)), "")
+    session = str(payload.get("session_id") or "")
+    return Entry(
+        when=datetime.now(UTC).strftime("%Y-%m-%d %H:%MZ"),
+        agent_type="lead",
+        description="",
+        agent_id=f"lead-{clean(prompt_id or 'turn', 40)}",
+        branch=clean(branch, 60),
+        asked=clean(prompt, 160),
+        edited=edited[:12],
+        ran=ran[:6],
+        claimed=claimed(message),
+        unreported=unreported_edits(edited, message)[:8] if message else [],
+        session=clean(session, 40),
     )
 
 
@@ -331,17 +436,29 @@ def record(payload: dict[str, Any]) -> int:
     except (ImportError, OSError, SyntaxError) as exc:
         notice(f"check-evidence.py not loadable ({exc}) - nothing recorded")
         return 0
-    transcript = evidence_mod.subagent_transcript(payload)
-    if transcript is None:
-        notice(f"subagent transcript not found for agent_id={payload.get('agent_id')!r} - nothing recorded")
-        return 0
     cwd = payload.get("cwd")
     root = Path(cwd) if isinstance(cwd, str) and cwd and Path(cwd).is_dir() else None
-    agent_id = str(payload.get("agent_id") or transcript.stem.removeprefix("agent-"))
-    repeat = directory.is_dir() and any(directory.glob(f"*-{clean(agent_id, 40)[:12]}*.md"))
+    subagent = bool(payload.get("agent_id")) or bool(payload.get("agent_transcript_path"))
     try:
-        entry = build_entry(payload, transcript, evidence_mod, root, repeat)
-        write_entry(directory, entry)
+        if subagent:
+            transcript = evidence_mod.subagent_transcript(payload)
+            if transcript is None:
+                notice(f"subagent transcript not found for agent_id={payload.get('agent_id')!r} - nothing recorded")
+                return 0
+            agent_id = str(payload.get("agent_id") or transcript.stem.removeprefix("agent-"))
+            repeat = directory.is_dir() and any(directory.glob(f"*-{clean(agent_id, 40)[:12]}*.md"))
+            entry: Entry | None = build_entry(payload, transcript, evidence_mod, root, repeat)
+        else:
+            # The lead's own turn. A re-emitted stop (after a bounce) carries the same evidence: skip it.
+            if payload.get("stop_hook_active") is True:
+                return 0
+            transcript = Path(str(payload.get("transcript_path")))
+            if not transcript.is_file():
+                notice(f"session transcript not found: {transcript} - nothing recorded")
+                return 0
+            entry = build_lead_entry(payload, transcript, evidence_mod, root)
+        if entry is not None:
+            write_entry(directory, entry)
     except OSError as exc:
         notice(f"cannot record ({exc})")
     return 0

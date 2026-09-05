@@ -165,8 +165,9 @@ library's defaults.
   question still reaches you.
 - `no-punt` matches phrasing, not intent: a hand-back worded in a way the
   patterns do not cover goes through, and it bounces only once per turn.
-- The ledger records subagents only. The lead's own edits and runs are not
-  written to it yet, and it grows without bound (`recall` shows the tail;
-  delete old files under `~/.claude/agent-library/ledger/` freely).
+- The ledger records subagent stops and the lead's turns that edited or ran
+  something; conversation-only turns leave nothing. It grows without bound
+  (`recall` shows the tail; delete old files under
+  `~/.claude/agent-library/ledger/` freely).
 - On Windows there is no Bash sandbox, so read-only roles have no Bash; when
   `explore` needs `git log`, the lead runs it.
