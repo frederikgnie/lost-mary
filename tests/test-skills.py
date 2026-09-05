@@ -9,6 +9,7 @@ Stdlib only, matching the rest of this repo's tooling.
 
 Usage: python tests/test-skills.py     (exit 0 = all valid)
 """
+
 from __future__ import annotations
 
 import re
@@ -104,16 +105,12 @@ def main() -> int:
         # The directory name is what becomes /<name>; a mismatch is confusing.
         if front.get("name") and front["name"] != directory.name:
             failures.append(
-                f"{label}: frontmatter name {front['name']!r} does not match "
-                f"directory name {directory.name!r}"
+                f"{label}: frontmatter name {front['name']!r} does not match directory name {directory.name!r}"
             )
 
-        if "disable-model-invocation" in front and front[
-            "disable-model-invocation"
-        ] not in ("true", "false"):
+        if "disable-model-invocation" in front and front["disable-model-invocation"] not in ("true", "false"):
             failures.append(
-                f"{label}: disable-model-invocation must be true or false, got "
-                f"{front['disable-model-invocation']!r}"
+                f"{label}: disable-model-invocation must be true or false, got {front['disable-model-invocation']!r}"
             )
 
         body = text[text.find("\n---", 3) + 4 :]
@@ -129,9 +126,7 @@ def main() -> int:
             )
 
         if "$ARGUMENTS" not in body and "argument-hint" in front:
-            failures.append(
-                f"{label}: declares argument-hint but body never uses $ARGUMENTS"
-            )
+            failures.append(f"{label}: declares argument-hint but body never uses $ARGUMENTS")
 
         if not [f for f in failures if f.startswith(label)]:
             print(f"  ok   {label} (/{directory.name})")

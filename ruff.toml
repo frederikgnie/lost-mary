@@ -1,0 +1,7 @@
+# Style for this repository's own Python (hook scripts and tests). Fixture
+# projects under tests/fixtures/ carry their own config on purpose.
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]

@@ -1,33 +1,59 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
-  "teammateMode": "in-process",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/guard-readonly-bash.py\"",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/no-ask.py\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/no-punt.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/pycheck.py\" --hook",
+            "timeout": 90
           }
         ]
       }
     ],
     "SubagentStop": [
       {
-        "matcher": "*",
+        "matcher": "implement|general-purpose",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-handoff-hook.py\"",
-            "timeout": 15
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
+            "timeout": 20
           }
         ]
       }
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Pushing to a git branch that is not main or master, in repositories under <YOUR REPO ROOT>, is routine and pre-approved; pushes to main or master, force-pushes and history rewrites are not covered.",
+      "Running a project's own tests, lint and type-check through its virtual environment (pytest, ruff, ty) is pre-approved, including when chained after cd or with output redirected to a log file under the repository."
     ]
   }
 }

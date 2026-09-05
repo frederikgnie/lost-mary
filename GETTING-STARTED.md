@@ -1,193 +1,163 @@
-# Getting Started — a 101
+# Getting started - a 101
 
-What this is: a set of specialist agent roles for Claude Code, plus a contract
-that forces those agents to report **checkable** results instead of "looks good
-to me". Two hooks make the contract real at runtime.
-
-Read time: ~5 minutes. Setup time: ~3 minutes.
+What this is: hooks that check Claude Code's own work, three
+lean agent roles with cost routing, three slash commands, and one short page of
+rules. Read time ~5 minutes, setup ~3.
 
 ---
 
 ## 1. Install
 
 ```powershell
-# Windows
-.\install.ps1
+.\install.ps1                 # Windows
 ```
 
 ```bash
-# macOS / Linux
-./install.sh
+./install.sh                  # macOS / Linux
 ```
 
-Want to see what it would do first? Add `-DryRun` / `--dry-run`.
+Add `-DryRun` / `--dry-run` to see what it would do first. It copies the agents,
+skills and hook scripts into `~/.claude/` and adds one line to
+`~/.claude/CLAUDE.md` - `@~/.claude/agent-library/global-CLAUDE.md` - after a
+timestamped backup. Your own content is never rewritten. Anything left over from
+v1 is renamed `*.retired.<timestamp>`, not deleted.
 
-This does four things:
+## 2. Turn on the hooks (this is the part that matters)
 
-1. Copies the 7 agent roles into `~/.claude/agents/`.
-2. Installs the `/lost-mary` skill into `~/.claude/skills/lost-mary/`.
-3. Copies the contract, validator, and hook scripts into `~/.claude/agent-library/`.
-4. Adds one line to `~/.claude/CLAUDE.md`:
-   `@~/.claude/agent-library/global-CLAUDE.md`
+The installer never edits `settings.json`. Copy the `hooks` block from
+`settings.example.windows.json` (Windows) or `settings.example.json`
+(macOS/Linux) into `~/.claude/settings.json`. A running Claude Code normally
+picks it up live; restart if it does not.
 
-**Step 4 is the one that matters.** Claude Code only auto-loads
-`~/.claude/CLAUDE.md`. Without that import line the agents exist but the
-operating rules never load. Your existing `CLAUDE.md` content is never
-rewritten — the line is appended after a timestamped backup.
-
-## 2. Turn on enforcement
-
-The installer deliberately does **not** touch `settings.json`. Merge the `hooks`
-block yourself:
-
-- Windows → copy from `settings.example.windows.json`
-- macOS/Linux → copy from `settings.example.json`
-
-into `~/.claude/settings.json`. Then **restart Claude Code** — settings are read
-at startup.
+Windows: replace `C:/ABSOLUTE/PATH/TO/python.exe` with a real interpreter. The
+`python` on PATH is often the Microsoft Store stub, and a hook that cannot
+start fails open - silently, forever. Keep `$HOME` as is; it expands under both
+Git Bash and PowerShell.
 
 Without this step the library is documentation. With it:
 
-- read-only roles can't quietly mutate your repo through Bash
-- a specialist that finishes without a valid handoff is blocked and told why
+- every `Edit`/`Write` of a `.py` file comes back with `ruff` and `ty` findings
+  while the change is still fresh;
+- an `implement` subagent that claims "tests pass" without a test run in its
+  transcript is bounced and told to run them or say it did not.
 
 ## 3. Verify it actually works
 
-Don't trust the install; check it. Three commands:
-
 ```powershell
-# a) files are in place and the import line landed
-.\install.ps1 -Verify          # exit 0 = clean, 1 = drift
-
-# b) the Bash guard blocks a read-only role from writing  (want: 2)
-'{"agent_type":"reviewer","tool_input":{"command":"echo x > app.py"}}' | python "$HOME\.claude\agent-library\scripts\guard-readonly-bash.py"; $LASTEXITCODE
-
-# c) ...but allows inspection  (want: 0)
-'{"agent_type":"reviewer","tool_input":{"command":"git diff HEAD~1"}}' | python "$HOME\.claude\agent-library\scripts\guard-readonly-bash.py"; $LASTEXITCODE
+.\install.ps1 -Verify          # files in place, import line present, hooks wired (exit 0)
+python tests\test-hooks.py     # from the repo; needs ruff + ty on PATH (pip install ruff ty)
 ```
 
 ```bash
-# macOS / Linux equivalents
 ./install.sh --verify
-echo '{"agent_type":"reviewer","tool_input":{"command":"echo x > app.py"}}' | python3 ~/.claude/agent-library/scripts/guard-readonly-bash.py; echo $?   # want 2
-echo '{"agent_type":"reviewer","tool_input":{"command":"git diff HEAD~1"}}' | python3 ~/.claude/agent-library/scripts/guard-readonly-bash.py; echo $?  # want 0
+python3 tests/test-hooks.py
 ```
 
-If (b) returns 0 instead of 2, your hook path or interpreter is wrong — fix that
-before relying on the guard. See §8.
+Then the smoke test the suite cannot do - the live one. In a fresh session,
+ask Claude to add `import os` to the top of any `.py` file in a project with a
+venv. Within a second of the edit you should see a hook message quoting
+`F401 'os' imported but unused`. If you do not, the interpreter path in
+`settings.json` is wrong (see §7). Record the date in `capabilities.md`'s
+"Verified-live log" so the next upgrade has a baseline.
 
-## 4. Daily use: `/lost-mary`
+Two more live checks, one minute each, for the hooks the suite can only
+simulate:
 
-This is the entry point. Instead of remembering the operating model, invoke it:
+- **no-ask.** In a fresh session run `/lost-mary <anything small>` and then ask
+  Claude to present you an option menu (an `AskUserQuestion`). You should get a
+  plain-text reply that says the menu was blocked and states an `Assumption:`
+  instead. Outside a `/lost-mary` session the menu should appear as usual.
+- **no-punt.** Ask Claude to end a turn with the sentence "I'll leave that for
+  you." You should see it bounce once and re-emit without the hand-back. The
+  second stop always goes through (`stop_hook_active`), so this cannot wedge.
 
-```text
-/lost-mary add idempotency keys to the payout webhook
+Then take the baseline the rules will be judged against:
+
+```bash
+python3 ~/.claude/agent-library/scripts/friction.py     # last 50 sessions; --json to diff later
 ```
 
-It makes the session state an acceptance predicate before writing code, pick the
-smallest execution mode that can work, spawn with full scope boundaries, and gate
-"done" on evidence you can re-run. Run it with no argument and it asks what you
-want done.
+## 4. Daily use
 
-Use it for anything non-trivial. For a one-line fix, just ask normally - the
-point of the mode is to stop you skipping the framing step on work where
-skipping it costs you.
+- **Just ask.** The hook feedback arrives on its own; fix findings in place.
+- **`/validate`** before calling anything done: runs the project's lint,
+  typecheck and the tests covering what changed, using the commands documented
+  in that project's `CLAUDE.md`, and reports `command -> result`. Claude may
+  run it by itself.
+- **`/pr`** when the branch is ready: pushes and opens the PR with the GitHub
+  account that owns the repo, then switches `gh` back.
+- **`/lost-mary <task>`** for anything non-trivial: forces the acceptance
+  predicate, picks the smallest execution mode, and gates "done" on evidence.
 
-Sections 5-7 explain what it does, so you can tell when it is steering you
-wrong.
+## 5. Delegating (where tokens are won or lost)
 
-## 5. Pick the right mode (this is where tokens are won or lost)
-
-| Your task | Do this | Don't |
+| Your situation | Do | Not |
 | --- | --- | --- |
-| Small, local change | Just ask in the main session | Don't spawn anything |
-| Focused side question | One subagent (`researcher`) | Don't form a team |
-| Bug, cause unclear | `debugger` | Don't guess-and-patch in the main session |
-| Change you want a second opinion on | implement, then `reviewer` | Don't ask the implementer to review itself |
-| Touches auth/payments/data boundaries | add `security-reviewer` | Don't rely on the general reviewer |
-| Genuinely separable layers (backend + frontend + integration) | Agent Team, 2–4 teammates | Don't form a team just because the task is big |
+| Small, local change | Ask in the main session | Don't spawn anything |
+| Need to understand code, history or a library first | `explore` (cheap, read-only, returns `path:line` anchors) | Don't send the expensive model to read |
+| A change you won't make yourself | `implement` with the block below | Don't spawn without `DONE MEANS` |
+| Want a second opinion before merging | `review` - give it the diff | Don't ask the implementer to review itself |
+| Truly separable scopes written concurrently | several `implement`, each `isolation: worktree` | Don't form a team because the task feels big |
 
-Rule of thumb: **start with the smallest mode that could work, add a specialist
-only when it removes a concrete risk.** Every extra agent costs tokens and
-coordination.
-
-## 6. The one thing to get right: the spawn prompt
-
-A vague prompt produces a vague result and you pay for both. Every
-implementation spawn should carry these eight things:
-
-```text
-GOAL:       Implement subscription lifecycle handling.
-SCOPE:      Subscription create/cancel/renew only.
-OWNED:      src/billing/**, tests/billing/**
-OFF-LIMITS: src/ui/**, package.json, database/migrations/**
-DEPENDS ON: schema freeze (task billing-schema) is already merged
-DONE MEANS: billing unit tests pass AND POST /subscribe rejects null planId
-VALIDATION: run the billing test suite and paste the count
-HANDOFF:    final message is handoff JSON only, task_id = billing-backend
-```
-
-`DONE MEANS` is the highest-value line. It's an observable check *you* can re-run.
-Without it, "done" means whatever the agent decided it means.
-
-Copy-paste starting point:
+Every `implement` spawn:
 
 ```text
 GOAL:
 SCOPE:
-OWNED:
-OFF-LIMITS:
+OWNED:        globs it may change
+OFF-LIMITS:   globs it must not touch
 DEPENDS ON:
-DONE MEANS:
-VALIDATION:
-HANDOFF: final message is handoff JSON only, task_id = <id>
+DONE MEANS:   a check you can re-run
+VALIDATION:   exact commands (from the project's CLAUDE.md)
+REPORT:       CHANGED / RAN / DONE MEANS / RISKS
 ```
 
-## 7. Reading the handoff
+`DONE MEANS` is the line that decides whether this works. Then re-run the
+decisive check yourself - the report is a claim, the re-run is the evidence.
 
-Each specialist ends with one JSON object. You don't need to read all of it.
-Check four fields:
+## 6. Make it excellent on *your* repo
 
-1. **`status`** — `done` / `needs_review` / `plan_ready` are acceptable; `blocked` and `failed` are not.
-2. **`summary`** — must contain a proof token: a test count, commit SHA, `file:line`, or a command. If it doesn't, the validator rejects it.
-3. **`payload.files_off_limits_touched`** — non-empty means a scope violation. Investigate before merging.
-4. **`attempts` / `stop_reason`** — high attempts or `stalled`/`budget` means re-plan, don't retry.
+The library knows nothing about your code on purpose. The highest-leverage
+thing you can do is put these in each repository's `CLAUDE.md` / `AGENT.md`:
 
-Then **re-run the proof token yourself.** That's the whole point of it.
+- the interpreter and the **verified** lint / typecheck / test commands, with
+  the date you checked them;
+- the test roots and how many tests they collect;
+- the architecture in five lines and the dependency direction between packages;
+- danger zones (anything that writes to production, anything without auth);
+- the domain review lens (for power markets: look-ahead leakage, DST 23/25-hour
+  days, MW vs MWh, NaN through joins, timezone-naive timestamps).
 
-Validate a handoff by hand:
+`implement` and `review` read those files first and are told they win over the
+library's defaults.
 
-```powershell
-.\scripts\validate-handoff.ps1 .\handoff.json
-```
-
-```bash
-./scripts/validate-handoff.sh handoff.json
-```
-
-## 8. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Agents work but ignore the delegation rules | import line missing from `~/.claude/CLAUDE.md` | `install --verify`; re-run installer |
-| Hooks never fire | `settings.json` not merged, or Claude Code not restarted | merge the `hooks` block, restart |
-| Hook fires but errors | wrong interpreter (`python3` vs `python`) or wrong path | run the §3 smoke test and fix the command string |
-| Specialist keeps getting blocked at the end | it's emitting prose, not JSON | the block message says what's missing; it should re-emit |
-| A reviewer complains it can't run something | the Bash guard blocked a write | that's working as designed — reviewers propose, they don't apply |
-| `--no-overwrite` left the library inert | that flag skips the import line on purpose | add the printed line to `~/.claude/CLAUDE.md` manually |
-| `/lost-mary` doesn't appear | Claude Code was not restarted after install | restart it; skills are discovered at startup |
+| No hook message after editing a `.py` file | interpreter path wrong, `settings.json` not merged, or the hook not yet picked up (a running Claude Code normally picks up a `settings.json` change live; restart if it did not) | pipe a payload into the hook by hand: `echo '{"tool_name":"Edit","tool_input":{"file_path":"tests/fixtures/pycheck/bad.py"}}' \| python scripts/pycheck.py --hook` from the repo; want exit 2 |
+| Hook says `ruff: not found` / `ty: not found` | tools not in the file's venv, PATH, or `uvx` | install them in the project venv (`uv add --dev ruff ty`) or globally |
+| `pycheck` uses the wrong venv | the terminal that launched Claude Code has another env active | the file's own `.venv` wins; the ambient `VIRTUAL_ENV` is only a fallback - check for a stray `.venv` above the file |
+| `check-evidence` never bounces anything | matcher does not include the agent type, or the transcript layout changed | `--verify` shows the wiring; `capabilities.md` lists the layout the hook expects |
+| The lead still shows option menus under `/lost-mary` | `no-ask` not wired (`--verify` shows it), or `PreToolUse` does not fire for `AskUserQuestion` on this version | pipe a payload by hand: `echo '{"tool_name":"AskUserQuestion","transcript_path":"<session .jsonl>"}' \| python scripts/no-ask.py`; want exit 2 when that transcript holds a `/lost-mary` turn. Fallback: `"deny": ["AskUserQuestion"]` under `permissions` |
+| The lead still ends with "I'll leave that for you" | `no-punt` not wired (`--verify` shows it), or the phrasing is one the patterns miss | pipe the message by hand: `echo '{"last_assistant_message":"I will leave that for you"}' \| python scripts/no-punt.py`; want exit 2. Add the missed phrasing to `PUNT_PATTERNS` with a test |
+| `--verify` prints `NOTE: N exact Bash allow rules ...` | you clicked "always allow" on exact commands; those rules never fire again | replace them with prefix rules (`Bash(git push *)`); `scripts/friction.py` lists them |
+| `--verify` prints `DRIFT: autoMode.allow replaces the built-in classifier rules` | your `autoMode.allow` list has no `"$defaults"` entry, so it replaced the built-ins | add `"$defaults"` as the first entry (see `settings.example.json`) |
+| `/validate` or `/pr` missing from the `/` menu | skills normally register live, but discovery can lag | start a new session; restart if it still does not appear |
+| A retired v1 role still appears | `~/.claude/agents/<role>.md` re-created by hand or by another tool | `--verify` flags it as `STALE`; re-run the installer |
 
-## 9. Honest limits
+## 8. Honest limits
 
-Worth knowing before you rely on this:
-
-- **The Bash guard is a guardrail, not a sandbox.** It's a denylist over shell text. Obfuscation and scripts invoked by path can slip past. The real boundary is that read-only roles don't have `Write`/`Edit`.
-- **Both hooks fail open** if Claude Code renames the payload fields they read. Enforcement would disappear silently, and the test suite would still pass. Re-run the §3 smoke test after upgrading Claude Code.
-- **Agent Teams are experimental.** If they break, everything still works via subagents plus lead-only integration.
-- **Nothing here knows your codebase yet.** The roles are generic: no test command, no build command, no architecture map, no danger zones. On a large production repo that means agents rediscover the same facts every session, which is exactly where tokens go. Encoding that in your repo's own `CLAUDE.md` (and a project `.claude/settings.json`) is the highest-leverage next step, and this library deliberately doesn't do it for you.
-
----
-
-Deeper reading: `README.md` (full reference), `orchestration/handoff.md` (the
-contract), `orchestration/playbooks.md` (routing), `capabilities.md` (what
-happens when Claude Code changes).
+- Hooks **fail open** on any payload they cannot read. A Claude Code upgrade
+  can switch them off silently; redo §3 afterwards.
+- `check-evidence` checks that validation commands ran and how they exited,
+  not that the tests were meaningful. It honours `stop_hook_active`, so the
+  second, re-emitted stop after a bounce goes through and the lead decides.
+- `pycheck` is Python-only.
+- `no-ask` keys on the `/lost-mary` turn in the session transcript - an
+  undocumented shape - and only removes the option-menu tool; a plain-text
+  question still reaches you.
+- `no-punt` matches phrasing, not intent: a hand-back worded in a way the
+  patterns do not cover goes through, and it bounces only once per turn.
+- On Windows there is no Bash sandbox, so read-only roles have no Bash; when
+  `explore` needs `git log`, the lead runs it.

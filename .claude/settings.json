@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./.venv/Scripts/python.exe tests/test-hooks.py*)",
+      "Bash(./.venv/Scripts/python.exe tests/test-agents.py*)",
+      "Bash(./.venv/Scripts/python.exe tests/test-skills.py*)",
+      "Bash(.venv/Scripts/python.exe tests/test-hooks.py*)",
+      "Bash(.venv/Scripts/python.exe tests/test-agents.py*)",
+      "Bash(.venv/Scripts/python.exe tests/test-skills.py*)",
+      "Bash(python tests/test-hooks.py*)",
+      "Bash(python tests/test-agents.py*)",
+      "Bash(python tests/test-skills.py*)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -Verify*)",
+      "Bash(./install.sh --verify*)"
+    ]
+  }
+}
