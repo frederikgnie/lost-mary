@@ -35,6 +35,7 @@ PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
 SPAWN = ROOT / "scripts" / "check-spawn.py"
+PERMIT = ROOT / "scripts" / "permit.py"
 NOPUNT = ROOT / "scripts" / "no-punt.py"
 FRICTION = ROOT / "scripts" / "friction.py"
 LEDGERPY = ROOT / "scripts" / "ledger.py"
@@ -805,6 +806,100 @@ rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x"), bom=True)
 expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
 proc = subprocess.run([sys.executable, str(SPAWN)], input=b"not json", capture_output=True)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
+
+# ----------------------------------------------------------------------------- permit
+print()
+print("permit.py - PermissionRequest: allow the routine, decide nothing else")
+PM = SCRATCH / "permit"
+PREPO = PM / "repo"
+PREPO.mkdir(parents=True)
+git(PREPO, "init", "-q")
+git(PREPO, "switch", "-c", "main")
+git(PREPO, "commit", "--allow-empty", "-q", "-m", "root")
+git(PREPO, "switch", "-c", "feature/t")
+
+
+def permit_out(tool: str, command: str, cwd: Path | None = None) -> tuple[int, str, str]:
+    payload = {"hook_event_name": "PermissionRequest", "tool_name": tool, "tool_input": {"command": command}}
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
+    proc = subprocess.run(
+        [sys.executable, str(PERMIT), *()], input=json.dumps(payload).encode("utf-8"), capture_output=True
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")
+
+
+def allowed(out: str) -> bool:
+    try:
+        return json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+ALLOW_CASES = [
+    "git push origin feature/x",
+    "git push -u origin state-ledger",
+    "git push origin HEAD:feature/x",
+    "cd /repo && EU_env/.venv/Scripts/python.exe -m pytest tests -q 2>&1 | tail -5",
+    "ruff check src > out.log 2>&1",
+    "./install.sh --verify",
+    "powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -Verify",
+    "PYTHONIOENCODING=utf-8 pytest tests -q; echo done",
+]
+for cmd in ALLOW_CASES:
+    rc, out, err = permit_out("Bash", cmd)
+    expect_true(f"allow: {cmd[:60]}", rc == 0 and allowed(out), out + err)
+
+NO_DECISION_CASES = [
+    "git push origin main",
+    "git push origin master",
+    "git push --force origin feature/x",
+    "git push -f origin feature/x",
+    "git push origin :feature/x",
+    "git push origin +feature/x",
+    "git push --delete origin feature/x",
+    "git push --tags",
+    "git push --no-verify origin feature/x",
+    "git push origin feature/x && git push origin main",
+    "pytest -q && rm -rf build",
+    "pytest > /etc/passwd",
+    "pytest > ~/x.log",
+    "echo secret > file",
+    "echo hi",
+    "./install.sh",
+    "python - <<'EOF'" + chr(10) + "pytest -q" + chr(10) + "EOF",
+    "sed -i s/a/b/ x.py && pytest -q",
+]
+for cmd in NO_DECISION_CASES:
+    rc, out, err = permit_out("Bash", cmd)
+    expect_true(f"no decision: {cmd[:60]!r}", rc == 0 and out == "", out + err)
+
+rc, out, err = permit_out("Bash", "git push", cwd=PREPO)
+expect_true("bare git push on a feature branch (resolved from the repo) -> allow", allowed(out), out + err)
+rc, out, err = permit_out("Bash", f"git -C {PREPO.as_posix()} push -u origin HEAD")
+expect_true("git -C <repo> push HEAD on a feature branch -> allow", allowed(out), out + err)
+git(PREPO, "switch", "main")
+rc, out, err = permit_out("Bash", "git push", cwd=PREPO)
+expect_true("bare git push on main -> no decision", out == "", out + err)
+rc, out, err = permit_out("Bash", "git push")
+expect_true("bare git push with no cwd -> no decision", out == "", out + err)
+git(PREPO, "switch", "feature/t")
+
+rc, out, err = permit_out("PowerShell", "Get-ChildItem; C:/repo/EU/EU_env/.venv/Scripts/python.exe -m pytest -q")
+expect_true("PowerShell: read-only cmdlet + venv pytest -> allow", allowed(out), out + err)
+rc, out, err = permit_out("PowerShell", "Stop-Process -Id 1; pytest -q")
+expect_true("PowerShell: a foreign cmdlet -> no decision", out == "", out + err)
+rc, out, err = permit_out("Edit", "git push origin feature/x")
+expect_true("not a shell tool -> no decision", out == "", out + err)
+proc = subprocess.run([sys.executable, str(PERMIT)], input=b"not json", capture_output=True)
+expect("garbage payload -> exit 0, no decision", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true("... and nothing on stdout", proc.stdout == b"", proc.stdout.decode())
+rc, err = run_hook(
+    PERMIT,
+    {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "pytest -q"}},
+    bom=True,
+)
+expect("BOM-prefixed payload still decides (exit 0)", rc, ALLOW, err)
 
 # --------------------------------------------------------------------------- no-punt
 print()

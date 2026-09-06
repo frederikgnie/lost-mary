@@ -13,6 +13,18 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/permit.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Agent",

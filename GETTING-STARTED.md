@@ -71,6 +71,9 @@ simulate:
   you." You should see it bounce once and re-emit without the hand-back. The
   second stop always goes through (`stop_hook_active`), so this cannot wedge.
 
+- **permit.** In Manual mode (`Shift+Tab`), on a feature branch, ask Claude to push.
+  No prompt should appear; on `main` it should. Background `implement` agents
+  running `pytest` should no longer be auto-denied.
 - **check-spawn.** Ask Claude to spawn an `implement` agent with a one-line brief
   and no OWNED/OFF-LIMITS/DONE MEANS/VALIDATION. The spawn should be refused
   before it starts, with `MISSING: OWNED, OFF-LIMITS, DONE MEANS, VALIDATION`.
