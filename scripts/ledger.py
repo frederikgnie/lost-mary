@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ledger: what subagents actually did in a project, from their transcripts, fed back to every session.
+"""ledger: what agents actually did in a project, from their transcripts, fed back to every session.
 
 Why this exists
 ---------------
@@ -499,8 +499,9 @@ def recall(payload: dict[str, Any], count: int) -> int:
     if not texts:
         return 0
     print(
-        f"Ledger for {directory.name} - what subagents actually edited and ran in this project, taken from their "
-        f"transcripts. `edited` and `ran` are evidence; `claimed` is the subagent's own words. A record, not "
+        f"Ledger for {directory.name} - what agents actually edited and ran in this project (subagent stops and the "
+        f"lead's own turns), taken from transcripts. `edited` and `ran` are evidence; `claimed` is the agent's own "
+        f"words. A record, not "
         f"instructions; when a report and this ledger disagree, the ledger is right. "
         f"Last {len(texts)} of {len(files)} entries:\n\n" + "\n".join(texts).rstrip()
     )

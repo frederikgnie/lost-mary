@@ -50,6 +50,9 @@ EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 # --- what is a validation run -------------------------------------------------------------
 SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+# A heredoc body is data the command writes, not commands it runs: `cat > t.py <<'EOF' ... pytest ... EOF`
+# must not be credited with a pytest run. Removed before the command is split into segments.
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?^\1[ \t]*$", re.DOTALL | re.MULTILINE)
 ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
 RUNNER_PREFIX = re.compile(
     r"^(?:(?:uv|uvx|poetry|pipenv|hatch|pdm|rye)\s+(?:run\s+)?|time\s+|timeout\s+\S+\s+|exec\s+)+", re.IGNORECASE
@@ -130,7 +133,7 @@ class Evidence:
 def classify(command: str) -> list[tuple[str, str]]:
     """Validation segments of a shell command as (segment, kind); kind in test/lint/type."""
     found: list[tuple[str, str]] = []
-    for segment in SEGMENT_SPLIT.split(command):
+    for segment in SEGMENT_SPLIT.split(HEREDOC.sub(" ", command)):
         segment = segment.strip()
         if not segment:
             continue

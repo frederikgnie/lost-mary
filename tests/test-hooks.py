@@ -629,6 +629,19 @@ p, a = make_session(
 rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
 expect("list-form tool_result with a failure -> block", rc, BLOCK, err)
 
+# A heredoc body is data, not commands: writing a test file that mentions pytest is not a pytest run.
+heredoc_cmd = (
+    "cat > tests/test_new.py <<'EOF'\nimport subprocess\n\n\ndef test_x():\n"
+    "    assert subprocess.run(['pytest', '-q'])\nEOF\necho written"
+)
+p, a = make_session([*edit("src/x.py"), *bash(heredoc_cmd, "written")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("pytest inside a heredoc body is not a run -> claim of a run is bounced", rc, BLOCK, err)
+heredoc_then_run = heredoc_cmd + " && pytest tests -q"
+p, a = make_session([*edit("src/x.py"), *bash(heredoc_then_run, "12 passed in 0.3s")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("... but a real pytest after the heredoc counts", rc, ALLOW, err)
+
 # --------------------------------------------------------------------------- no-ask
 print()
 print("no-ask.py - PreToolUse: AskUserQuestion blocked under /lost-mary")
