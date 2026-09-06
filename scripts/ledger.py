@@ -74,6 +74,7 @@ CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 REPORT_KEYS = ("CHANGED:", "RAN:", "DONE MEANS:", "RISKS:", "FOUND:", "MISSING:")
 KEY_DECORATION = re.compile(r"^[\s*#>-]+")  # "**CHANGED:**", "- RAN:", "## RISKS:" all count as the key
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+BSLASH = chr(92)  # a backslash, kept out of source literals
 RECALL_DEFAULT = 8
 RECALL_MAX_CHARS = 6000
 
@@ -168,7 +169,8 @@ class Entry:
             head += "  · (this agent stopped before; an earlier entry may hold a bounced report)"
         lines = [head, f"asked:    {self.asked or '-'}"]
         lines.append(f"edited:   {', '.join(self.edited) if self.edited else '- (nothing, per the transcript)'}")
-        lines.append(f"ran:      {'; '.join(self.ran) if self.ran else '- (no validation command ran)'}")
+        shown_runs = "; ".join(self.ran[:6]) + (f" (+{len(self.ran) - 6} more)" if len(self.ran) > 6 else "")
+        lines.append(f"ran:      {shown_runs if self.ran else '- (no validation command ran)'}")
         lines.append(f"claimed:  {self.claimed or '-'}")
         if self.unreported:
             lines.append(f"NOTE:     edited but not named in the report: {', '.join(self.unreported)}")
@@ -280,8 +282,12 @@ def edits_from(records: Iterable[dict[str, Any]]) -> list[str]:
 
 
 def runs_from(records: Iterable[dict[str, Any]], evidence_mod: Any) -> list[str]:
-    """Validation commands (check-evidence's notion) with their outcome, one line each."""
-    ran: list[str] = []
+    """Validation commands (check-evidence's notion) with their LATEST outcome, first-seen order.
+
+    One shell call's result covers every segment in it, so an early failure in a chain would otherwise mask the
+    pass of the same command later in the turn.
+    """
+    outcomes: dict[str, bool] = {}
     for name, tool_input, result in paired_tools(records):
         if name != "Bash":
             continue
@@ -292,21 +298,27 @@ def runs_from(records: Iterable[dict[str, Any]], evidence_mod: Any) -> list[str]
         text = text_of(result.get("content"))
         ok = not evidence_mod.run_failed(result.get("is_error"), text)
         for segment, _kind in segments:
-            line = f"{clean(segment, 70)} -> {'ok' if ok else 'FAILED'}"
-            if line not in ran:
-                ran.append(line)
-    return ran
+            outcomes[clean(segment, 70)] = ok
+    return [f"{segment} -> {'ok' if ok else 'FAILED'}" for segment, ok in outcomes.items()]
 
 
 def relative(path: str, root: Path | None) -> str:
-    """Repo-relative with forward slashes when the path is under root; otherwise as given. Always one clean line."""
-    shown = path
+    """Repo-relative with forward slashes when under root; otherwise abbreviated (home -> ~). The Claude
+    scratchpad collapses to scratchpad/<name> wherever it sits. Always one clean line."""
+    normalised = path.replace(BSLASH, "/")
+    shown = normalised
     if root is not None:
         try:
-            shown = str(Path(path).resolve().relative_to(root.resolve()))
+            shown = str(Path(path).resolve().relative_to(root.resolve())).replace(BSLASH, "/")
         except (ValueError, OSError):
-            shown = path
-    return clean(shown.replace("\\", "/"), 200)
+            shown = normalised
+    if shown == normalised:  # not under the repo: keep it recognisable, not long
+        home = str(Path.home()).replace(BSLASH, "/")
+        if shown.lower().startswith(home.lower() + "/"):
+            shown = "~" + shown[len(home) :]
+    if "/scratchpad/" in shown:
+        shown = "scratchpad/" + shown.rsplit("/scratchpad/", 1)[1]
+    return clean(shown, 200)
 
 
 def claimed(message: str) -> str:
@@ -372,7 +384,7 @@ def build_entry(payload: dict[str, Any], transcript: Path, evidence_mod: Any, ro
         branch=clean(branch, 60),
         asked=clean(prompt, 160),
         edited=edited[:12],
-        ran=runs_from(records, evidence_mod)[:6],
+        ran=runs_from(records, evidence_mod),
         claimed=claimed(message),
         unreported=unreported_edits(edited, message)[:8] if message else [],
         reemitted=payload.get("stop_hook_active") is True,
@@ -403,7 +415,7 @@ def build_lead_entry(payload: dict[str, Any], transcript: Path, evidence_mod: An
         branch=clean(branch, 60),
         asked=clean(prompt, 160),
         edited=edited[:12],
-        ran=ran[:6],
+        ran=ran,
         claimed=claimed(message),
         unreported=unreported_edits(edited, message)[:8] if message else [],
         session=clean(session, 40),

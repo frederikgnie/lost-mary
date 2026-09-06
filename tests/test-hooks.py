@@ -1240,6 +1240,40 @@ rc, err = run_hook(
 expect("lead stop with a missing session transcript -> exit 0", rc, ALLOW, err)
 expect_true("... says so", "session transcript not found" in err, err)
 
+# Latest outcome wins: one chained shell call shares one result, so an early failure must not mask the later pass.
+# Paths outside the repo are abbreviated (home -> ~, the Claude scratchpad -> scratchpad/<name>); nine runs show six.
+home_file = str(Path.home() / ".claude" / "settings.json")
+scratch_file = str(Path.home() / "AppData" / "Local" / "Temp" / "claude" / "c--x" / "s1" / "scratchpad" / "patch.py")
+many = [b for i in range(7) for b in bash(f"pytest tests/test_{i}.py -q", "1 passed")]
+lead2 = PROJECT / "lead-session-2.jsonl"
+lead2.write_text(
+    jsonl_lines(
+        [
+            lead_prompt("Wire it", "q1"),
+            *tagged(edit(home_file), "q1"),
+            *tagged(edit(scratch_file), "q1"),
+            *tagged(bash("ruff check src && pytest -q", "Exit code 1" + chr(10) + "FAIL test_x", ok=False), "q1"),
+            *tagged(bash("ruff check src && pytest -q", "All checks passed!" + chr(10) + "12 passed"), "q1"),
+            *tagged(many, "q1"),
+        ]
+    ),
+    encoding="utf-8",
+)
+rc, err = run_hook(
+    LEDGERPY, lead_stop("q1", "Wired. CHANGED: settings.json", transcript_path=str(lead2)), "record", env=LENV
+)
+expect("lead turn with abbreviated paths and repeated runs -> exit 0", rc, ALLOW, err)
+q1 = [f for f in entries() if "lead-q1" in f.name]
+text = q1[-1].read_text(encoding="utf-8") if q1 else ""
+expect_true("home path shown as ~/...", "~/.claude/settings.json" in text, text)
+expect_true("scratchpad path collapsed", "scratchpad/patch.py" in text and "AppData" not in text, text)
+expect_true(
+    "latest outcome wins: the chain's failure then pass shows once, as ok",
+    text.count("ruff check src ->") == 1 and "ruff check src -> ok" in text and "pytest -q -> ok" in text,
+    text,
+)
+expect_true("nine distinct runs show six plus a count", "(+3 more)" in text, text)
+
 
 proc = subprocess.run(
     [sys.executable, str(LEDGERPY), "record"], input=b"\xef\xbb\xbfnot json", capture_output=True, env=LENV
