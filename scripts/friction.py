@@ -14,6 +14,10 @@ evidence is already on disk: every session transcript under
                classifier, grouped by the command's leading token;
   hand-backs   assistant messages that hand work back to the user, matched
                with the same patterns as scripts/no-punt.py;
+  hooks        every hook firing recorded in the transcripts, split into blocks
+               (exit 2 - the hook doing its job) and fail-open notices (exit 0
+               with stderr - a hook that could not do its job and said so on a
+               stream nobody reads);
   allow rules  exact `Bash(...)` entries in settings.json that can never
                match a different command - the shape that keeps prompts
                coming (26 of 45 entries on the author's machine, 2026-09-04).
@@ -83,6 +87,9 @@ class Report:
     refused_commands: Counter[str] = field(default_factory=Counter)
     refused_tools: Counter[str] = field(default_factory=Counter)
     hand_back_examples: list[str] = field(default_factory=list)
+    hook_fires: Counter[str] = field(default_factory=Counter)
+    hook_blocks: Counter[str] = field(default_factory=Counter)
+    hook_notices: Counter[str] = field(default_factory=Counter)
     allow_total: int = 0
     dead_allow: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -159,6 +166,29 @@ def has_recommended(question: Any) -> bool:
     return any(isinstance(o, dict) and "recommended" in str(o.get("label", "")).lower() for o in options)
 
 
+def scan_hook_record(record: dict[str, Any], report: Report) -> None:
+    """A hook firing, as Claude Code records it: an `attachment` with hookEvent/hookName/exitCode/stderr.
+
+    exit 2 is the hook blocking on purpose. exit 0 with stderr is a hook that failed OPEN and explained
+    itself to a stream nobody reads - a stale install or a wrong payload assumption hides there.
+    """
+    attachment = record.get("attachment")
+    if not isinstance(attachment, dict) or not attachment.get("hookEvent"):
+        return
+    event = str(attachment.get("hookEvent"))
+    report.hook_fires[event] += 1
+    stderr = str(attachment.get("stderr") or "").strip()
+    code = attachment.get("exitCode")
+    if code == 2:
+        report.hook_blocks[event] += 1
+    elif stderr:
+        report.hook_notices[f"{event}: {clean_line(stderr)}"] += 1
+
+
+def clean_line(text: str) -> str:
+    return CONTROL.sub("", " ".join(text.split()))[:120]
+
+
 def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase: Any) -> None:
     pending: dict[str, tuple[str, str]] = {}  # tool_use id -> (tool name, command)
     asked: dict[str, tuple[int, int]] = {}  # AskUserQuestion id -> (questions, of which with a recommended option)
@@ -166,7 +196,7 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
     project = path.parent.name
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            if '"tool_use"' not in line and '"tool_result"' not in line and '"assistant"' not in line:
+            if not any(k in line for k in ('"tool_use"', '"tool_result"', '"assistant"', '"hookEvent"')):
                 continue
             try:
                 record = json.loads(line)
@@ -174,6 +204,7 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
                 continue
             if not isinstance(record, dict):
                 continue
+            scan_hook_record(record, report)
             content = (record.get("message") or {}).get("content")
             if not isinstance(content, list):
                 continue
@@ -308,6 +339,9 @@ def as_json(report: Report) -> dict[str, Any]:
         "blocked": report.blocked,
         "refusals": report.refusals,
         "hand_backs": report.hand_backs,
+        "hook_fires": dict(report.hook_fires.most_common()),
+        "hook_blocks": dict(report.hook_blocks.most_common()),
+        "hook_notices": dict(report.hook_notices.most_common()),
         "allow_total": report.allow_total,
         "dead_allow": report.dead_allow,
         "refused_commands": dict(report.refused_commands.most_common()),
@@ -376,6 +410,12 @@ def as_text(report: Report) -> str:
     tools = ", ".join(f"{n} {c}" for n, c in report.refused_tools.most_common(4))
     lines.append(f"refusals      {report.refusals} tool call(s) refused" + (f"  ({tools})" if tools else ""))
     lines.append(f"hand-backs    {report.hand_backs} assistant message(s) hand work back to the user")
+    fires, blocks, notices = (
+        sum(report.hook_fires.values()),
+        sum(report.hook_blocks.values()),
+        sum(report.hook_notices.values()),
+    )
+    lines.append(f"hooks         {fires} firing(s) recorded, {blocks} block(s), {notices} fail-open notice(s)")
     dead = len(report.dead_allow)
     lines.append(f"allow rules   {report.allow_total} entries, {dead} exact Bash rule(s) that never match again")
     if report.projects:
@@ -399,6 +439,9 @@ def as_text(report: Report) -> str:
         lines += [f"  {CONTROL.sub('', rule)[:110]}" for rule in report.dead_allow[:12]]
         if len(report.dead_allow) > 12:
             lines.append(f"  ... and {len(report.dead_allow) - 12} more")
+    if report.hook_notices:
+        lines += ["", "hook fail-open notices (a hook that could not do its job)"]
+        lines += [f"  {n:>3}  {text}" for text, n in report.hook_notices.most_common(8)]
     if report.notes:
         lines += ["", "notes"]
         lines += [f"  {note}" for note in report.notes]

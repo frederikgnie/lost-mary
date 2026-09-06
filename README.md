@@ -136,6 +136,11 @@ last 50 sessions and prints how often Claude asked, was refused, or handed work
 back, plus the allow rules that can never match again. `--json` for diffing;
 `--record` saves the reading, `--history` tabulates the saved ones over time.
 
+It is also the **hook health check**: Claude Code records every hook firing in the
+transcript, and a hook that fails open writes its reason to a stream nobody reads.
+The report counts firings, deliberate blocks and fail-open notices, so a stale
+install or a wrong payload assumption shows up as a number instead of silence.
+
 **Remembering it.** `~/.claude/agent-library/ledger/<project>/` holds one file per
 subagent stop and per lead turn that changed something - what was edited and
 run, from the transcript - and each new,

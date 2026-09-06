@@ -1233,6 +1233,56 @@ expect_true(
     "--history lists the saved reading", proc.returncode == 0 and "recorded (UTC)" in out and out.count("\n") >= 1, out
 )
 
+
+# Hook health: Claude Code records each firing as an `attachment`; exit 2 is a deliberate block, exit 0 with
+# stderr is a hook that failed OPEN and explained itself where nobody looks. Both must be counted.
+def hook_record(event: str, code: object, stderr: str = "") -> dict[str, object]:
+    return {
+        "type": "attachment",
+        "attachment": {
+            "type": "hook",
+            "hookEvent": event,
+            "hookName": f"{event}:x",
+            "exitCode": code,
+            "stdout": "",
+            "stderr": stderr,
+        },
+    }
+
+
+(PROJ_A / "s3.jsonl").write_text(
+    jsonl(
+        [
+            hook_record("PostToolUse", None),
+            hook_record("Stop", 2, "Nothing is left on the table (no-punt)."),
+            hook_record("Stop", 0, "check-evidence: payload lacks ['agent_id']; allowing."),
+            hook_record("SubagentStart", 0, "ledger: usage: ledger.py record|recall|attach"),
+            hook_record("SessionStart", 0),
+        ]
+    ),
+    encoding="utf-8",
+)
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--json"], capture_output=True)
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "hook fires counted per event",
+    data["hook_fires"].get("Stop") == 2 and data["hook_fires"].get("PostToolUse") == 1,
+    str(data.get("hook_fires")),
+)
+expect_true(
+    "exit 2 counted as a block, not a notice", data["hook_blocks"].get("Stop") == 1, str(data.get("hook_blocks"))
+)
+notices = data["hook_notices"]
+expect_true("exit 0 with stderr counted as a fail-open notice", len(notices) == 2, str(notices))
+expect_true(
+    "... naming the event and the message", any(k.startswith("Stop: check-evidence") for k in notices), str(notices)
+)
+expect_true(
+    "a clean firing is neither a block nor a notice", not any("SessionStart" in k for k in notices), str(notices)
+)
+out = subprocess.run([sys.executable, str(FRICTION), *fr_args], capture_output=True).stdout.decode("utf-8")
+expect_true("text report shows the hooks line and the notices", "hooks " in out and "fail-open notice" in out, out)
+
 # ---------------------------------------------------------------------------- ledger
 print()
 print("ledger.py - SubagentStop record / SessionStart recall")
