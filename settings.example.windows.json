@@ -1,7 +1,57 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" brief",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" recall",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "cat \"$HOME/.claude/agent-library/model-policy.md\" 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/permit.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-spawn.py\"",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "AskUserQuestion",
         "hooks": [
@@ -22,9 +72,37 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-evidence.py\" --lead",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" attach",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
@@ -43,6 +121,15 @@
           {
             "type": "command",
             "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
             "timeout": 20
           }
         ]

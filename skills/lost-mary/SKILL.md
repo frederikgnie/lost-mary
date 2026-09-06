@@ -42,6 +42,7 @@ repository, never a question for the user.
 | A bug whose cause is unclear | `implement` with a reproduce-first brief: reproduce, find the root cause, smallest fix, keep the reproduction as the regression test |
 | Want an independent check before merge, or a trust boundary is touched | `review` - paste it the `git diff`; it cannot run anything |
 | Genuinely separable scopes with concurrent writes | several `implement`, disjoint `OWNED`, each `isolation: worktree` - see the caveat below |
+| Several implementers that must coordinate while running (a shared task list, messages between them) | an Agent Team; every teammate gets the spawn block below. Hooks cannot see a teammate's transcript (`TaskCompleted` / `TeammateIdle` carry names only), so the evidence gate is you re-running the decisive check - never a teammate's report |
 | A defect found along the way, outside the current scope | never park it: fix it in place if it is a few lines, otherwise a second `implement` with its own `OWNED` and `isolation: worktree`, gated like the main change |
 
 `isolation: worktree` needs the session cwd inside a git repository (at a
@@ -51,6 +52,14 @@ it branches from the repository's default branch unless `worktree.baseRef` is
 implementers one at a time in the shared checkout.
 
 Add an agent only to remove a risk you can name. Reassess after each result.
+
+**Model per spawn.** Spend the strong model where errors compound and the cheap
+one where they are caught. `explore` (investigation and the `PLAN`) and `review`
+run on fable: a wrong plan multiplies into every implementer, and a missed defect
+ships. `implement` runs on opus - execution, already guarded by the spawn
+contract, the hooks and the tests. Pass `model:` only to move off a default, and
+say why. Never sonnet for code. A machine-wide policy, if present, is shown at
+session start (`~/.claude/agent-library/model-policy.md`) and wins over these.
 
 ## 3. Every `implement` spawn carries these
 

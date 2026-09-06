@@ -25,6 +25,15 @@ that actually checks something (`--collect-only`, `--version`, `--help` do not).
 read from the tool result's error flag AND its text, because `pytest ... | tail`
 hands bash the exit code of `tail`.
 
+The lead's own claims (`--lead`, a Stop hook). The lead is what the user reads,
+and nothing else checks it. With `--lead` the same rules apply to the lead's
+final message: edits and runs of the current turn (records from the first one
+carrying the payload's `prompt_id`) decide rules A and C; a claim of passing
+validation needs a run somewhere in the session (rule B, "never say tests pass
+unless they ran in this session"), and the last run of that kind in the
+session must not have failed unreported. Conversation-only turns without a
+claim pass untouched. One strike, as above.
+
 Wiring: SubagentStop with a matcher for roles that write (e.g.
 "implement|general-purpose"). Exit 2 blocks the stop and returns stderr to the
 subagent; exit 0 allows. Fails OPEN, with a notice on stderr, when the payload
@@ -42,6 +51,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,6 +60,9 @@ EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 # --- what is a validation run -------------------------------------------------------------
 SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+# A heredoc body is data the command writes, not commands it runs: `cat > t.py <<'EOF' ... pytest ... EOF`
+# must not be credited with a pytest run. Removed before the command is split into segments.
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?^\1[ \t]*$", re.DOTALL | re.MULTILINE)
 ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
 RUNNER_PREFIX = re.compile(
     r"^(?:(?:uv|uvx|poetry|pipenv|hatch|pdm|rye)\s+(?:run\s+)?|time\s+|timeout\s+\S+\s+|exec\s+)+", re.IGNORECASE
@@ -107,10 +120,24 @@ DISCLAIMER_RE = re.compile(
 REPORTS_FAILURE_RE = re.compile(
     # "no failures" / "0 failed" / "without failures" report success, not failure.
     r"(?<!\bno\s)(?<!\bno\stests\s)(?<!\bzero\s)(?<!\bwithout\s)(?<!\b0\s)"
-    r"\b(?:failed|failing|failures?|not met|not checked|not run|unverified|broken|does not pass|"
+    r"\b(?:failed|fails?|failing|failures?|not met|not checked|not run|unverified|broken|does not pass|"
     r"FAIL\b|errors?\s+(?:remain|found|reported)|[1-9]\d*\s+errors?)\b",
     re.IGNORECASE,
 )
+# A conditional shortly before the word makes it a plan rather than a report - "retry if it fails", "ping me
+# when it fails", "it should fail loudly". A fixed-width lookbehind cannot reach past the words between, so the
+# window is checked in code (the technique no-punt uses for negations).
+CONDITIONAL_BEFORE = re.compile(
+    r"\b(?:if|when|whenever|unless|should|in case|so that|to see whether)\b[^.\n]{0,24}$", re.IGNORECASE
+)
+
+
+def reports_failure(text: str) -> bool:
+    """True when the text states a failure, not merely a condition under which one would occur."""
+    return any(
+        not CONDITIONAL_BEFORE.search(text[max(0, m.start() - 40) : m.start()])
+        for m in REPORTS_FAILURE_RE.finditer(text)
+    )
 
 
 @dataclass
@@ -130,7 +157,7 @@ class Evidence:
 def classify(command: str) -> list[tuple[str, str]]:
     """Validation segments of a shell command as (segment, kind); kind in test/lint/type."""
     found: list[tuple[str, str]] = []
-    for segment in SEGMENT_SPLIT.split(command):
+    for segment in SEGMENT_SPLIT.split(HEREDOC.sub(" ", command)):
         segment = segment.strip()
         if not segment:
             continue
@@ -188,9 +215,7 @@ def _text_of(content: Any) -> str:
     return ""
 
 
-def read_transcript(path: Path) -> Evidence:
-    pending: dict[str, tuple[str, dict[str, Any]]] = {}
-    evidence = Evidence()
+def iter_records(path: Path) -> Iterator[dict[str, Any]]:
     with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -200,35 +225,47 @@ def read_transcript(path: Path) -> Evidence:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            message = record.get("message") if isinstance(record, dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
+            if isinstance(record, dict):
+                yield record
+
+
+def read_transcript(path: Path) -> Evidence:
+    return evidence_from(iter_records(path))
+
+
+def evidence_from(records: Iterable[dict[str, Any]]) -> Evidence:
+    pending: dict[str, tuple[str, dict[str, Any]]] = {}
+    evidence = Evidence()
+    for record in records:
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
                 continue
-            for item in content:
-                if not isinstance(item, dict):
+            kind = item.get("type")
+            if kind == "tool_use":
+                name = item.get("name")
+                tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
+                if isinstance(item.get("id"), str) and isinstance(name, str):
+                    pending[item["id"]] = (name, tool_input)
+                if name in EDIT_TOOLS:
+                    target = tool_input.get("file_path") or tool_input.get("notebook_path")
+                    if isinstance(target, str):
+                        evidence.edited.append(target)
+            elif kind == "tool_result":
+                use = pending.pop(item.get("tool_use_id", ""), None)
+                if use is None or use[0] != "Bash":
                     continue
-                kind = item.get("type")
-                if kind == "tool_use":
-                    name = item.get("name")
-                    tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
-                    if isinstance(item.get("id"), str) and isinstance(name, str):
-                        pending[item["id"]] = (name, tool_input)
-                    if name in EDIT_TOOLS:
-                        target = tool_input.get("file_path") or tool_input.get("notebook_path")
-                        if isinstance(target, str):
-                            evidence.edited.append(target)
-                elif kind == "tool_result":
-                    use = pending.pop(item.get("tool_use_id", ""), None)
-                    if use is None or use[0] != "Bash":
-                        continue
-                    command = str(use[1].get("command", ""))
-                    segments = classify(command)
-                    if not segments:
-                        continue
-                    text = _text_of(item.get("content"))
-                    ok = not run_failed(item.get("is_error"), text)
-                    for segment, run_kind in segments:
-                        evidence.runs.append(Run(segment.strip(), run_kind, ok, text.strip()[:300]))
+                command = str(use[1].get("command", ""))
+                segments = classify(command)
+                if not segments:
+                    continue
+                text = _text_of(item.get("content"))
+                ok = not run_failed(item.get("is_error"), text)
+                for segment, run_kind in segments:
+                    evidence.runs.append(Run(segment.strip(), run_kind, ok, text.strip()[:300]))
     return evidence
 
 
@@ -252,9 +289,7 @@ def subagent_transcript(event: dict[str, Any]) -> Path | None:
 
 
 def strip_negative_lines(message: str) -> str:
-    return "\n".join(
-        line for line in message.splitlines() if not (REPORTS_FAILURE_RE.search(line) or DISCLAIMER_RE.search(line))
-    )
+    return "\n".join(line for line in message.splitlines() if not (reports_failure(line) or DISCLAIMER_RE.search(line)))
 
 
 def decide(message: str, evidence: Evidence) -> str | None:
@@ -266,7 +301,7 @@ def decide(message: str, evidence: Evidence) -> str | None:
     for run in evidence.runs:
         last_by_kind[run.kind] = run
     failed = [r for r in last_by_kind.values() if not r.ok]
-    if failed and not REPORTS_FAILURE_RE.search(message):
+    if failed and not reports_failure(message):
         r = failed[0]
         return (
             f"The last {r.kind} run in your transcript failed, but your message does not say so:\n"
@@ -295,6 +330,106 @@ def decide(message: str, evidence: Evidence) -> str | None:
     return None
 
 
+# --- the lead's own turn ------------------------------------------------------------------
+
+
+def is_user_prompt(record: dict[str, Any]) -> bool:
+    message = record.get("message")
+    return record.get("type") == "user" and isinstance(message, dict) and isinstance(message.get("content"), str)
+
+
+def turn_records(records: list[dict[str, Any]], prompt_id: str | None) -> list[dict[str, Any]]:
+    """The lead's current turn: from the first record carrying prompt_id to the next user prompt, or the end.
+
+    Assistant records carry no promptId; everything between one prompt and the next belongs to that turn. Without
+    a prompt_id, the last prompt's turn.
+    """
+    turn: list[dict[str, Any]] = []
+    collecting = False
+    for record in records:
+        if prompt_id:
+            pid = record.get("promptId")
+            if not collecting and pid == prompt_id:
+                collecting = True
+            elif collecting and is_user_prompt(record) and pid not in (None, prompt_id):
+                break
+            if collecting:
+                turn.append(record)
+        elif is_user_prompt(record):
+            turn = [record]
+        elif turn:
+            turn.append(record)
+    return turn
+
+
+def last_failed(runs: list[Run]) -> Run | None:
+    last_by_kind: dict[str, Run] = {}
+    for run in runs:
+        last_by_kind[run.kind] = run
+    failed = [r for r in last_by_kind.values() if not r.ok]
+    return failed[0] if failed else None
+
+
+def decide_lead(message: str, turn: Evidence, session: Evidence) -> str | None:
+    """Block reason for the lead's final message, or None. Turn evidence for A and C, session runs for claims."""
+    if turn.edited:
+        failed = last_failed(turn.runs)
+        if failed is not None and not reports_failure(message):
+            return (
+                f"The last {failed.kind} run in this turn failed, but your message does not say so:\n"
+                f"  $ {failed.command}\n  {failed.snippet[:200]}\n"
+                "Fix and re-run, or report the failure honestly."
+            )
+        if not turn.runs and not DISCLAIMER_RE.search(message):
+            files = sorted(set(turn.edited))
+            shown = "\n".join(f"  - {f}" for f in files[:8])
+            more = f"\n  ... {len(files) - 8} more" if len(files) > 8 else ""
+            return (
+                f"You changed {len(files)} file(s) this turn but ran no validation:\n{shown}{more}\n"
+                "Run the project's checks (or /validate) and report the command and result - or say "
+                "explicitly that validation was not run and why."
+            )
+    if CLAIM_RE.search(strip_negative_lines(message)):
+        if not session.runs:
+            return (
+                "Your message claims validation passed, but no test/typecheck/lint command has run in this "
+                "session. Run the project's checks now (or /validate) and report the exact command and result, "
+                "or remove the claim and say plainly that you did not verify."
+            )
+        failed = last_failed(session.runs)
+        if failed is not None and not reports_failure(message):
+            return (
+                f"Your message claims validation passed, but the last {failed.kind} run in this session failed:\n"
+                f"  $ {failed.command}\n  {failed.snippet[:200]}\n"
+                "Re-run it and report the result, or report the failure honestly."
+            )
+    return None
+
+
+def main_lead(event: dict[str, Any]) -> int:
+    if event.get("stop_hook_active") is True:
+        return 0
+    message = event.get("last_assistant_message")
+    if not isinstance(message, str):
+        print("check-evidence: --lead payload lacks last_assistant_message; allowing.", file=sys.stderr)
+        return 0
+    path = Path(str(event.get("transcript_path") or ""))
+    if not path.is_file():
+        print(f"check-evidence: session transcript not found ({path}); allowing (claims unverified).", file=sys.stderr)
+        return 0
+    prompt_id = event.get("prompt_id") if isinstance(event.get("prompt_id"), str) else None
+    try:
+        records = list(iter_records(path))
+    except OSError as exc:
+        print(f"check-evidence: cannot read {path} ({exc}); allowing.", file=sys.stderr)
+        return 0
+    reason = decide_lead(message, evidence_from(turn_records(records, prompt_id)), evidence_from(records))
+    if reason is None:
+        return 0
+    print(f"Evidence check failed (lead).\n{reason}", file=sys.stderr)
+    return 2
+
+
 def read_stdin_json() -> Any:
     """Bytes + utf-8-sig: PowerShell prepends a BOM when piping to a native exe."""
     buffer = getattr(sys.stdin, "buffer", None)
@@ -318,6 +453,8 @@ def main() -> int:
     if not isinstance(event, dict):
         print("check-evidence: payload was not an object; allowing.", file=sys.stderr)
         return 0
+    if "--lead" in sys.argv[1:] or (event.get("hook_event_name") == "Stop" and not event.get("agent_id")):
+        return main_lead(event)
     if event.get("stop_hook_active") is True:
         return 0
 

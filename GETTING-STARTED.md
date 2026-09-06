@@ -60,8 +60,7 @@ venv. Within a second of the edit you should see a hook message quoting
 `settings.json` is wrong (see §7). Record the date in `capabilities.md`'s
 "Verified-live log" so the next upgrade has a baseline.
 
-Two more live checks, one minute each, for the hooks the suite can only
-simulate:
+More live checks, one minute each, for the hooks the suite can only simulate:
 
 - **no-ask.** In a fresh session run `/lost-mary <anything small>` and then ask
   Claude to present you an option menu (an `AskUserQuestion`). You should get a
@@ -70,6 +69,24 @@ simulate:
 - **no-punt.** Ask Claude to end a turn with the sentence "I'll leave that for
   you." You should see it bounce once and re-emit without the hand-back. The
   second stop always goes through (`stop_hook_active`), so this cannot wedge.
+
+- **check-evidence --lead.** Ask Claude, in a turn where it ran nothing, to tell
+  you "all tests pass". The stop should bounce once with "Evidence check failed
+  (lead)" and the re-emitted message should drop or qualify the claim.
+- **ledger brief.** Spawn an `explore` and ask it whether its context contains a
+  block starting "Recent ledger for this project". In a project with entries
+  the answer is yes.
+- **permit.** In Manual mode (`Shift+Tab`), on a feature branch, ask Claude to push.
+  No prompt should appear; on `main` it should. Background `implement` agents
+  running `pytest` should no longer be auto-denied.
+- **check-spawn.** Ask Claude to spawn an `implement` agent with a one-line brief
+  and no OWNED/OFF-LIMITS/DONE MEANS/VALIDATION. The spawn should be refused
+  before it starts, with `MISSING: OWNED, OFF-LIMITS, DONE MEANS, VALIDATION`.
+- **ledger.** Spawn any `implement` (or run `/lost-mary` on something small).
+  When it finishes, `~/.claude/agent-library/ledger/<project>/` should hold one
+  new file with the files it edited and the commands it ran. Start a new session
+  in the same repo: the first context it sees is "Ledger for <project> ..."
+  with that entry.
 
 Then take the baseline the rules will be judged against:
 
@@ -159,5 +176,9 @@ library's defaults.
   question still reaches you.
 - `no-punt` matches phrasing, not intent: a hand-back worded in a way the
   patterns do not cover goes through, and it bounces only once per turn.
+- The ledger records subagent stops and the lead's turns that edited or ran
+  something; conversation-only turns leave nothing. It grows without bound
+  (`recall` shows the tail; delete old files under
+  `~/.claude/agent-library/ledger/` freely).
 - On Windows there is no Bash sandbox, so read-only roles have no Bash; when
   `explore` needs `git log`, the lead runs it.

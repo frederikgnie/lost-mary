@@ -41,11 +41,11 @@ from typing import Any
 # A hand-back names the user as the one who will act. Each pattern needs the
 # "you" (or a stand-in) so that "left as a follow-up in PR #12" does not match.
 # "leave/left <thing> for you" accepts a pronoun, the QUOTED placeholder or a
-# short noun phrase (up to four words) - but not a note or a message, and not
+# short noun phrase (up to six words, ticket numbers included) - but not a note or a message, and not
 # "for you to inspect/review": showing something is not handing work back.
 THING = (
     r"(?!(?:a|an|the|this)\s+(?:note|message|summary|link|comment|write-?up|report|list|pointer)\b)"
-    r"(?:[\w'`./-]+\s+){1,4}?"
+    r"(?:[\w'`./#:,()-]+\s+){1,6}?"
 )
 YOU = r"you\b(?!\s+to\s+(?:inspect|review|read|see|check|verify|compare|confirm|skim|browse)\b)"
 PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(

@@ -24,7 +24,7 @@ $DriftCount = 0
 $IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
-$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'global-CLAUDE.md', 'capabilities.md')
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'scripts/ledger.py', 'scripts/check-spawn.py', 'scripts/permit.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
@@ -191,7 +191,7 @@ function Test-Settings {
     }
     $hooks = $null
     if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
-    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'))
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'))
     foreach ($pair in $wanted) {
         $eventName = $pair[0]
         $scriptName = $pair[1]
@@ -420,7 +420,7 @@ if ($IncompleteCount -gt 0) {
     exit 3
 }
 Write-Host "Agents installed in:          $DestAgents  (explore, implement, review)"
-Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr)"
+Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr, /ledger)"
 Write-Host "Hook scripts + rules in:      $DestLib"
 Write-Host "Operating rules imported by:  $ClaudeMd"
 Write-Host ''
