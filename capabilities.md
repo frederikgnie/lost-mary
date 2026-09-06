@@ -5,7 +5,7 @@ was verified, and how each piece degrades when the runtime changes. Claude
 Code's own documentation is the authority; this file records what was checked
 and when, so a future upgrade has a checklist instead of a surprise.
 
-Last verified: **2026-09-04**, Claude Code **2.1.260**, against
+Last verified: **2026-09-06**, Claude Code **2.1.260**, against
 `code.claude.com/docs` (hooks, sub-agents, skills, settings) and against real
 transcripts on disk.
 
