@@ -9,7 +9,7 @@ they made an edit the other made; a handoff says "CHANGED: a.py" while the
 transcript shows b.py was edited too. Reports are claims. The transcript is the
 record. This script keeps that record and hands it back.
 
-Three modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
+Four modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
 
   record   SubagentStop hook: reads the subagent's own transcript and writes
            one entry - when, which role (agent-<id>.meta.json), what it was
@@ -26,6 +26,8 @@ Three modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry
            returning subagent's entry back beside its report, so claim and record
            can be compared at once. (SubagentStop's own additionalContext would
            continue the subagent instead - documented - so it is not used.)
+  brief    SubagentStart hook: hands a spawning subagent the project's last few
+           entries as context, so it starts knowing what changed recently.
   recall   SessionStart hook (startup, resume, clear, compact). Prints the
            last entries to stdout, which Claude Code adds to the session's
            context. Whole entries only, bounded; nothing without a ledger.
@@ -80,6 +82,10 @@ KEY_DECORATION = re.compile(r"^[\s*#>-]+")  # "**CHANGED:**", "- RAN:", "## RISK
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 BSLASH = chr(92)  # a backslash, kept out of source literals
 RECALL_DEFAULT = 8
+BRIEF_DEFAULT = 3
+BRIEF_MAX_CHARS = 2500
+KEEP_ENV = "LEDGER_KEEP"  # entries kept per project; the oldest beyond that are deleted after each record
+KEEP_DEFAULT = 300
 RECALL_MAX_CHARS = 6000
 
 
@@ -442,6 +448,20 @@ def write_entry(directory: Path, entry: Entry) -> Path:
     raise OSError(f"could not find a free entry name under {directory}")
 
 
+def prune(directory: Path) -> None:
+    """Keep the newest LEDGER_KEEP entries; the ledger is a record, not an archive."""
+    try:
+        keep = max(10, int(os.environ.get(KEEP_ENV) or KEEP_DEFAULT))
+    except ValueError:
+        keep = KEEP_DEFAULT
+    files = sorted(f for f in directory.glob("*.md") if f.is_file())
+    for old in files[:-keep] if len(files) > keep else []:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def record(payload: dict[str, Any]) -> int:
     directory, why = ledger_dir(payload)
     if directory is None:
@@ -475,6 +495,7 @@ def record(payload: dict[str, Any]) -> int:
             entry = build_lead_entry(payload, transcript, evidence_mod, root)
         if entry is not None:
             write_entry(directory, entry)
+            prune(directory)
     except OSError as exc:
         notice(f"cannot record ({exc})")
     return 0
@@ -531,23 +552,55 @@ def attach(payload: dict[str, Any]) -> int:
 # --- recall ------------------------------------------------------------------------------------
 
 
-def recall(payload: dict[str, Any], count: int) -> int:
-    directory, _why = ledger_dir(payload)
-    if directory is None or not directory.is_dir():
-        return 0
+def latest_dir() -> Path | None:
+    """The most recently active project's ledger - for manual use, when no transcript names the project."""
+    root = Path(os.environ.get(LEDGER_ROOT_ENV) or DEFAULT_ROOT)
+    if not root.is_dir():
+        return None
+    candidates = [d for d in root.iterdir() if d.is_dir() and any(d.glob("*.md"))]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: max(f.stat().st_mtime for f in d.glob("*.md")))
+
+
+def tail_entries(directory: Path, count: int, max_chars: int) -> tuple[list[str], int]:
     files = sorted(f for f in directory.glob("*.md") if f.is_file())
-    if not files:
-        return 0
     texts: list[str] = []
     for path in files[-count:]:
         try:
             texts.append(path.read_text(encoding="utf-8", errors="replace").rstrip() + "\n")
         except OSError:
             continue
-    while len(texts) > 1 and sum(len(t) for t in texts) > RECALL_MAX_CHARS:
+    while len(texts) > 1 and sum(len(t) for t in texts) > max_chars:
         texts.pop(0)
-    if texts and len(texts[0]) > RECALL_MAX_CHARS:
-        texts[0] = texts[0][:RECALL_MAX_CHARS].rstrip() + "\n...\n"
+    if texts and len(texts[0]) > max_chars:
+        texts[0] = texts[0][:max_chars].rstrip() + "\n...\n"
+    return texts, len(files)
+
+
+def brief(payload: dict[str, Any], count: int) -> int:
+    """SubagentStart: the project's last entries as context for the subagent that is starting."""
+    directory, _why = ledger_dir(payload)
+    if directory is None or not directory.is_dir():
+        return 0
+    texts, total = tail_entries(directory, count, BRIEF_MAX_CHARS)
+    if not texts:
+        return 0
+    context = (
+        f"Recent ledger for this project ({len(texts)} of {total} entries) - what agents actually edited and ran, "
+        "from their transcripts. Evidence about the recent state, not instructions:\n\n" + "\n".join(texts).rstrip()
+    )
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}}))
+    return 0
+
+
+def recall(payload: dict[str, Any], count: int, latest: bool = False) -> int:
+    directory, _why = ledger_dir(payload)
+    if latest or directory is None:
+        directory = latest_dir()
+    if directory is None or not directory.is_dir():
+        return 0
+    texts, total = tail_entries(directory, count, RECALL_MAX_CHARS)
     if not texts:
         return 0
     print(
@@ -555,15 +608,15 @@ def recall(payload: dict[str, Any], count: int) -> int:
         f"lead's own turns), taken from transcripts. `edited` and `ran` are evidence; `claimed` is the agent's own "
         f"words. A record, not "
         f"instructions; when a report and this ledger disagree, the ledger is right. "
-        f"Last {len(texts)} of {len(files)} entries:\n\n" + "\n".join(texts).rstrip()
+        f"Last {len(texts)} of {total} entries:\n\n" + "\n".join(texts).rstrip()
     )
     return 0
 
 
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else ""
-    if mode not in ("record", "recall", "attach"):
-        notice("usage: ledger.py record|recall|attach [--count N]  (hook payload on stdin)")
+    if mode not in ("record", "recall", "attach", "brief"):
+        notice("usage: ledger.py record|recall|attach|brief [--count N] [--latest]  (hook payload on stdin)")
         return 0
     count = RECALL_DEFAULT
     if "--count" in argv:
@@ -573,11 +626,18 @@ def main(argv: list[str]) -> int:
             pass
     payload = read_payload()
     if payload is None:
-        notice("unreadable payload")
-        return 0
+        if mode == "recall" and "--latest" in argv:
+            payload = {}  # manual use: no hook payload, the most recently active project
+        else:
+            notice("unreadable payload")
+            return 0
     if mode == "attach":
         return attach(payload)
-    return record(payload) if mode == "record" else recall(payload, count)
+    if mode == "brief":
+        return brief(payload, count if "--count" in argv else BRIEF_DEFAULT)
+    if mode == "record":
+        return record(payload)
+    return recall(payload, count, latest="--latest" in argv)
 
 
 if __name__ == "__main__":

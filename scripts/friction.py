@@ -23,6 +23,8 @@ and compare the numbers instead of the feeling.
 
 Usage:
   friction.py [--sessions N] [--projects-dir DIR] [--settings FILE] [--json]
+             [--record]   also save this reading under FRICTION_ROOT (default ~/.claude/agent-library/friction)
+             [--history]  print the saved readings as a table and exit
 
 Runtime dependencies (see capabilities.md): the transcript record shape -
 `type: assistant|user`, `message.content[]` items of type `tool_use`
@@ -35,6 +37,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -45,6 +48,8 @@ from typing import Any
 
 sys.dont_write_bytecode = True  # read-only means no __pycache__ either, not even for the no-punt import
 
+FRICTION_ROOT_ENV = "FRICTION_ROOT"
+DEFAULT_FRICTION_ROOT = Path.home() / ".claude" / "agent-library" / "friction"
 NOASK_BLOCK = "blocked while this session runs under /lost-mary"  # first sentence of no-punt's sibling, no-ask
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # transcript text goes to a terminal; strip escapes
 REFUSAL_MARKERS = (
@@ -323,6 +328,40 @@ def as_json(report: Report) -> dict[str, Any]:
     }
 
 
+def friction_root() -> Path:
+    return Path(os.environ.get(FRICTION_ROOT_ENV) or DEFAULT_FRICTION_ROOT)
+
+
+def save_reading(report: Report) -> Path:
+    root = friction_root()
+    root.mkdir(parents=True, exist_ok=True)
+    data = as_json(report)
+    data["recorded_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    target = root / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    target.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return target
+
+
+def history_text() -> str:
+    root = friction_root()
+    files = sorted(root.glob("*.json")) if root.is_dir() else []
+    if not files:
+        return f"no saved readings under {root} (run with --record)"
+    lines = ["recorded (UTC)        sessions  questions  recommended  blocked  refusals  hand-backs  dead rules  span"]
+    for path in files:
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        q, r = int(d.get("questions", 0)), int(d.get("recommended", 0))
+        lines.append(
+            f"{str(d.get('recorded_at', path.stem))[:20]:<21} {d.get('sessions', 0):>8}  {q:>9}  {pct(r, q):>11}  "
+            f"{d.get('blocked', 0):>7}  {d.get('refusals', 0):>8}  {d.get('hand_backs', 0):>10}  "
+            f"{len(d.get('dead_allow', [])):>10}  {d.get('first', '')}..{d.get('last', '')}"
+        )
+    return "\n".join(lines)
+
+
 def pct(part: int, whole: int) -> str:
     return f"{100 * part // whole}%" if whole else "-"
 
@@ -379,12 +418,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--projects-dir", type=Path, default=Path.home() / ".claude" / "projects")
     parser.add_argument("--settings", type=Path, default=Path.home() / ".claude" / "settings.json")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--record", action="store_true", help="also save this reading under FRICTION_ROOT")
+    parser.add_argument("--history", action="store_true", help="print saved readings and exit")
     args = parser.parse_args(argv)
+    if args.history:
+        print(history_text())
+        return 0
     if not args.projects_dir.is_dir():
         print(f"friction: no transcripts - {args.projects_dir} is not a directory", file=sys.stderr)
         return 0
     report = build_report(args.projects_dir, args.settings, max(1, args.sessions))
     print(json.dumps(as_json(report), indent=2, ensure_ascii=False) if args.json else as_text(report))
+    if args.record:
+        saved = save_reading(report)
+        print(f"saved: {saved}", file=sys.stderr)
     return 0
 
 

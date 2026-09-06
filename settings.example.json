@@ -1,6 +1,17 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/ledger.py\" brief",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",
@@ -9,6 +20,11 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/agent-library/scripts/ledger.py\" recall",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "cat \"$HOME/.claude/agent-library/model-policy.md\" 2>/dev/null || true",
+            "timeout": 5
           }
         ]
       }
@@ -62,6 +78,15 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/check-evidence.py\" --lead",
             "timeout": 20
           }
         ]

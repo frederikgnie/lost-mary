@@ -644,6 +644,85 @@ p, a = make_session([*edit("src/x.py"), *bash(heredoc_then_run, "12 passed in 0.
 rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
 expect("... but a real pytest after the heredoc counts", rc, ALLOW, err)
 
+
+# --lead: the lead's own final message - its turn's edits and runs decide rules A and C, the session's runs back claims.
+def lead_session(*turns: tuple[str, str, list[dict[str, object]]]) -> Path:
+    path = PROJECT / f"lead-{uuid.uuid4().hex[:8]}.jsonl"
+    records: list[dict[str, object]] = []
+    for pid, prompt, body in turns:
+        records.append({"type": "user", "promptId": pid, "message": {"role": "user", "content": prompt}})
+        for r in body:
+            if r.get("type") == "user":
+                r["promptId"] = pid
+        records.extend(body)
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def lead_event(path: Path, pid: str | None, message: str, **extra: object) -> dict[str, object]:
+    ev: dict[str, object] = {
+        "hook_event_name": "Stop",
+        "session_id": "s",
+        "transcript_path": str(path),
+        "cwd": str(ROOT),
+        "last_assistant_message": message,
+        **extra,
+    }
+    if pid:
+        ev["prompt_id"] = pid
+    return ev
+
+
+ls = lead_session(("t1", "fix it", [*edit("src/x.py"), *bash("pytest tests -q", "Exit code 1\n1 failed", ok=False)]))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Fixed the loader; all good."), "--lead")
+expect("lead: turn edited, last run failed, message silent -> block", rc, BLOCK, err)
+rc, err = run_hook(
+    EVIDENCE, lead_event(ls, "t1", "Fixed the loader; pytest still fails on test_x, investigating."), "--lead"
+)
+expect("lead: same, failure reported -> allow", rc, ALLOW, err)
+ls = lead_session(("t1", "fix it", [*edit("src/x.py")]))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Done, updated the loader."), "--lead")
+expect("lead: turn edited, ran nothing, no disclaimer -> block", rc, BLOCK, err)
+rc, err = run_hook(
+    EVIDENCE, lead_event(ls, "t1", "Updated the loader; I did not run the tests (docs-only change)."), "--lead"
+)
+expect("lead: same with a disclaimer -> allow", rc, ALLOW, err)
+ls = lead_session(("t1", "how are the tests?", []))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "All tests pass."), "--lead")
+expect("lead: conversation-only turn claiming a pass, no run in the session -> block", rc, BLOCK, err)
+ls = lead_session(("t0", "run tests", [*bash("pytest tests -q", "12 passed")]), ("t1", "so?", []))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "All 12 tests pass."), "--lead")
+expect("lead: claim backed by an earlier run in the session -> allow", rc, ALLOW, err)
+ls = lead_session(("t0", "run tests", [*bash("pytest tests -q", "Exit code 1\n2 failed", ok=False)]), ("t1", "so?", []))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Tests pass now."), "--lead")
+expect("lead: claim while the session's last run failed -> block", rc, BLOCK, err)
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Here is a summary of the design."), "--lead")
+expect("lead: conversation-only turn, no claim -> allow", rc, ALLOW, err)
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Tests pass now.", stop_hook_active=True), "--lead")
+expect("lead: re-emitted stop -> allow", rc, ALLOW, err)
+rc, err = run_hook(EVIDENCE, lead_event(PROJECT / "missing.jsonl", "t1", "All tests pass."), "--lead")
+expect("lead: missing transcript fails open", rc, ALLOW, err)
+ls = lead_session(("t1", "fix it", [*edit("src/x.py")]))
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Done."))
+expect("lead: a Stop payload without agent_id is judged as the lead even without --lead", rc, BLOCK, err)
+
+# reports_failure(): a conditional near the word makes it a plan, not a report of a failure.
+ce = load_module(EVIDENCE, "check_evidence_mod")
+for text, want in [
+    ("pytest still fails on test_x", True),
+    ("The build fails.", True),
+    ("2 tests failed", True),
+    ("DONE MEANS: not met", True),
+    ("retry if it fails", False),
+    ("ping me when it fails", False),
+    ("it should fail loudly", False),
+    ("no failures", False),
+    ("0 failed", False),
+    ("without failures", False),
+    ("12 passed", False),
+]:
+    expect_true(f"reports_failure({text!r}) == {want}", ce.reports_failure(text) is want, text)
+
 # --------------------------------------------------------------------------- no-ask
 print()
 print("no-ask.py - PreToolUse: AskUserQuestion blocked under /lost-mary")
@@ -1139,6 +1218,21 @@ proc = subprocess.run([sys.executable, str(FRICTION), "--projects-dir", str(FR /
 expect("missing projects dir -> exit 0 with a notice", proc.returncode, ALLOW, proc.stderr.decode())
 expect_true("... naming the directory", "nowhere" in proc.stderr.decode(), proc.stderr.decode())
 
+fr_env = {**os.environ, "FRICTION_ROOT": str(FR / "readings")}
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--record", "--json"], capture_output=True, env=fr_env)
+expect("friction --record exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+saved = list((FR / "readings").glob("*.json"))
+expect_true(
+    "one reading saved under FRICTION_ROOT",
+    len(saved) == 1 and json.loads(saved[0].read_text(encoding="utf-8")).get("questions") == 2,
+    str(saved),
+)
+proc = subprocess.run([sys.executable, str(FRICTION), "--history"], capture_output=True, env=fr_env)
+out = proc.stdout.decode("utf-8", "replace")
+expect_true(
+    "--history lists the saved reading", proc.returncode == 0 and "recorded (UTC)" in out and out.count("\n") >= 1, out
+)
+
 # ---------------------------------------------------------------------------- ledger
 print()
 print("ledger.py - SubagentStop record / SessionStart recall")
@@ -1463,6 +1557,67 @@ rc, out, err = attach_out("Agent", {"content": [{"type": "text", "text": f"answe
 expect_true("structured result (content blocks) -> entry attached", a[:12] in out, out + err)
 rc, out, err = attach_out("Agent", {"agentId": a, "status": "completed", "result": "answer"})
 expect_true("structured result (agentId field) -> entry attached", a[:12] in out, out + err)
+
+
+# brief: SubagentStart context = the project's last entries.
+def brief_out(count: str | None = None) -> tuple[int, str]:
+    payload = {
+        "hook_event_name": "SubagentStart",
+        "agent_id": "agent-new",
+        "agent_type": "implement",
+        "transcript_path": str(p),
+        "cwd": str(REPO),
+    }
+    args = ["brief"] + (["--count", count] if count else [])
+    proc = subprocess.run(
+        [sys.executable, str(LEDGERPY), *args], input=json.dumps(payload).encode("utf-8"), capture_output=True, env=LENV
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+
+rc, out = brief_out()
+expect("brief -> exit 0", rc, ALLOW, out)
+try:
+    briefed = json.loads(out)["hookSpecificOutput"]
+except (ValueError, KeyError):
+    briefed = {}
+expect_true(
+    "brief emits SubagentStart additionalContext with the last three entries",
+    briefed.get("hookEventName") == "SubagentStart"
+    and "Recent ledger" in briefed.get("additionalContext", "")
+    and heads(briefed.get("additionalContext", "")) == 3,
+    out,
+)
+rc, out = brief_out("1")
+expect_true("brief --count 1 -> one entry", heads(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == 1, out)
+proc = subprocess.run(
+    [sys.executable, str(LEDGERPY), "brief"],
+    input=json.dumps(
+        {"hook_event_name": "SubagentStart", "transcript_path": str(PROJECT.parent / "nothing-here" / "s.jsonl")}
+    ).encode("utf-8"),
+    capture_output=True,
+    env=LENV,
+)
+expect_true(
+    "brief with no ledger -> nothing printed", proc.returncode == 0 and proc.stdout == b"", proc.stdout.decode()
+)
+
+# prune: LEDGER_KEEP caps the entries per project (floor 10).
+keep_env = {**LENV, "LEDGER_KEEP": "10"}
+for _ in range(3):
+    run_hook(LEDGERPY, stop_event(p, a, CLAIM, cwd=str(REPO)), "record", env=keep_env)
+expect_true("prune keeps the newest LEDGER_KEEP entries", len(entries()) == 10, str(len(entries())))
+
+# recall --latest: the most recently active project, no payload needed (manual use / the /ledger skill).
+proc = subprocess.run(
+    [sys.executable, str(LEDGERPY), "recall", "--latest", "--count", "2"], input=b"", capture_output=True, env=LENV
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect_true(
+    "recall --latest with no payload -> the latest project's ledger",
+    proc.returncode == 0 and "Ledger for proj" in out and heads(out) == 2,
+    out,
+)
 
 # Latest outcome wins: one chained shell call shares one result, so an early failure must not mask the later pass.
 # Paths outside the repo are abbreviated (home -> ~, the Claude scratchpad -> scratchpad/<name>); nine runs show six.

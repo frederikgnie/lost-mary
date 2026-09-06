@@ -2,7 +2,7 @@
 name: explore
 description: Read-only investigation - trace how something works, find where behaviour lives, compare approaches, or research a library or API. Cheap and fast; returns a sourced brief with file:line anchors. Cannot edit files or run commands. Use before any non-trivial change and for "how / why / where" questions.
 tools: Read, Grep, Glob, WebFetch, WebSearch
-model: sonnet
+model: fable
 effort: medium
 ---
 

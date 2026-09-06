@@ -266,7 +266,7 @@ def commands(event):
     for entry in hooks.get(event) or []:
         for h in entry.get("hooks") or []:
             yield str(h.get("command", "")), str(entry.get("matcher", ""))
-for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py")):
+for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py")):
     found = [(c, m) for c, m in commands(event) if script in c]
     if not found:
         print(f"DRIFT {event} does not run {script} - merge the hooks block from settings.example.json")
@@ -403,7 +403,7 @@ if [[ "$INCOMPLETE_COUNT" -gt 0 ]]; then
   exit 3
 fi
 echo "Agents installed in:          $DEST_AGENTS  (explore, implement, review)"
-echo "Skills installed in:          $DEST_SKILLS  (/lost-mary, /validate, /pr)"
+echo "Skills installed in:          $DEST_SKILLS  (/lost-mary, /validate, /pr, /ledger)"
 echo "Hook scripts + rules in:      $DEST_LIB"
 echo "Operating rules imported by:  $CLAUDE_MD"
 echo

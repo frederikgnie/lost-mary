@@ -60,8 +60,7 @@ venv. Within a second of the edit you should see a hook message quoting
 `settings.json` is wrong (see §7). Record the date in `capabilities.md`'s
 "Verified-live log" so the next upgrade has a baseline.
 
-Two more live checks, one minute each, for the hooks the suite can only
-simulate:
+More live checks, one minute each, for the hooks the suite can only simulate:
 
 - **no-ask.** In a fresh session run `/lost-mary <anything small>` and then ask
   Claude to present you an option menu (an `AskUserQuestion`). You should get a
@@ -71,6 +70,12 @@ simulate:
   you." You should see it bounce once and re-emit without the hand-back. The
   second stop always goes through (`stop_hook_active`), so this cannot wedge.
 
+- **check-evidence --lead.** Ask Claude, in a turn where it ran nothing, to tell
+  you "all tests pass". The stop should bounce once with "Evidence check failed
+  (lead)" and the re-emitted message should drop or qualify the claim.
+- **ledger brief.** Spawn an `explore` and ask it whether its context contains a
+  block starting "Recent ledger for this project". In a project with entries
+  the answer is yes.
 - **permit.** In Manual mode (`Shift+Tab`), on a feature branch, ask Claude to push.
   No prompt should appear; on `main` it should. Background `implement` agents
   running `pytest` should no longer be auto-denied.

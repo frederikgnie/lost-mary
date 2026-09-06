@@ -32,19 +32,20 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | Piece | What it does |
 | --- | --- |
 | [`scripts/pycheck.py`](scripts/pycheck.py) | **PostToolUse hook.** After every `Edit`/`Write` of a `.py` file: `ruff check`, `ruff format --check`, `ty check`, using the venv that owns the file - a project `.venv`, or a shared `<workspace>/<env>/.venv` beside several package repos - and the diagnostics go straight back to the model while the edit is still in its working memory. Also a CLI (`pycheck.py --changed`, `pycheck.py <paths>`) used by `/validate`. |
-| [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop hook.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. Honours `stop_hook_active`, so the re-emitted stop after a bounce is allowed through - the lead sees both messages and judges. |
+| [`scripts/check-evidence.py`](scripts/check-evidence.py) | **SubagentStop + Stop hooks.** Reads the subagent's own transcript and bounces its final message when it (a) claims validation that never ran, (b) claims a pass when the last run failed, or (c) edited files, ran nothing, and did not say so. With `--lead` (Stop) the same rules judge the lead's own final message: this turn's edits and runs for (b) and (c), the whole session's runs behind any claim of passing. Honours `stop_hook_active`, so the re-emitted stop after a bounce is allowed through. |
 | [`scripts/no-ask.py`](scripts/no-ask.py) | **PreToolUse hook.** While a session runs under `/lost-mary` (invoked since the last `/clear`), an `AskUserQuestion` call is blocked and the model is told to take the option it would have marked recommended, record an `Assumption:` line and continue; a genuinely irreversible choice is asked in plain text. Outside the procedure the option menus work as usual. |
 | [`scripts/no-punt.py`](scripts/no-punt.py) | **Stop hook.** Bounces a final message that hands work back to you - "I'll leave that for you", "for you to fix", "you may want to look at" - once, with the three ways to close it: fix in place, delegate to an `implement` in a worktree, or commit a failing test. Quoted text is ignored; the re-emitted stop goes through (`stop_hook_active`). |
 | [`scripts/friction.py`](scripts/friction.py) | **CLI, not a hook.** Reads your last N session transcripts and reports how often Claude asked (and how often the menu already had a "(Recommended)" option), how many tool calls were refused and by which command, how many messages handed work back to you, and which `Bash(...)` allow rules are exact one-offs that can never match again. Run it before and after changing the rules. |
-| [`scripts/ledger.py`](scripts/ledger.py) | **SubagentStop + Stop + SessionStart + PostToolUse hooks.** `record` writes one entry per subagent stop - and per lead turn that edited or ran something - to `~/.claude/agent-library/ledger/<project>/` - files it edited (confirmed by the tool result), validation commands and how they exited, what it was asked, its own claims, and any edited file its report does not name - read from its transcript, not from its report. `recall` prints the last entries when a session starts, resumes or is compacted, so the lead never again loses track of who changed what. Kept outside the work tree so nothing a repository ships can pose as the record. When the `Agent` call returns, `attach` (PostToolUse) hands that entry to the lead as context, beside the subagent's own report. |
+| [`scripts/ledger.py`](scripts/ledger.py) | **SubagentStop + Stop + SessionStart + PostToolUse hooks.** `record` writes one entry per subagent stop - and per lead turn that edited or ran something - to `~/.claude/agent-library/ledger/<project>/` - files it edited (confirmed by the tool result), validation commands and how they exited, what it was asked, its own claims, and any edited file its report does not name - read from its transcript, not from its report. `recall` prints the last entries when a session starts, resumes or is compacted, so the lead never again loses track of who changed what. Kept outside the work tree so nothing a repository ships can pose as the record. When the `Agent` call returns, `attach` (PostToolUse) hands that entry to the lead as context, beside the subagent's own report; `brief` (SubagentStart) hands a starting subagent the last few entries, so it knows what changed. Entries are capped per project (`LEDGER_KEEP`, default 300). |
 | [`scripts/check-spawn.py`](scripts/check-spawn.py) | **PreToolUse hook on `Agent`.** An `implement` spawn whose brief lacks `OWNED`, `OFF-LIMITS`, `DONE MEANS` or `VALIDATION` is blocked before it starts, with the `MISSING:` line - the contract the subagent used to enforce after a full round trip. Other roles are never blocked. |
 | [`scripts/permit.py`](scripts/permit.py) | **PermissionRequest hook.** Allow-only: `git push` to any branch that is not main/master (no force, delete, tags or `--no-verify`), commands made solely of the project's validation runs plus benign wrappers, and the installers' verify mode. Anything else gets no decision and follows the normal flow. Matters in Manual mode and for background subagents, which are auto-denied without such a hook. |
-| [`agents/explore.md`](agents/explore.md) | Read-only investigation on a cheap fast model (`sonnet`, medium effort). `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
-| [`agents/implement.md`](agents/implement.md) | Scoped change plus validation, on the session model. Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
-| [`agents/review.md`](agents/review.md) | Independent review at high effort with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
+| [`agents/explore.md`](agents/explore.md) | Read-only investigation **and planning** on `fable` at medium effort - it returns the `PLAN` when work must be split, and a wrong plan multiplies into every implementer. `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
+| [`agents/implement.md`](agents/implement.md) | Scoped change plus validation on `opus` (execution), with project-local persistent memory (`memory: local` - commands that work, code paths, traps; not versioned). Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
+| [`agents/review.md`](agents/review.md) | Independent review on `fable` (judgment is the bottleneck here) with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
 | [`/lost-mary <task>`](skills/lost-mary/SKILL.md) | The operating procedure on one screen: acceptance predicate first, smallest mode, full spawn block, gate on evidence. User-invoked only. |
 | [`/validate [paths]`](skills/validate/SKILL.md) | Lint + typecheck + tests for what changed, commands taken from the project's `CLAUDE.md`, exact results reported. Claude may invoke it itself before declaring something done. |
 | [`/pr [notes]`](skills/pr/SKILL.md) | Push and open a PR with the GitHub account that owns the repository (personal vs work), then switch `gh` back. User-invoked only. |
+| [`/ledger [n]`](skills/ledger/SKILL.md) | Show the ledger's latest entries for the current project on demand - what agents actually edited and ran. Claude may invoke it itself when a report needs checking against the record. |
 | [`global-CLAUDE.md`](global-CLAUDE.md) | ~2.4 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
 | [`capabilities.md`](capabilities.md) | Every runtime field, frontmatter key and file layout the library depends on, how each was verified, and how it degrades. |
 
@@ -56,7 +57,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 ├── global-CLAUDE.md              # always-on rules (imported into ~/.claude/CLAUDE.md)
 ├── capabilities.md               # runtime dependencies + degradation
 ├── agents/       explore.md  implement.md  review.md
-├── skills/       lost-mary/  validate/  pr/            (each a SKILL.md)
+├── skills/       lost-mary/  validate/  pr/  ledger/   (each a SKILL.md)
 ├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py  friction.py  ledger.py  check-spawn.py  permit.py
 ├── tests/        test-hooks.py  test-agents.py  test-skills.py  fixtures/pycheck/
 ├── settings.example.json         # hooks block, POSIX
@@ -111,6 +112,18 @@ wired and whether v1 entries linger.
 Kill switches: `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
 `"disableAllHooks": true` in `settings.json` disables every hook.
 
+### Model policy
+
+Roles carry model defaults - `explore` and `review` on fable (planning and
+judgment, where an error multiplies), `implement` on opus (execution, which the
+spawn contract, the hooks and the tests already catch) - and
+the lead may pass `model:` per spawn. To steer a whole machine - for instance when
+one model's weekly budget runs low - copy [`model-policy.example.md`](model-policy.example.md)
+to `~/.claude/agent-library/model-policy.md` and edit it; the `SessionStart`
+hook in the example settings prints it into every session, where it wins over
+the defaults. Hooks cannot see your quota, so the dial is yours; the lead cannot
+switch its own model either - `/model` does that.
+
 ## Using it
 
 **Daily loop.** Ask for the change. Every Python edit comes back with ruff/ty
@@ -120,7 +133,8 @@ and opens the PR with the right account.
 
 **Measuring it.** `python ~/.claude/agent-library/scripts/friction.py` reads your
 last 50 sessions and prints how often Claude asked, was refused, or handed work
-back, plus the allow rules that can never match again. `--json` for diffing.
+back, plus the allow rules that can never match again. `--json` for diffing;
+`--record` saves the reading, `--history` tabulates the saved ones over time.
 
 **Remembering it.** `~/.claude/agent-library/ledger/<project>/` holds one file per
 subagent stop and per lead turn that changed something - what was edited and
@@ -153,9 +167,11 @@ per-package facts in each package's `CLAUDE.md` / `AGENT.md`.
   a sibling script on the same `PostToolUse` matcher.
 - **No Bash sandbox on Windows native**, so read-only roles have no Bash at
   all. When an investigation needs `git log`/`blame`, the lead runs it.
-- **Model and effort routing is an opinion** (`explore` on `sonnet`, `review`
-  at `high`). Change the frontmatter to taste; `tests/test-agents.py` only
-  guards the tool properties.
+- **Model and effort routing is an opinion**: the strong model where errors
+  compound (`explore`'s plan, `review`'s judgment), the cheap one where the
+  contract, hooks and tests catch them (`implement`). Change the frontmatter or
+  the machine policy to taste; `tests/test-agents.py` only guards the tool
+  properties.
 
 ## Migration from v1
 

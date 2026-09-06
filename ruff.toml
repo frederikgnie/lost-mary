@@ -2,6 +2,9 @@
 # projects under tests/fixtures/ carry their own config on purpose.
 line-length = 120
 target-version = "py311"
+# The fixture project is deliberately bad and carries its own config; pycheck still lints it
+# through that config, but the repo-wide walk must not report it.
+extend-exclude = ["tests/fixtures"]
 
 [lint]
 select = ["E", "F", "W", "I", "UP", "B"]

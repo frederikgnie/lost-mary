@@ -191,7 +191,7 @@ function Test-Settings {
     }
     $hooks = $null
     if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
-    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'))
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'))
     foreach ($pair in $wanted) {
         $eventName = $pair[0]
         $scriptName = $pair[1]
@@ -420,7 +420,7 @@ if ($IncompleteCount -gt 0) {
     exit 3
 }
 Write-Host "Agents installed in:          $DestAgents  (explore, implement, review)"
-Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr)"
+Write-Host "Skills installed in:          $DestSkills  (/lost-mary, /validate, /pr, /ledger)"
 Write-Host "Hook scripts + rules in:      $DestLib"
 Write-Host "Operating rules imported by:  $ClaudeMd"
 Write-Host ''
