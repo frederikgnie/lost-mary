@@ -1364,6 +1364,10 @@ rc, out, err = attach_out("Agent", "Done. agentId: ffffffffffff (no entry for th
 expect_true("no entry yet (background spawn) -> nothing printed", rc == 0 and out == "", out + err)
 rc, out, err = attach_out("Bash", f"agentId: {a}")
 expect_true("not an Agent result -> nothing printed", rc == 0 and out == "", out + err)
+rc, out, err = attach_out("Agent", {"content": [{"type": "text", "text": f"answer... agentId: {a} (internal)"}]})
+expect_true("structured result (content blocks) -> entry attached", a[:12] in out, out + err)
+rc, out, err = attach_out("Agent", {"agentId": a, "status": "completed", "result": "answer"})
+expect_true("structured result (agentId field) -> entry attached", a[:12] in out, out + err)
 
 # Latest outcome wins: one chained shell call shares one result, so an early failure must not mask the later pass.
 # Paths outside the repo are abbreviated (home -> ~, the Claude scratchpad -> scratchpad/<name>); nine runs show six.

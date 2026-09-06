@@ -482,7 +482,8 @@ def record(payload: dict[str, Any]) -> int:
 
 # --- attach -----------------------------------------------------------------------------------
 
-AGENT_ID_IN_RESULT = re.compile(r"agentId:[ ]*([0-9a-fA-F]{6,})")
+# "agentId: ab12..." in the result text, or "agentId": "ab12..." if the result is structured JSON.
+AGENT_ID_IN_RESULT = re.compile(r"agentId.{0,3}?:[ ]*.{0,2}?([0-9a-fA-F]{6,})")
 
 
 def attach(payload: dict[str, Any]) -> int:
@@ -498,12 +499,14 @@ def attach(payload: dict[str, Any]) -> int:
     directory, _why = ledger_dir(payload)
     if directory is None or not directory.is_dir():
         return 0
-    output = payload.get("tool_output")
-    if not isinstance(output, str):
-        output = payload.get("tool_response")
-    text = text_of(output) if not isinstance(output, str) else output
-    if not isinstance(text, str):
-        text = json.dumps(output) if output is not None else ""
+    output = payload.get("tool_response", payload.get("tool_output"))
+    if isinstance(output, str):
+        text = output
+    elif output is None:
+        text = ""
+    else:  # a list of blocks or a structured object: text blocks first, else the JSON itself
+        text = text_of(output) if isinstance(output, list) else ""
+        text = text or json.dumps(output)
     match = AGENT_ID_IN_RESULT.search(text)
     if not match:
         return 0
