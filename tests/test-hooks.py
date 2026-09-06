@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
+SPAWN = ROOT / "scripts" / "check-spawn.py"
 NOPUNT = ROOT / "scripts" / "no-punt.py"
 FRICTION = ROOT / "scripts" / "friction.py"
 LEDGERPY = ROOT / "scripts" / "ledger.py"
@@ -693,6 +694,22 @@ expect_true(
     err,
 )
 
+
+# A skill invocation is recorded with <command-message> BEFORE <command-name> (observed 2.1.260); the live
+# check on 2026-09-06 slipped through because only a leading <command-name> was recognised.
+def skill_command(name: str, args: str = "") -> dict[str, object]:
+    text = f"<command-message>{name}</command-message>" + chr(10) + f"<command-name>/{name}</command-name>" + chr(10)
+    text += f"<command-args>{args}</command-args>" + chr(10) + "Base directory for this skill: ~/.claude/skills/" + name
+    return {"type": "user", "isSidechain": False, "message": {"role": "user", "content": text}}
+
+
+t = session_file([skill_command("lost-mary", "due diligence"), *edit("src/x.py")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("skill-style invocation (command-message first) -> block", rc, BLOCK, err)
+t = session_file([prose("Some prose that mentions <command-name>/lost-mary</command-name> in passing")])
+rc, err = run_hook(NOASK, ask_event(t))
+expect("the tag inside ordinary prose is still not an invocation -> allow", rc, ALLOW, err)
+
 t = session_file([command("lost-mary", "a"), *edit("src/x.py"), command("clear"), prose("now something else")])
 rc, err = run_hook(NOASK, ask_event(t))
 expect("/lost-mary then /clear -> allow", rc, ALLOW, err)
@@ -730,6 +747,63 @@ rc, err = run_hook(NOASK, ask_event(t), bom=True)
 expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
 
 proc = subprocess.run([sys.executable, str(NOASK)], input=b"\xef\xbb\xbfnot json", capture_output=True)
+expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
+
+# ------------------------------------------------------------------------ check-spawn
+print()
+print("check-spawn.py - PreToolUse on Agent: an implement spawn carries its contract or does not start")
+
+
+def spawn(role: str, prompt: str, tool: str = "Agent") -> dict[str, object]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_use_id": "toolu_spawn",
+        "tool_input": {"subagent_type": role, "description": "Do the thing", "prompt": prompt},
+    }
+
+
+FULL = "GOAL: fix it" + chr(10) + "OWNED: src/x.py" + chr(10) + "OFF-LIMITS: tests/**" + chr(10)
+FULL += (
+    "DONE MEANS: pytest tests -q -> 12 passed"
+    + chr(10)
+    + "VALIDATION: pytest tests -q"
+    + chr(10)
+    + "REPORT: CHANGED / RAN"
+)
+rc, err = run_hook(SPAWN, spawn("implement", FULL))
+expect("implement with all four fields -> allow", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: src/x.py" + chr(10) + "DONE MEANS: tests pass"))
+expect("implement missing two fields -> block", rc, BLOCK, err)
+expect_true(
+    "... names exactly the missing ones, in order",
+    "MISSING: OFF-LIMITS, VALIDATION" in err and "OWNED" not in err.split(chr(10))[0],
+    err,
+)
+decorated = (
+    "**OWNED:** src/"
+    + chr(10)
+    + "- OFF-LIMITS: none"
+    + chr(10)
+    + "## DONE MEANS: met"
+    + chr(10)
+    + "  validation: pytest -q"
+)
+rc, err = run_hook(SPAWN, spawn("implement", decorated))
+expect("bold, bulleted, heading or lower-case field lines all count -> allow", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, spawn("implement", "the owned files are src/x.py and validation is pytest"))
+expect("field names in prose without a colon do not count -> block", rc, BLOCK, err)
+rc, err = run_hook(SPAWN, spawn("explore", "Find where the loader parses dates."))
+expect("explore has no contract -> allow", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, spawn("review", "Review this diff."))
+expect("review has no contract -> allow", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x", tool="Bash"))
+expect("another tool -> allow", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, {"hook_event_name": "PreToolUse", "tool_name": "Agent"})
+expect("no tool_input fails open", rc, ALLOW, err)
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x"), bom=True)
+expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
+proc = subprocess.run([sys.executable, str(SPAWN)], input=b"not json", capture_output=True)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
 
 # --------------------------------------------------------------------------- no-punt
@@ -1253,6 +1327,43 @@ rc, err = run_hook(
 )
 expect("lead stop with a missing session transcript -> exit 0", rc, ALLOW, err)
 expect_true("... says so", "session transcript not found" in err, err)
+
+
+# attach: PostToolUse on the Agent call, in the lead - the returning subagent's entry as context.
+def attach_out(tool_name: str, output: object) -> tuple[int, str, str]:
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"subagent_type": "implement", "description": "Fix loader DST", "prompt": "..."},
+        "tool_output": output,
+        "transcript_path": str(p),
+        "cwd": str(REPO),
+    }
+    proc = subprocess.run(
+        [sys.executable, str(LEDGERPY), "attach"],
+        input=json.dumps(payload).encode("utf-8"),
+        capture_output=True,
+        env=LENV,
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")
+
+
+rc, out, err = attach_out("Agent", f"CHANGED: src/x.py (+3/-1)... agentId: {a} (internal ID)")
+expect("attach for a returned subagent -> exit 0", rc, ALLOW, err)
+try:
+    attached = json.loads(out)["hookSpecificOutput"]
+except (ValueError, KeyError):
+    attached = {}
+expect_true("... emits PostToolUse additionalContext", attached.get("hookEventName") == "PostToolUse", out)
+expect_true(
+    "... carrying that agent's entry",
+    a[:12] in attached.get("additionalContext", "") and "edited:   src/x.py" in attached.get("additionalContext", ""),
+    out,
+)
+rc, out, err = attach_out("Agent", "Done. agentId: ffffffffffff (no entry for this one)")
+expect_true("no entry yet (background spawn) -> nothing printed", rc == 0 and out == "", out + err)
+rc, out, err = attach_out("Bash", f"agentId: {a}")
+expect_true("not an Agent result -> nothing printed", rc == 0 and out == "", out + err)
 
 # Latest outcome wins: one chained shell call shares one result, so an early failure must not mask the later pass.
 # Paths outside the repo are abbreviated (home -> ~, the Claude scratchpad -> scratchpad/<name>); nine runs show six.

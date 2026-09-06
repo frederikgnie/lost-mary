@@ -71,6 +71,9 @@ simulate:
   you." You should see it bounce once and re-emit without the hand-back. The
   second stop always goes through (`stop_hook_active`), so this cannot wedge.
 
+- **check-spawn.** Ask Claude to spawn an `implement` agent with a one-line brief
+  and no OWNED/OFF-LIMITS/DONE MEANS/VALIDATION. The spawn should be refused
+  before it starts, with `MISSING: OWNED, OFF-LIMITS, DONE MEANS, VALIDATION`.
 - **ledger.** Spawn any `implement` (or run `/lost-mary` on something small).
   When it finishes, `~/.claude/agent-library/ledger/<project>/` should hold one
   new file with the files it edited and the commands it ran. Start a new session

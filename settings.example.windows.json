@@ -15,6 +15,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-spawn.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {
@@ -46,6 +56,16 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" attach",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [

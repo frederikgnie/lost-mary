@@ -133,6 +133,7 @@ jobs:
           test -x "$FAKE_HOME/.claude/agent-library/scripts/no-punt.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/friction.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/ledger.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/check-spawn.py"
           test -f "$FAKE_HOME/.claude/agent-library/capabilities.md"
       - name: Install is idempotent and --verify is clean once hooks are wired
         run: |
@@ -345,6 +346,7 @@ jobs:
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/no-punt.py'))) { throw 'no-punt.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/friction.py'))) { throw 'friction.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/ledger.py'))) { throw 'ledger.py did not install.' }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/check-spawn.py'))) { throw 'check-spawn.py did not install.' }
 
           Write-Host '--- idempotent; -Verify fails until hooks are wired, then passes ---'
           if ((Invoke-Installer) -ne 0) { throw 'Second install failed.' }

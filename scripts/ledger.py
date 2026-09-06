@@ -9,7 +9,7 @@ they made an edit the other made; a handoff says "CHANGED: a.py" while the
 transcript shows b.py was edited too. Reports are claims. The transcript is the
 record. This script keeps that record and hands it back.
 
-Two modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
+Three modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
 
   record   SubagentStop hook: reads the subagent's own transcript and writes
            one entry - when, which role (agent-<id>.meta.json), what it was
@@ -22,6 +22,10 @@ Two modes, one directory - `<LEDGER_ROOT>/<project slug>/`, one file per entry:
            `prompt_id` to the end of the session transcript - written only
            when the turn edited a file or ran a validation command, so
            conversation-only turns leave nothing.
+  attach   PostToolUse hook on the Agent tool, in the lead's context: hands the
+           returning subagent's entry back beside its report, so claim and record
+           can be compared at once. (SubagentStop's own additionalContext would
+           continue the subagent instead - documented - so it is not used.)
   recall   SessionStart hook (startup, resume, clear, compact). Prints the
            last entries to stdout, which Claude Code adds to the session's
            context. Whole entries only, bounded; nothing without a ledger.
@@ -476,6 +480,51 @@ def record(payload: dict[str, Any]) -> int:
     return 0
 
 
+# --- attach -----------------------------------------------------------------------------------
+
+AGENT_ID_IN_RESULT = re.compile(r"agentId:[ ]*([0-9a-fA-F]{6,})")
+
+
+def attach(payload: dict[str, Any]) -> int:
+    """PostToolUse on the Agent tool: hand the subagent's ledger entry to the lead beside its report.
+
+    SubagentStop runs in the subagent's context (its additionalContext would continue the subagent); the lead
+    is where PostToolUse for the Agent call fires. The Agent tool's result names the agent id; the matching
+    entry, if already written, is returned as context. Nothing is printed when there is none yet (background
+    spawns return before they finish) or when the payload is not an Agent result.
+    """
+    if payload.get("tool_name") != "Agent":
+        return 0
+    directory, _why = ledger_dir(payload)
+    if directory is None or not directory.is_dir():
+        return 0
+    output = payload.get("tool_output")
+    if not isinstance(output, str):
+        output = payload.get("tool_response")
+    text = text_of(output) if not isinstance(output, str) else output
+    if not isinstance(text, str):
+        text = json.dumps(output) if output is not None else ""
+    match = AGENT_ID_IN_RESULT.search(text)
+    if not match:
+        return 0
+    prefix = match.group(1)[:12]
+    files = sorted(f for f in directory.glob(f"*-{prefix}*.md") if f.is_file())
+    if not files:
+        return 0
+    try:
+        entry = files[-1].read_text(encoding="utf-8", errors="replace").rstrip()
+    except OSError:
+        return 0
+    context = (
+        "Ledger entry for the subagent that just returned (from its transcript; edited/ran are evidence, "
+        "claimed is its own words; when its report and this entry disagree, the entry is right):"
+        + chr(10)
+        + entry[:RECALL_MAX_CHARS]
+    )
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}))
+    return 0
+
+
 # --- recall ------------------------------------------------------------------------------------
 
 
@@ -510,8 +559,8 @@ def recall(payload: dict[str, Any], count: int) -> int:
 
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else ""
-    if mode not in ("record", "recall"):
-        notice("usage: ledger.py record|recall [--count N]  (hook payload on stdin)")
+    if mode not in ("record", "recall", "attach"):
+        notice("usage: ledger.py record|recall|attach [--count N]  (hook payload on stdin)")
         return 0
     count = RECALL_DEFAULT
     if "--count" in argv:
@@ -523,6 +572,8 @@ def main(argv: list[str]) -> int:
     if payload is None:
         notice("unreadable payload")
         return 0
+    if mode == "attach":
+        return attach(payload)
     return record(payload) if mode == "record" else recall(payload, count)
 
 

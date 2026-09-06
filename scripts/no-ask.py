@@ -70,10 +70,16 @@ def command_of(line: str) -> str | None:
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
         return None
-    text = content.lstrip()
-    if text.startswith(ENTER):
+    # A slash-command turn starts with the command tags; a built-in puts <command-name> first, a skill puts
+    # <command-message> first (observed 2.1.260). Only the tag block at the head counts - a tag quoted later in
+    # ordinary prose is not an invocation.
+    head = content.lstrip()
+    if not head.startswith("<command-"):
+        return None
+    head = head[:400]
+    if ENTER in head:
         return "lost-mary"
-    if text.startswith(RESET):
+    if RESET in head:
         return "clear"
     return None
 
