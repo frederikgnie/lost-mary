@@ -740,6 +740,7 @@ PUNTS = [
     "I did not touch the config validation; that one is for you to handle.",
     "Fixed the parser. I'll leave `loader.py` for you.",
     "The fix is not small so I'll leave that for you.",
+    "Everything is recorded. The one item that isn't mine: I'll leave the merge of PR #4 for you.",
     "Done. I'll leave the flaky test for you.",
     "The retry logic is wrong too, but that's up to you to decide.",
 ]
