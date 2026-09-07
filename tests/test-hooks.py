@@ -1434,14 +1434,22 @@ expect_true(
     "Ledger for proj" in out and "claimed" in out and "not instructions" in out,
     out,
 )
-expect_true("recall shows every entry", f"Last {n_before} of {n_before} entries" in out and heads(out) == n_before, out)
+# SessionStart re-injects this on every compaction, so recall shows only the last few by default.
+shown = min(4, n_before)
+expect_true(
+    "recall shows the last few by default, and says how many of how many",
+    f"Last {shown} of {n_before} entries" in out and heads(out) == shown,
+    out,
+)
+rc, out, err = recall_out(p, "--count", str(n_before))
+expect_true("--count raises the limit", f"Last {n_before} of {n_before} entries" in out, out)
 rc, out, err = recall_out(p, "--count", "1")
 expect_true("--count limits the tail", f"Last 1 of {n_before} entries" in out and heads(out) == 1, out)
 
 big = LROOT / "big"
 big.mkdir(parents=True)
 for i in range(3):
-    (big / f"2026010100000{i}Z-agent{i}.md").write_text(f"## entry {i}\n" + ("x" * 2600) + "\n", encoding="utf-8")
+    (big / f"2026010100000{i}Z-agent{i}.md").write_text(f"## entry {i}\n" + ("x" * 900) + "\n", encoding="utf-8")
 rc, out, err = recall_out(PROJECT.parent / "big" / "s.jsonl", "--count", "3")
 expect_true(
     "recall drops whole entries from the front to fit, and says so",
