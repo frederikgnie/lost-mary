@@ -170,6 +170,13 @@ health check. Two real defects were found this way on 2026-09-06, hours after th
 without `--lead` (`payload lacks ['agent_id']` on every `Stop`). Both failed open, so nothing broke and
 nothing was reported - which is exactly why the counter exists.
 
+**A run the classifier cannot see (2026-09-07).** `classify()` reads the command text, so a validation run
+hidden behind a shell variable - `for t in tests/*.py; do python "$t"; done` - is not credited, and
+`check-evidence` reports "ran no validation" for a turn that did validate. This is deliberate: crediting
+`python "$VAR"` would credit any command, which is the one thing the hook exists to prevent. The fix is on
+the caller's side - run the suites as explicit commands - and the bounce is one strike, so an honest
+re-emission goes through. This is the only known false positive; it errs toward demanding evidence.
+
 ## Verified-live log
 
 Fill this in after a real session confirms behaviour; the test suite cannot.
@@ -190,5 +197,6 @@ Fill this in after a real session confirms behaviour; the test suite cannot.
 | 2026-09-06 | 2.1.260 | `no-ask` in a real `/lost-mary` session | First attempt NOT blocked: a skill invocation is recorded as `<command-message>` before `<command-name>` and the detector accepted only a leading `<command-name>`. Fixed (tags anywhere in the leading tag block), reinstalled, second `AskUserQuestion` call BLOCKED with the hook's message. `PreToolUse` fires for `AskUserQuestion` - confirmed. |
 | 2026-09-06 | 2.1.260 | `check-spawn` on a real `Agent` call | OK - an `implement` spawn with a one-line brief was blocked before starting; the model received `MISSING: OWNED, OFF-LIMITS, DONE MEANS, VALIDATION` and the pointer to the spawn block. |
 | 2026-09-06 | 2.1.260 | `ledger attach` on a real `Agent` return | First attempt: entry written, nothing attached - `tool_response` is a structured object and attach read only strings. Fixed (`1ff73a8`); second attempt: the entry appeared in the lead's context as `PostToolUse:Agent hook additional context`. |
+| 2026-09-07 | 2.1.260 | `check-evidence --lead` on a real `Stop`, wired live | OK - the first live block: a turn that edited `~/.claude/settings.json` and `model-policy.md` and ran its suites through a `for` loop was bounced with "You changed 2 file(s) this turn but ran no validation". Correct by its own rules (the loop hid the test paths from `classify()`), one strike, and the re-emission after running the suites explicitly went through. The lead is now checked like every subagent. |
 | 2026-09-06 | 2.1.260 | `ledger brief` on `SubagentStart`, wired live | OK - a read-only `explore` spawn reported that its starting context began with "Recent ledger for this project" and quoted the newest entry's header. SubagentStart `additionalContext` reaches the subagent, as documented. |
 | 2026-09-06 | 2.1.260 | `ledger recall` on `SessionStart` | NOT YET OBSERVED - no new session has started in a project that already had entries since the wiring. The transcript of a new session in `c--repo-lost-mary` or `C--repo-powercountant` should show the "Ledger for" block as injected context. Record here when seen. |
