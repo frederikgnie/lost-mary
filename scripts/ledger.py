@@ -81,12 +81,14 @@ REPORT_KEYS = ("CHANGED:", "RAN:", "DONE MEANS:", "RISKS:", "FOUND:", "MISSING:"
 KEY_DECORATION = re.compile(r"^[\s*#>-]+")  # "**CHANGED:**", "- RAN:", "## RISKS:" all count as the key
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 BSLASH = chr(92)  # a backslash, kept out of source literals
-RECALL_DEFAULT = 8
+# Session start fires on startup, /clear AND every compaction, so this text is re-injected often:
+# keep it to a glance. `/ledger` and `recall --count N` are there when more is wanted.
+RECALL_DEFAULT = 4
 BRIEF_DEFAULT = 3
 BRIEF_MAX_CHARS = 2500
 KEEP_ENV = "LEDGER_KEEP"  # entries kept per project; the oldest beyond that are deleted after each record
 KEEP_DEFAULT = 300
-RECALL_MAX_CHARS = 6000
+RECALL_MAX_CHARS = 2000
 
 
 def notice(text: str) -> None:
