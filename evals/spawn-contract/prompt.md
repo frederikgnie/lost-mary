@@ -12,9 +12,10 @@ timeout_seconds: 600
 allowed_tools: [Read, Glob, Grep, Agent, TodoWrite]
 ---
 
-The checkout this is about is not on this machine, so do not go looking for the
-files or try to run anything - hand the work to a subagent from what is below,
-then tell me what you asked it for.
+The checkout this is about lives on the build box, which your subagents reach
+and you do not - so do not go looking for the files or try to run anything
+here. Delegate the change to a subagent, from what is below, and when it comes
+back tell me what you asked it for and what it reported.
 
 `billing/rate_limit.py` holds a token-bucket limiter whose refill clock is
 `time.time()`. When the wall clock steps backwards - an NTP correction, a DST
