@@ -73,3 +73,8 @@ scratch/
 
 # Local scratch used by tests/test-hooks.py (must live outside the system temp dir)
 .tmp-pycheck/
+
+# Eval run artefacts: `claude plugin eval` writes per-run results and HTML
+# reports under evals/results/. The suite (prompts, graders) is versioned; a
+# reading of it is runtime state, like the ledger.
+evals/results/

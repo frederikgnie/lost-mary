@@ -1,0 +1,13 @@
+{
+  "name": "lost-mary",
+  "description": "An enforced operating layer for Claude Code: three roles, four skills, and hooks that run ruff/ty on every Python edit, check a report against the transcript, and refuse a spawn without a scope contract.",
+  "version": "2.0.0",
+  "author": {
+    "name": "frederikgnie",
+    "url": "https://github.com/frederikgnie"
+  },
+  "homepage": "https://github.com/frederikgnie/lost-mary",
+  "experimental": {
+    "evals": "evals"
+  }
+}

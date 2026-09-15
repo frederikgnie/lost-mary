@@ -1,0 +1,151 @@
+{
+  "description": "The same wiring as settings.example.json / settings.example.windows.json, for the plugin way of consuming this library. Two differences, both forced: script paths resolve through ${CLAUDE_PLUGIN_ROOT} instead of an install directory, and every hook that runs one of them uses the exec form (command + args), because a command string goes through Git Bash or PowerShell on Windows and quoting an absolute path through either is where this wiring used to break. The interpreter is `python3` on PATH - a versioned manifest cannot carry the machine-specific absolute python.exe path the Windows settings example needs - so on Windows the hooks fail open, loudly, until python3 resolves. The one shell-form entry is the model-policy print: it is a shell one-liner with a fallback, not a script, and it reads a file the installer creates rather than anything this plugin ships.",
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "brief"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "recall"],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "cat \"$HOME/.claude/agent-library/model-policy.md\" 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permit.py"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-spawn.py"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/no-ask.py"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/no-punt.py"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "record"],
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py", "--lead"],
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "attach"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pycheck.py", "--hook"],
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "implement|general-purpose",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py"],
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "record"],
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

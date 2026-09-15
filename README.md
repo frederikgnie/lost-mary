@@ -60,6 +60,9 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 ├── skills/       lost-mary/  validate/  pr/  ledger/   (each a SKILL.md)
 ├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py  friction.py  ledger.py  check-spawn.py  permit.py
 ├── tests/        test-hooks.py  test-agents.py  test-skills.py  fixtures/pycheck/
+├── evals/        spawn-contract/  no-menu/  no-hand-back/  evidence-in-report/
+├── .claude-plugin/plugin.json    # makes the repo an eval target (install path unchanged)
+├── hooks/hooks.json              # the same wiring, for the plugin way of loading it
 ├── settings.example.json         # hooks block, POSIX
 ├── settings.example.windows.json # hooks block, Windows (absolute interpreter path)
 ├── install.sh / install.ps1
@@ -206,6 +209,15 @@ Linux and Windows × Python 3.11/3.13, plus PowerShell-pipe BOM checks and
 hermetic installer scenarios (sandboxed `HOME`, gated before any write) for
 `install.sh` and `install.ps1`, including retirement of v1 files and detection
 of stale v1 hooks in `settings.json`.
+
+Those tests prove the hook scripts behave; they say nothing about whether the
+roles and skills change an outcome. `claude plugin eval . --allow-tools Write
+--no-publish` does: the four cases under [`evals/`](evals/) run with the plugin
+and again without it, so what you read is the delta, not a score. `--allow-tools
+Write` is there for the one case that writes files; no case needs `Bash`,
+because granting it wants an OS sandbox backend that native Windows does not
+have. [AGENTS.md](AGENTS.md) explains what the delta means and what the cases
+may assume.
 
 ## Contributing
 
