@@ -1420,23 +1420,127 @@ expect_true(
 proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--since", "last tuesday"], capture_output=True)
 expect_true("a malformed --since is refused, not guessed", proc.returncode == 2, proc.stderr.decode())
 
+# A window label must never precede its own --since. Every dated record in this file is older than the
+# window, so the file contributes nothing - and its mtime (today) must not be read as the span's start,
+# which is what "2026-09-06..2026-09-15 (since 2026-09-15)" said on a real reading.
+OLD = FR / "old-only" / "c--repo-old"
+OLD.mkdir(parents=True)
+(OLD / "s.jsonl").write_text(
+    jsonl([said("Done. I'll leave the flaky test for you.", "2026-09-06T10:00:00.0Z")]), encoding="utf-8"
+)
+old_args = ["--projects-dir", str(FR / "old-only"), "--settings", str(fr_settings), "--since", "2026-09-15"]
+proc = subprocess.run([sys.executable, str(FRICTION), *old_args, "--json"], capture_output=True)
+expect("friction --since over an all-older transcript exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "a file whose records are all older than --since contributes no date, not its mtime",
+    data["first"] == "" and data["last"] == "" and data["hand_backs"] == 0,
+    str({k: data[k] for k in ("first", "last", "hand_backs")}),
+)
+out = subprocess.run([sys.executable, str(FRICTION), *old_args], capture_output=True).stdout.decode("utf-8")
+expect_true("... and the text window says so instead of printing an empty span", "no dated records" in out, out)
+
+# Malformed records, one per way the parser must survive them. The GOOD records come last on purpose:
+# build_report catches per file, not per record, so anything that raised here would silently take the
+# rest of the transcript down with it and the counts would read as "nothing happened".
+MAL = FR / "malformed" / "c--repo-mal"
+MAL.mkdir(parents=True)
+(MAL / "s.jsonl").write_text(
+    jsonl(
+        [
+            {  # blockingError is a string, not the documented object
+                "type": "attachment",
+                "timestamp": "2026-09-15T10:00:00.0Z",
+                "attachment": {
+                    "type": "hook_blocking_error",
+                    "hookName": "PostToolUse:x",
+                    "hookEvent": "PostToolUse",
+                    "blockingError": "blocked, but not as an object",
+                },
+            },
+            {  # command is not a string
+                "type": "attachment",
+                "timestamp": "2026-09-15T10:01:00.0Z",
+                "attachment": {
+                    "type": "hook_success",
+                    "hookName": "Stop:x",
+                    "hookEvent": "Stop",
+                    "command": {"argv": ["py", "hook.py"]},
+                    "exitCode": 0,
+                    "stderr": "",
+                },
+            },
+            {  # no timestamp: the firing is undated, not a crash
+                "type": "attachment",
+                "attachment": {
+                    "type": "hook_additional_context",
+                    "hookName": "SessionStart",
+                    "hookEvent": "SessionStart",
+                    "content": ["x"],
+                },
+            },
+            {  # no attachment type at all
+                "type": "attachment",
+                "timestamp": "2026-09-15T10:03:00.0Z",
+                "attachment": {"hookName": "SessionStart", "hookEvent": "SessionStart", "content": ["x"]},
+            },
+            {"type": "attachment", "hookEvent": "Stop", "attachment": ["not", "an", "object"]},
+            {"type": "assistant", "timestamp": "2026-09-15T10:05:00.0Z", "message": "hi"},  # message is a string
+            blocked_by("PostToolUse", "pycheck.py", "--hook", "pycheck: 1 in c.py", "2026-09-15T10:06:00.0Z"),
+            said("Done. I'll leave the release notes for you.", "2026-09-15T10:07:00.0Z"),
+        ]
+    ),
+    encoding="utf-8",
+)
+mal_args = ["--projects-dir", str(FR / "malformed"), "--settings", str(fr_settings)]
+proc = subprocess.run([sys.executable, str(FRICTION), *mal_args, "--json"], capture_output=True)
+expect("malformed records -> friction still exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "... and the records after them still count - no file was abandoned",
+    data["hooks_seen"].get("pycheck.py --hook", {}).get("blocks") == 1 and data["hand_backs"] == 1,
+    str(data.get("hooks_seen")) + str(data.get("notes")),
+)
+expect_true(
+    "... with nothing skipped and no unexpected error",
+    not [n for n in data["notes"] if n.startswith("skipped")],
+    str(data["notes"]),
+)
+
 # --health: liveness comes from the wiring, not the transcripts. A hook that succeeds quietly leaves no
 # record at all, so silence must never be rendered as "dead".
 HEALTH = FR / "health"
 (HEALTH / "scripts").mkdir(parents=True)
 (HEALTH / "scripts" / "good-hook.py").write_text("import sys\n\nprint(sys.argv)\n", encoding="utf-8")
+# `pycheck.py --hook` is in s3.jsonl above, so wiring it here exercises the seen-branch: the verdict
+# must carry its real firing and block counts, not a guess from the wiring.
+(HEALTH / "scripts" / "pycheck.py").write_text("print('ok')\n", encoding="utf-8")
+(HEALTH / "scripts" / "bad.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+(HEALTH / "scripts" / "quiet-context.py").write_text("print('context')\n", encoding="utf-8")
+# s3.jsonl has `ledger.py brief` and `ledger.py recall` but no `record`: same file, other arguments.
+(HEALTH / "scripts" / "ledger.py").write_text("print('ledger')\n", encoding="utf-8")
+
+
+def health_cmd(name: str, args: str = "") -> str:
+    return f'"py" "{HEALTH / "scripts" / name}"' + (f" {args}" if args else "")
+
+
 health_settings = HEALTH / "settings.json"
 health_settings.write_text(
     json.dumps(
         {
             "hooks": {
                 "PostToolUse": [
+                    {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": health_cmd("good-hook.py")}]},
                     {
                         "matcher": "Edit|Write",
-                        "hooks": [{"type": "command", "command": f'"py" "{HEALTH / "scripts" / "good-hook.py"}"'}],
-                    }
+                        "hooks": [{"type": "command", "command": health_cmd("pycheck.py", "--hook")}],
+                    },
                 ],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": health_cmd("bad.py")}]}],
                 "Stop": [{"hooks": [{"type": "command", "command": f'"py" "{HEALTH / "scripts" / "gone.py"}"'}]}],
+                "SubagentStart": [{"hooks": [{"type": "command", "command": health_cmd("quiet-context.py")}]}],
+                "SubagentStop": [{"hooks": [{"type": "command", "command": health_cmd("ledger.py", "record")}]}],
                 "SessionStart": [
                     {"matcher": "startup", "hooks": [{"type": "command", "command": 'cat "$HOME/x.md" || true'}]}
                 ],
@@ -1463,10 +1567,10 @@ proc = subprocess.run(
 out = proc.stdout.decode("utf-8", "replace")
 expect("friction --health exits 0", proc.returncode, ALLOW, proc.stderr.decode())
 health_lines = [line for line in out.splitlines() if line.startswith("  ")]
-expect_true("--health reports one line per wired hook", len(health_lines) == 3, out)
+expect_true("--health reports one line per wired hook", len(health_lines) == 7, out)
 expect_true(
     "a python hook that exists and parses is ok, and unseen is not called dead",
-    any("good-hook.py" in ln and "ok - exists, parses" in ln and "not seen - expected" in ln for ln in health_lines),
+    any("good-hook.py" in ln and "ok - exists, parses" in ln and "not seen -" in ln for ln in health_lines),
     out,
 )
 expect_true(
@@ -1475,8 +1579,46 @@ expect_true(
     out,
 )
 expect_true(
+    "a wired script that no longer parses is broken, with the line number",
+    any("bad.py" in ln and "BROKEN - does not parse (line 1)" in ln for ln in health_lines),
+    out,
+)
+expect_true(
     "a non-python hook command is skipped, not broken",
     any("skipped - not a python hook" in ln and "BROKEN" not in ln for ln in health_lines),
+    out,
+)
+# The positive half of the predicate: a hook that IS in the transcripts must be reported as alive,
+# with the counts the records carry - s3.jsonl has two pycheck blocks, the later one on 2026-09-15.
+expect_true(
+    "a hook seen in the transcripts reports when it last fired, with its firing and block counts",
+    any("pycheck.py --hook" in ln and "last fired 2026-09-15 (2 firing(s), 2 block(s))" in ln for ln in health_lines),
+    out,
+)
+expect_true(
+    "a script seen under other arguments is evidence the file itself runs",
+    any("ledger.py record" in ln and "script seen 2026-09-15 under other arguments" in ln for ln in health_lines),
+    out,
+)
+# Silence is a property of the SCRIPT, never of the event: `ledger.py recall` with no ledger and
+# `cat <model-policy>` with no such file are silent SessionStart hooks that work. Reporting them as
+# NOT SEEN because "this event adds context on every firing" is the false alarm the predicate forbids.
+expect_true(
+    "a silent SessionStart hook is not a fault verdict",
+    any(
+        "cat " in ln and "not seen -" in ln and "NOT SEEN" not in ln and "check the wiring" not in ln
+        for ln in health_lines
+    ),
+    out,
+)
+# `hook_additional_context` records carry no command, so they can never be attributed to a script.
+# "This event demonstrably fired" and "nothing is known about this script" are different states.
+expect_true(
+    "an event seen firing through a command-less record is reported as seen, not as unseen",
+    any(
+        "quiet-context.py" in ln and "event seen firing 2026-09-15" in ln and "cannot attribute" in ln
+        for ln in health_lines
+    ),
     out,
 )
 expect_true("--health writes nothing, not even with --record", not (FR / "health-readings").exists(), out)

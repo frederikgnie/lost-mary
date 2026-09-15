@@ -31,6 +31,10 @@ env/
 .claude/projects/
 .claude/logs/
 .claude/*.log
+# Per-agent memory written by the roles as they work: local runtime state, not
+# configuration. It was ignored only through .git/info/exclude, which does not
+# travel with the repository - a fresh clone would have started versioning it.
+.claude/agent-memory-local/
 
 # --- Local, machine-specific settings ---
 # settings.example.json is the versioned template; a real settings.json with

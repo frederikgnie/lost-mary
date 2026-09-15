@@ -5,7 +5,7 @@ was verified, and how each piece degrades when the runtime changes. Claude
 Code's own documentation is the authority; this file records what was checked
 and when, so a future upgrade has a checklist instead of a surprise.
 
-Last verified: **2026-09-06**, Claude Code **2.1.260**, against
+Last verified: **2026-09-15**, Claude Code **2.1.260**, against
 `code.claude.com/docs` (hooks, sub-agents, skills, settings) and against real
 transcripts on disk.
 
@@ -167,19 +167,32 @@ them sees nothing of the other two (verified 2026-09-15 on 2.1.260 by direct ins
 
 | `attachment.type` | keys | what it means |
 | --- | --- | --- |
-| `hook_blocking_error` | `blockingError`, `hookEvent`, `hookName`, `toolUseID`, `type` - **no `exitCode`, no `stderr`** | the hook blocked. The message and the hook's own command line are at `blockingError.blockingError` and `blockingError.command`. |
+| `hook_blocking_error` | `blockingError`, `hookEvent`, `hookName`, `toolUseID`, `type` - **no `exitCode`, no `stderr`** | Claude Code's name for an **exit-2 result**, which is not the same as "the action was prevented". On `PreToolUse` / `Stop` / `SubagentStop` it was. On `PostToolUse` it was not: the edit already happened (see `pycheck` in the table above) and exit 2 only returns the diagnostics to the model while the edit is still in its working memory - so the 222 records counted here are findings on edits that landed, **not 222 edits prevented**. The message and the hook's own command line are at `blockingError.blockingError` and `blockingError.command`. |
 | `hook_success` | `command`, `content`, `durationMs`, `exitCode`, `hookEvent`, `hookName`, `stderr`, `stdout`, `toolUseID`, `type` | the hook ran and printed something. **Exit 0 with `stderr` is a hook that failed open** and explained itself on a stream nobody reads - a stale install or a wrong payload assumption hides there. |
 | `hook_additional_context` | `content`, `hookEvent`, `hookName`, `toolUseID`, `type` - no `exitCode`, no `command` | the hook injected context (SessionStart, SubagentStart, `ledger attach`). Nothing is wrong; the only name it carries is `hookName`. |
 
+`friction.py` keeps the runtime's word and labels these `block(s)`; read one as "the hook fired and
+returned exit 2", then look at the event to know whether anything was actually stopped.
+
 Two consequences worth holding on to. **A hook that succeeds quietly leaves no record at all** - `no-ask`
-allowing a menu, `pycheck` finding nothing - so silence in the transcripts is not evidence of a dead hook,
-and counting firings can never prove one is alive. `friction.py --health` answers liveness from the wiring
-instead: every command under `hooks[event][*].hooks[*].command` in `settings.json`, whether its script
-exists, whether it still parses (`ast.parse`, never an import - a health check must not run the thing it
-checks), and when that script was last seen firing; expected silence is reported as expected, never as
-"dead". Second, **a `PreToolUse` block reaches the model as `tool_result` text**, not as an attachment,
-which is why `friction.py` finds blocked menus by their message in the result body and counts them under
-`blocked` rather than under the hook blocks.
+allowing a menu, `pycheck` finding nothing, `ledger.py recall` with no ledger yet, `cat <model-policy>`
+with no such file - so silence in the transcripts is not evidence of a dead hook, and counting firings can
+never prove one is alive. Nor is this a property of the event: whether a firing leaves a record is decided
+by the SCRIPT, so a `SessionStart` hook is exactly as free to be silent as a `PreToolUse` one.
+`friction.py --health` answers liveness from the wiring instead: every command under
+`hooks[event][*].hooks[*].command` in `settings.json`, whether its script exists, whether it still parses
+(`ast.parse`, never an import - a health check must not run the thing it checks, which is also why
+`--health` skips the one import this tool otherwise does, `no-punt.py`: on an installed machine that file
+IS the wired `Stop` hook), and when that script was last seen firing. Silence is never by itself a fault
+verdict; the one distinction drawn is between "nothing is known about this script" and "this event was
+seen firing through a record that carries no command", which cannot be attributed to any script.
+
+Second, **a `PreToolUse` block reaches the model as `tool_result` text**, not as an attachment - verified
+2026-09-15 on 2.1.260 by direct inspection of `~/.claude/projects`: over the 50 most recent transcripts,
+`check-spawn.py` blocks appear 9 times as text inside `type: user` / `tool_result` records and produce
+ZERO `hook_blocking_error` attachments, and `friction.py --json` attributes all 312 `hooks_seen` blocks to
+`pycheck.py --hook`, none to `no-ask.py` or `check-spawn.py`. That is why `friction.py` finds blocked menus
+by their message in the result body and counts them under `blocked` rather than under the hook blocks.
 
 Testing a block with `exitCode == 2` therefore matches nothing, ever. `scripts/friction.py` did exactly
 that until 2026-09-15 and reported "0 blocks" while `pycheck` had blocked 222 bad Python edits since

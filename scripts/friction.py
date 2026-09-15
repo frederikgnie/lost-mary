@@ -37,7 +37,8 @@ Usage:
              [--record]   also save this reading under FRICTION_ROOT (default ~/.claude/agent-library/friction)
              [--history]  print the saved readings as a table and exit
              [--health]   per wired hook: does its script exist, does it parse,
-                          when was it last seen firing - writes nothing
+                          when was it last seen firing - writes nothing and
+                          imports nothing (it must not run what it judges)
 
 Runtime dependencies (see capabilities.md): the transcript record shape -
 `type: assistant|user`, a top-level ISO `timestamp`, `message.content[]` items
@@ -81,10 +82,6 @@ PS_ASSIGNMENT = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*\s*=")
 WRAPPERS = frozenset({"sudo", "timeout", "nohup", "env", "command", "time"})
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHELL_TOKEN = re.compile(r"\"[^\"]*\"|'[^']*'|\S+")  # a hook command quotes its interpreter and script paths
-# Hooks on these events speak on every firing (they inject context), so their absence from the
-# transcripts means something. Everywhere else a hook speaks only to block or to warn, and silence
-# is its normal state - calling that "dead" would be a false alarm.
-SPEAKS_EVERY_TIME = frozenset({"SessionStart", "SubagentStart"})
 
 
 @dataclass
@@ -106,6 +103,9 @@ class HookSeen:
     notices: int = 0
     last: str = ""  # ISO timestamp of the most recent firing, "" when no record carried one
     events: list[str] = field(default_factory=list)
+    # True when at least one firing arrived without a command line, so this entry is named after the
+    # event's hookName and stands for "something fired here", not for any particular script.
+    commandless: bool = False
 
 
 @dataclass
@@ -226,11 +226,14 @@ def hook_identity(command: str, fallback: str = "(unknown hook)") -> str:
     return clean_line(command)[:60] or fallback
 
 
-def record_hook_fire(report: Report, identity: str, event: str, when: str, *, block: bool, notice: bool) -> None:
+def record_hook_fire(
+    report: Report, identity: str, event: str, when: str, *, block: bool, notice: bool, commandless: bool = False
+) -> None:
     seen = report.hooks.setdefault(identity, HookSeen())
     seen.fires += 1
     seen.blocks += int(block)
     seen.notices += int(notice)
+    seen.commandless = seen.commandless or commandless
     if when > seen.last:
         seen.last = when
     if event not in seen.events:
@@ -259,27 +262,29 @@ def scan_hook_record(record: dict[str, Any], report: Report, when: str = "") -> 
     if kind == "hook_blocking_error":
         detail = attachment.get("blockingError")
         detail = detail if isinstance(detail, dict) else {}
+        command = str(detail.get("command") or "")
         report.hook_blocks[event] += 1
-        identity = hook_identity(str(detail.get("command") or ""), named)
-        record_hook_fire(report, identity, event, when, block=True, notice=False)
+        identity = hook_identity(command, named)
+        record_hook_fire(report, identity, event, when, block=True, notice=False, commandless=not command)
         return
     # hook_success names its own command; hook_additional_context carries neither command nor exitCode
     # nor stderr, so it falls through to a plain firing under its hookName - context added, nothing wrong.
-    identity = hook_identity(str(attachment.get("command") or ""), named)
+    command = str(attachment.get("command") or "")
+    identity = hook_identity(command, named)
     stderr = str(attachment.get("stderr") or "").strip()
     code = attachment.get("exitCode")
     if code == 2:  # not observed on this version, but a block is a block whatever shape it arrives in
         report.hook_blocks[event] += 1
-        record_hook_fire(report, identity, event, when, block=True, notice=False)
+        record_hook_fire(report, identity, event, when, block=True, notice=False, commandless=not command)
         return
     if stderr:
         key = f"{event}: {clean_line(stderr)}"
         report.hook_notices[key] += 1
         if when > report.hook_notice_last.get(key, ""):
             report.hook_notice_last[key] = when
-        record_hook_fire(report, identity, event, when, block=False, notice=True)
+        record_hook_fire(report, identity, event, when, block=False, notice=True, commandless=not command)
         return
-    record_hook_fire(report, identity, event, when, block=False, notice=False)
+    record_hook_fire(report, identity, event, when, block=False, notice=False, commandless=not command)
 
 
 def clean_line(text: str) -> str:
@@ -320,7 +325,8 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
             if when:
                 dates.append(when[:10])
             scan_hook_record(record, report, when)
-            content = (record.get("message") or {}).get("content")
+            message = record.get("message")  # a string here (seen in the wild) must cost this record, not the run
+            content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, list):
                 continue
             kind = record.get("type")
@@ -414,11 +420,21 @@ def mtime(path: Path) -> float | None:
         return None
 
 
-def build_report(projects_dir: Path, settings: Path, sessions: int, since: str = "") -> Report:
+def build_report(
+    projects_dir: Path, settings: Path, sessions: int, since: str = "", *, hand_backs: bool = True
+) -> Report:
+    """Read the transcripts. `hand_backs=False` skips the only import this tool does.
+
+    That import is `no-punt.py`, and on an installed machine that file IS the wired Stop hook - so
+    `--health`, which promises to judge hook scripts without running any of them, asks for a report
+    without hand-backs rather than loading one of the scripts it is about to judge.
+    """
     report = Report(since=since)
-    punt_phrase, note = load_punt_check()
-    if note:
-        report.notes.append(note)
+    punt_phrase: Any = None
+    if hand_backs:
+        punt_phrase, note = load_punt_check()
+        if note:
+            report.notes.append(note)
     # Only the lead's own transcripts: subagents (<project>/<session>/subagents/) and
     # Workflow agents (wf_* project dirs) cannot ask the user anything.
     by_mtime: dict[Path, float] = {}
@@ -440,11 +456,14 @@ def build_report(projects_dir: Path, settings: Path, sessions: int, since: str =
         span: tuple[str, str] | None = None
         try:
             span = scan_transcript(path, stats, report, punt_phrase)
-        except OSError as exc:
+        except Exception as exc:  # one unreadable transcript costs its file, never the whole report
             report.notes.append(f"skipped {path.name}: {exc}")
         if span is not None:
             dates += [span[0], span[1]]
-        else:  # nothing in the file was dated: its mtime is the only date left
+        elif not since:
+            # Nothing in the file was dated: its mtime is the only date left. Under --since that
+            # fallback lies - the file contributed nothing precisely because its records are older
+            # than the window, and dating it by mtime prints a `first` that precedes `since`.
             stamp = by_mtime.get(path)
             if stamp is not None:
                 dates.append(datetime.fromtimestamp(stamp, UTC).date().isoformat())
@@ -557,7 +576,8 @@ def pct(part: int, whole: int) -> str:
 
 
 def as_text(report: Report) -> str:
-    window = f"{report.first}..{report.last}" + (f" (since {report.since})" if report.since else "")
+    window = f"{report.first}..{report.last}" if report.first else "no dated records"
+    window += f" (since {report.since})" if report.since else ""
     lines = [f"friction report - {report.sessions} session(s), {window}", ""]
     lines.append(
         f"questions     {report.questions} asked via menus (AskUserQuestion), "
@@ -687,11 +707,19 @@ def script_verdict(script: Path | None) -> str:
 
 
 def liveness(hook: WiredHook, report: Report) -> str:
-    """When this hook was last seen firing - and, when it was never seen, whether that means anything.
+    """When this hook was last seen firing - and, when it was never seen, what that does and does not mean.
 
-    Silence is the normal state of a gate: `no-ask` that allowed, `pycheck` that found nothing and
-    `check-evidence` that was satisfied all exit 0 with nothing to say, and Claude Code records nothing
-    at all for them. Printing "dead" here would be a false alarm about a hook doing its job.
+    Silence is never by itself a fault verdict. Whether a firing leaves a record is a property of the
+    SCRIPT, not of the event: `no-ask` that allowed, `pycheck` that found nothing, `ledger.py recall`
+    with no ledger to print and `cat <model-policy>` with no such file all exit 0 with nothing to say,
+    and Claude Code records nothing at all for them - on SessionStart as much as on PreToolUse. An event
+    that "adds context on every firing" does not exist; only a script that always speaks does, and this
+    file cannot tell which is which. Calling that "dead" is the false alarm this function must not raise.
+
+    What it CAN separate is "no evidence about this script" from "no evidence this event fired at all".
+    A `hook_additional_context` record carries no command, so it is filed under its hookName and can
+    never be attributed to a script: with one of those on the event, the wiring is demonstrably live
+    even though this particular hook cannot be found in it. That is worth saying, and it is not a fault.
     """
     seen = report.hooks.get(hook.identity)
     if seen is not None:
@@ -700,9 +728,11 @@ def liveness(hook: WiredHook, report: Report) -> str:
     matches = [s for name, s in report.hooks.items() if name.split(" ")[0] == script]
     if matches:
         return f"script seen {max(m.last for m in matches)[:10] or '(undated)'} under other arguments"
-    if hook.event in SPEAKS_EVERY_TIME:
-        return "NOT SEEN - this event adds context on every firing, so check the wiring"
-    return "not seen - expected: it speaks only when it blocks or warns"
+    anonymous = [s for s in report.hooks.values() if s.commandless and hook.event in s.events]
+    if anonymous:
+        when = max(s.last for s in anonymous)[:10] or "(undated)"
+        return f"event seen firing {when} (record carries no command; cannot attribute to this script)"
+    return "not seen - a hook is recorded only when it blocks, warns or injects context"
 
 
 def health_text(settings: Path, report: Report) -> str:
@@ -754,7 +784,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.projects_dir.is_dir():
         print(f"friction: no transcripts - {args.projects_dir} is not a directory", file=sys.stderr)
         return 0
-    report = build_report(args.projects_dir, args.settings, max(1, args.sessions), args.since)
+    # --health judges hook scripts, so it must not import one: no hand-backs means no no-punt.py load.
+    report = build_report(
+        args.projects_dir, args.settings, max(1, args.sessions), args.since, hand_backs=not args.health
+    )
     if args.health:  # liveness, not friction: reads the wiring, writes nothing, ignores --record
         print(health_text(args.settings, report))
         return 0
