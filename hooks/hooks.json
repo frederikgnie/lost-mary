@@ -130,7 +130,7 @@
             "type": "command",
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/witness.py"],
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }
@@ -143,7 +143,7 @@
             "type": "command",
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/witness.py"],
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

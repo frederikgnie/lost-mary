@@ -18,7 +18,9 @@ on the re-emitted stop with `stop_hook_active: true`, and that stop is allowed,
 so a confused agent cannot loop - the lead sees both messages and judges.
 
 Where the evidence comes from. The witness file (`scripts/witness.py`, a
-`PostToolUse` hook) when one exists for this session, the transcript otherwise.
+`PostToolUse` hook) when one exists for this session and holds at least one
+readable line, the transcript otherwise (an existing file with nothing readable
+in it is broken, and a broken source must not decide a verdict).
 The transcript is a fallback, not the source, because the docs call it internal
 and say it is "written asynchronously" so it "may not yet include the current
 turn's most recent messages when a hook fires" - i.e. a truthful agent can be
@@ -43,7 +45,10 @@ carrying the payload's `prompt_id`) decide rules A and C; a claim of passing
 validation needs a run somewhere in the session (rule B, "never say tests pass
 unless they ran in this session"), and the last run of that kind in the
 session must not have failed unreported. Conversation-only turns without a
-claim pass untouched. One strike, as above.
+claim pass untouched. Read from the witness file, a payload that carries no
+`prompt_id` gets an EMPTY turn rather than the last one in the file (which is
+the previous turn, already judged); only the session claims are checked then.
+One strike, as above.
 
 Wiring: SubagentStop with a matcher for roles that write (e.g.
 "implement|general-purpose"). Exit 2 blocks the stop and returns stderr to the
@@ -78,6 +83,9 @@ RUN_TOOLS = frozenset({"Bash", "PowerShell"})
 EVIDENCE_ROOT_ENV = "EVIDENCE_ROOT"
 DEFAULT_EVIDENCE_ROOT = Path.home() / ".claude" / "agent-library" / "evidence"
 ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+WITNESS_LEAD_FILE = "witness-lead.jsonl"
+# A torn line (ENOSPC mid-write) is glued to the next writer's line. The good one starts at the last of these.
+WITNESS_LINE_START = '{"v":'
 # The EVENT is the pass/fail signal. Bash sends no exit_code on success (2.1.272), so a null there
 # means "not reported", never "passed"; a non-zero exit arrives as PostToolUseFailure instead.
 WITNESS_OK = "PostToolUse"
@@ -298,7 +306,9 @@ def witness_path(event: dict[str, Any]) -> Path | None:
 
     Mirrors witness.py's layout and validates the ids the same way: a value that is not a clean identifier
     means "no file", never a sanitised guess, because these become path parts and the caller can still read
-    the transcript. No `agent_id` in the payload is the lead's own calls, which witness routes to lead.jsonl.
+    the transcript. No `agent_id` in the payload is the lead's own calls, which witness routes to
+    witness-lead.jsonl. The `witness-` prefix keeps these files out of the way of `subagent_transcript`,
+    which searches a project tree for Claude Code's own `agent-<agent_id>.jsonl`.
     """
     session_id = event.get("session_id")
     if not isinstance(session_id, str) or not ID_OK.match(session_id):
@@ -308,7 +318,28 @@ def witness_path(event: dict[str, Any]) -> Path | None:
     if agent_id is not None and not ID_OK.match(agent_id):
         return None
     root = Path(os.environ.get(EVIDENCE_ROOT_ENV) or DEFAULT_EVIDENCE_ROOT)
-    return root / session_id / (f"agent-{agent_id}.jsonl" if agent_id else "lead.jsonl")
+    return root / session_id / (f"witness-{agent_id}.jsonl" if agent_id else WITNESS_LEAD_FILE)
+
+
+def parse_witness_line(text: str) -> Any:
+    """One witness line as JSON, recovering the intact half of a torn one; None when nothing parses.
+
+    A write that dies mid-line (ENOSPC, a killed process) leaves no trailing newline, so the NEXT append is
+    glued onto its tail and a plain parse loses both lines - the torn one and a good one that had nothing
+    wrong with it. Every witness line starts `{"v":`, so the LAST occurrence of that marks where the intact
+    line begins: the torn fragment is dropped, the complete record after it is read.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = text.rfind(WITNESS_LINE_START)
+    if start <= 0:  # 0 means the line already starts there and simply does not parse - nothing to recover
+        return None
+    try:
+        return json.loads(text[start:])
+    except json.JSONDecodeError:
+        return None
 
 
 def iter_witness(path: Path) -> Iterator[dict[str, Any]]:
@@ -322,10 +353,7 @@ def iter_witness(path: Path) -> Iterator[dict[str, Any]]:
             stripped = line.strip()
             if not stripped:
                 continue
-            try:
-                record = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
+            record = parse_witness_line(stripped)
             if not isinstance(record, dict) or "v" not in record:
                 continue
             if isinstance(record.get("event"), str) and isinstance(record.get("tool"), str):
@@ -372,14 +400,23 @@ def evidence_from_witness(lines: Iterable[dict[str, Any]], prompt_id: str | None
 
 
 def witness_lines(event: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """This stop's witness lines, or None when there is no readable file - the signal to fall back."""
+    """This stop's witness lines, or None when there is no usable file - the signal to fall back.
+
+    A file that exists but yields NO parseable line is broken, not empty of events: treating [] as evidence
+    would read as "edited nothing, ran nothing" and allow a subagent's claims outright (and block the lead's).
+    Falling back on an absent file is routine and stays silent; an existing file that cannot be READ is a
+    genuinely broken state, so that one case says so on stderr - a hook that goes quiet is worse than one
+    that complains.
+    """
     path = witness_path(event)
     if path is None or not path.is_file():
         return None
     try:
-        return list(iter_witness(path))
-    except OSError:
+        lines = list(iter_witness(path))
+    except OSError as exc:
+        print(f"check-evidence: witness file unreadable ({exc}); using transcript.", file=sys.stderr)
         return None
+    return lines or None
 
 
 def subagent_transcript(event: dict[str, Any]) -> Path | None:
@@ -538,26 +575,19 @@ def decide_lead(message: str, turn: Evidence, session: Evidence) -> str | None:
     return None
 
 
-def last_prompt_id(lines: list[dict[str, Any]]) -> str | None:
-    """The turn a Stop payload without a `prompt_id` is about: the last one the witness file saw."""
-    found: str | None = None
-    for line in lines:
-        pid = line.get("prompt_id")
-        if isinstance(pid, str) and pid:
-            found = pid
-    return found
-
-
 def gather_lead(event: dict[str, Any], prompt_id: str | None) -> tuple[tuple[Evidence, Evidence] | None, str]:
     """The lead's (turn, session) evidence: its witness file when one exists, the session transcript otherwise.
 
     Witness lines carry the `prompt_id` of the turn they happened in - the same id the Stop payload carries -
-    so the turn is a filter here rather than the transcript's slice between two user prompts. Silent fallback,
-    as for a subagent; `why` is only a broken-payload notice.
+    so the turn is a filter here rather than the transcript's slice between two user prompts. A payload with
+    NO `prompt_id` gets an empty turn: the last `prompt_id` in the file is the previous turn, whose edits and
+    runs were judged when it stopped, and re-judging them would bounce this turn for the last one's silence.
+    The session claims (rule B) are still checked, which is what an unattributable turn can honestly support.
+    Silent fallback, as for a subagent; `why` is only a broken-payload notice.
     """
     lines = witness_lines(event)
     if lines is not None:
-        turn = evidence_from_witness(lines, prompt_id or last_prompt_id(lines))
+        turn = evidence_from_witness(lines, prompt_id) if prompt_id else Evidence()
         return (turn, evidence_from_witness(lines)), ""
     path = Path(str(event.get("transcript_path") or ""))
     if not path.is_file():

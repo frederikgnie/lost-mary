@@ -121,7 +121,7 @@
           {
             "type": "command",
             "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/witness.py\"",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }
@@ -133,7 +133,7 @@
           {
             "type": "command",
             "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/witness.py\"",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

@@ -29,17 +29,27 @@ The line (every key always present, schema `v: 1`):
   text (the output, bounded head + tail), error (failure event only, or null).
 
 Free text is bounded to a head and a TAIL - a test summary sits at the end of a
-run's output - and the whole line is kept under 4000 bytes.
+run's output - and the whole line is kept under 4000 bytes. `command` is NOT
+pre-bounded: the consumer decides from it whether a validation run happened, and
+an elided middle would hide the `&& pytest tests -q` of a long compound, turning
+a run that happened into "ran nothing". It is shrunk only when the whole line
+would otherwise exceed the cap, which a normal line never reaches.
 
-Where. `<EVIDENCE_ROOT>/<session_id>/agent-<agent_id>.jsonl`, or `lead.jsonl`
-when the payload carries no `agent_id` (the lead's own calls). EVIDENCE_ROOT
-defaults to `~/.claude/agent-library/evidence`; the tests override it. Outside
-any work tree on purpose, and never under `~/.claude/projects`, where the
-transcripts live. `session_id` and `agent_id` become path parts, so both are
-matched against a strict identifier pattern first: a value that fails is a
-refusal to write, never a sanitised guess. Creating a session directory prunes
-sibling directories older than EVIDENCE_KEEP_DAYS (default 14, minimum 1) -
-evidence only has to outlive the stop that reads it.
+Where. `<EVIDENCE_ROOT>/<session_id>/witness-<agent_id>.jsonl`, or
+`witness-lead.jsonl` when the payload carries no `agent_id` (the lead's own
+calls). The `witness-` prefix is not decoration: Claude Code names a subagent's
+own transcript `agent-<agent_id>.jsonl`, and a consumer searching a project tree
+for that must not find one of these instead. EVIDENCE_ROOT defaults to
+`~/.claude/agent-library/evidence`; the tests override it. Outside any work tree
+on purpose, and never under `~/.claude/projects`, where the transcripts live -
+compared on RESOLVED paths, so a `..` segment, a relative root, a symlink or a
+Windows 8.3 short name (`C:/Users/FREDER~1/...`) cannot slip past the refusal.
+`session_id` and `agent_id` become path parts, so both are matched against a
+strict identifier pattern first: a value that fails is a refusal to write, never
+a sanitised guess. Creating a session directory prunes sibling directories older
+than EVIDENCE_KEEP_DAYS (default 14, minimum 1), and only those that are
+provably this script's own output (see `prune`) - evidence only has to outlive
+the stop that reads it.
 
 Runtime dependencies (measured 2026-09-15, Claude Code 2.1.272, with probe
 hooks; see capabilities.md). `PostToolUse` fires inside subagents and carries
@@ -60,7 +70,10 @@ the transcript has, neither fixed nor worsened here.
 How it degrades. Any failure to read, decode, validate or write prints one line
 on stderr and exits 0: a hook that wedges every tool call is worse than one
 that misses a line. The line is appended in a single `write()` on a file opened
-"ab", so a torn write loses a line instead of corrupting the file. Tools other
+"ab", so a torn write can only leave a partial line at the end of the file,
+never interleave two - and the next append glues onto it, which the reader
+undoes by re-parsing from the last `{"v":` on the line (see `iter_witness` in
+check-evidence.py): the torn line is lost, the one after it is not. Tools other
 than the recorded set are ignored in silence (the matcher should already
 exclude them). Nothing is ever printed on stdout.
 """
@@ -84,12 +97,15 @@ KEEP_DAYS_DEFAULT = 14
 FORBIDDEN_ROOT = Path.home() / ".claude" / "projects"
 # Ids become path parts. Strict on purpose: no separators, no dots, so "../evil" cannot be a session.
 ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# The lead's own calls carry no agent_id and land here. Runtime agent ids are hex, so nothing collides with "lead".
+LEAD_FILE = "witness-lead.jsonl"
+# A file name only this script writes - LEAD_FILE included. prune deletes nothing whose name fails this.
+WITNESS_FILE = re.compile(r"^witness-[A-Za-z0-9_-]{1,64}\.jsonl$")
 EXIT_CODE = re.compile(r"^Exit code (\d+)")
 RECORDED_TOOLS = frozenset({"Bash", "PowerShell", "Edit", "Write", "MultiEdit", "NotebookEdit"})
 SUCCESS_EVENT = "PostToolUse"
 FAILURE_EVENT = "PostToolUseFailure"
 TEXT_HEAD, TEXT_TAIL = 1000, 800  # keep the tail: a test summary is at the end of the output
-COMMAND_HEAD, COMMAND_TAIL = 1200, 300  # a command's identity is at the front; the tail shows redirects
 PATH_HEAD, PATH_TAIL = 400, 200
 ID_LIMIT = 120
 MAX_LINE = 4000
@@ -218,7 +234,9 @@ def build_line(payload: dict[str, Any], tool: str, session_id: str, agent_id: st
         "agent_type": clip(as_text(payload.get("agent_type")) or "", ID_LIMIT) or None,
         "tool_use_id": clip(as_text(payload.get("tool_use_id")) or "", ID_LIMIT),
         "tool": clip(tool, 60),
-        "command": bound(command, COMMAND_HEAD, COMMAND_TAIL) if command is not None else None,
+        # NOT bounded here: the consumer classifies this string, and `&& pytest -q` elided out of the middle of a
+        # long compound reads as "ran no validation". fit() shrinks it only if the whole line busts MAX_LINE.
+        "command": command,
         "file_path": bound(file_path, PATH_HEAD, PATH_TAIL) if file_path is not None else None,
         "exit_code": exit_code_of(response, error),
         "interrupted": interrupted or payload.get("is_interrupt") is True,
@@ -236,9 +254,13 @@ def evidence_path(session_id: str, agent_id: str | None) -> tuple[Path | None, s
         return None, f"unusable agent_id {agent_id!r}"
     root = Path(os.environ.get(EVIDENCE_ROOT_ENV) or DEFAULT_ROOT)
     directory = root / session_id
-    if directory == FORBIDDEN_ROOT or directory.is_relative_to(FORBIDDEN_ROOT):
+    # Resolved, not as written: `~/.claude/x/../projects`, a relative EVIDENCE_ROOT, a symlink and the Windows
+    # 8.3 short name of the home directory all compare unequal to the spelled-out path and would walk straight in.
+    resolved = directory.resolve(strict=False)
+    forbidden = FORBIDDEN_ROOT.resolve(strict=False)
+    if resolved == forbidden or resolved.is_relative_to(forbidden):
         return None, "refusing to write under ~/.claude/projects"
-    return directory / (f"agent-{agent_id}.jsonl" if agent_id else "lead.jsonl"), ""
+    return directory / (f"witness-{agent_id}.jsonl" if agent_id else LEAD_FILE), ""
 
 
 def keep_days() -> int:
@@ -248,23 +270,61 @@ def keep_days() -> int:
         return KEEP_DAYS_DEFAULT
 
 
+def newest_witness_mtime(directory: Path) -> float | None:
+    """How old this directory's evidence is, or None when the directory is not provably ours.
+
+    "Provably ours" is the whole safety property of `prune`: the name is a session id, the directory lies
+    where it is spelled (not a link into someone else's tree), and EVERY child is a regular, non-symlink file
+    named the way this script names its files. One foreign file, one subdirectory or one symlink and the
+    answer is None - the caller then leaves the whole directory alone rather than emptying it. EVIDENCE_ROOT
+    is operator-set and has been pointed at a source tree by mistake; deleting what we did not write is the
+    one failure this hook must not have. The link check is `resolve()`-based rather than `is_symlink()`,
+    because a Windows junction - which anyone can create without a privilege - is not reported as a symlink.
+
+    The age is the NEWEST child's mtime, never the directory's: a directory's mtime moves when a file is added
+    or removed and NOT when one is appended to, so a long-lived session that is still being written would look
+    stale by its directory and have its live evidence unlinked under the reader (on POSIX the unlink would race
+    a concurrent `open("ab")`). An empty directory has no child to date, so its own mtime is the best there is.
+    """
+    if directory.is_symlink() or not ID_OK.match(directory.name):
+        return None
+    try:
+        if directory.resolve(strict=False) != directory.parent.resolve(strict=False) / directory.name:
+            return None  # a link, a junction or a reparse point: its contents belong to somewhere else
+        newest: float | None = None
+        for child in directory.iterdir():
+            if child.is_symlink() or not WITNESS_FILE.match(child.name) or not child.is_file():
+                return None
+            mtime = child.stat().st_mtime
+            newest = mtime if newest is None else max(newest, mtime)
+        return directory.stat().st_mtime if newest is None else newest
+    except OSError:
+        return None
+
+
 def prune(root: Path, keep: Path) -> None:
-    """Drop session directories older than EVIDENCE_KEEP_DAYS; a directory holding anything else is left alone."""
+    """Drop session directories whose newest witness line is older than EVIDENCE_KEEP_DAYS.
+
+    Only directories that are provably this script's output are touched at all (see `newest_witness_mtime`);
+    anything else - a subdirectory, a foreign file, a link, a name that is not a session id - is skipped
+    whole, with not one file inside it unlinked.
+    """
     cutoff = datetime.now(UTC).timestamp() - keep_days() * 86400
     try:
         siblings = list(root.iterdir())
     except OSError:
         return
     for directory in siblings:
-        if directory == keep or not directory.is_dir():
+        if directory == keep or directory.is_symlink() or not directory.is_dir():
+            continue
+        age = newest_witness_mtime(directory)
+        if age is None or age >= cutoff:
             continue
         try:
-            if directory.stat().st_mtime >= cutoff:
-                continue
             for child in directory.iterdir():
-                if child.is_file():
+                if WITNESS_FILE.match(child.name) and not child.is_symlink():  # re-checked: the scan is not atomic
                     child.unlink()
-            directory.rmdir()
+            directory.rmdir()  # fails, harmlessly, if anything appeared in the directory meanwhile
         except OSError:
             continue
 
@@ -301,7 +361,7 @@ def main() -> int:
     try:
         ensure_session_dir(path.parent)
         with path.open("ab") as handle:
-            handle.write(line)  # one call: a torn write loses this line, it does not corrupt the file
+            handle.write(line)  # one call: a torn write leaves a partial line at the end, never two interleaved
     except OSError as exc:
         notice(f"cannot append to {path} ({exc})")
     return 0
