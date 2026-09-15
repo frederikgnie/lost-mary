@@ -73,6 +73,12 @@ More live checks, one minute each, for the hooks the suite can only simulate:
 - **check-evidence --lead.** Ask Claude, in a turn where it ran nothing, to tell
   you "all tests pass". The stop should bounce once with "Evidence check failed
   (lead)" and the re-emitted message should drop or qualify the claim.
+  Its evidence is `~/.claude/agent-library/evidence/<session>/` - one line per
+  tool call, written by `witness.py` as the call ends: `witness-lead.jsonl` for
+  the lead's own calls and `witness-<agent id>.jsonl` per subagent. An empty
+  directory there means the hook is falling back to parsing transcripts. That
+  id in the file name is worth one look: it must be the same agent id the
+  ledger records for the same stop, or the consumer never finds the file.
 - **ledger brief.** Spawn an `explore` and ask it whether its context contains a
   block starting "Recent ledger for this project". In a project with entries
   the answer is yes.

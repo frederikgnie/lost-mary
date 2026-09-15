@@ -34,8 +34,10 @@ never versioned, never hand-edited.
   A CI step run locally without that gate has destroyed a developer's config
   once already.
 - **`tests/` must stay green on Linux and Windows** with real `ruff`/`ty`
-  (`pip install ruff ty`). `test-hooks.py` pins the transcript shape the
-  evidence hook depends on; update the fixtures when the shape changes.
+  (`pip install ruff ty`). `test-hooks.py` pins both shapes the evidence hook
+  reads - the witness lines under `~/.claude/agent-library/evidence/` (the
+  source) and the transcript (the fallback); update the fixtures when either
+  shape changes.
 - **Update the installers together** (`install.sh`, `install.ps1`): the managed
   file lists, the retired-file lists and the `settings.json` drift check must
   match. Retire, never delete.

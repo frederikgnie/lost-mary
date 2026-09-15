@@ -17,6 +17,19 @@ the state of the tests they found. One strike: Claude Code re-invokes the hook
 on the re-emitted stop with `stop_hook_active: true`, and that stop is allowed,
 so a confused agent cannot loop - the lead sees both messages and judges.
 
+Where the evidence comes from. The witness file (`scripts/witness.py`, a
+`PostToolUse` hook) when one exists for this session and holds at least one
+readable line, the transcript otherwise (an existing file with nothing readable
+in it is broken, and a broken source must not decide a verdict).
+The transcript is a fallback, not the source, because the docs call it internal
+and say it is "written asynchronously" so it "may not yet include the current
+turn's most recent messages when a hook fires" - i.e. a truthful agent can be
+judged as having run nothing merely because its last tool calls have not landed
+in the file yet. The witness file is appended as each call completes, so it
+cannot lag. Falling back is normal and SILENT: `friction.py` reads a hook's
+stderr as a fail-open notice, and a session without the witness hook wired is
+not one. The rules below do not change with the source; only the reading does.
+
 What counts as a validation run: a Bash command whose executable is a test,
 lint or type-check tool - bare, `.exe`, quoted, path-prefixed (`EU_env/.venv/
 Scripts/ty.exe check`), `python -m <tool>`, or behind `uv run`/`uvx` - and
@@ -32,7 +45,10 @@ carrying the payload's `prompt_id`) decide rules A and C; a claim of passing
 validation needs a run somewhere in the session (rule B, "never say tests pass
 unless they ran in this session"), and the last run of that kind in the
 session must not have failed unreported. Conversation-only turns without a
-claim pass untouched. One strike, as above.
+claim pass untouched. Read from the witness file, a payload that carries no
+`prompt_id` gets an EMPTY turn rather than the last one in the file (which is
+the previous turn, already judged); only the session claims are checked then.
+One strike, as above.
 
 Wiring: SubagentStop with a matcher for roles that write (e.g.
 "implement|general-purpose"). Exit 2 blocks the stop and returns stderr to the
@@ -40,15 +56,17 @@ subagent; exit 0 allows. Fails OPEN, with a notice on stderr, when the payload
 or transcript cannot be read.
 
 Runtime dependencies (see capabilities.md): SubagentStop stdin fields
-`agent_id`, `agent_type`, `agent_transcript_path` (preferred), `transcript_path`
-(parent session; the subagent file is derived from it as a fallback),
-`last_assistant_message`, `stop_hook_active`; JSONL records whose
-`message.content[]` holds `tool_use` / `tool_result` items.
+`session_id` (names the witness directory), `agent_id`, `agent_type`,
+`agent_transcript_path` (preferred), `transcript_path` (parent session; the
+subagent file is derived from it as a fallback), `last_assistant_message`,
+`stop_hook_active`; witness lines in the format `scripts/witness.py` documents;
+JSONL records whose `message.content[]` holds `tool_use` / `tool_result` items.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections.abc import Iterable, Iterator
@@ -57,6 +75,20 @@ from pathlib import Path
 from typing import Any
 
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+RUN_TOOLS = frozenset({"Bash", "PowerShell"})
+
+# --- the witness file ---------------------------------------------------------------------
+# These three mirror scripts/witness.py, the producer, which imports nothing from here on purpose
+# (its line format is the whole contract between them); tests/test-hooks.py asserts they still match.
+EVIDENCE_ROOT_ENV = "EVIDENCE_ROOT"
+DEFAULT_EVIDENCE_ROOT = Path.home() / ".claude" / "agent-library" / "evidence"
+ID_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+WITNESS_LEAD_FILE = "witness-lead.jsonl"
+# A torn line (ENOSPC mid-write) is glued to the next writer's line. The good one starts at the last of these.
+WITNESS_LINE_START = '{"v":'
+# The EVENT is the pass/fail signal. Bash sends no exit_code on success (2.1.272), so a null there
+# means "not reported", never "passed"; a non-zero exit arrives as PostToolUseFailure instead.
+WITNESS_OK = "PostToolUse"
 
 # --- what is a validation run -------------------------------------------------------------
 SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
@@ -269,6 +301,124 @@ def evidence_from(records: Iterable[dict[str, Any]]) -> Evidence:
     return evidence
 
 
+def witness_path(event: dict[str, Any]) -> Path | None:
+    """The witness file this stop's tool calls were appended to, or None when the payload cannot name one.
+
+    Mirrors witness.py's layout and validates the ids the same way: a value that is not a clean identifier
+    means "no file", never a sanitised guess, because these become path parts and the caller can still read
+    the transcript. No `agent_id` in the payload is the lead's own calls, which witness routes to
+    witness-lead.jsonl. The `witness-` prefix keeps these files out of the way of `subagent_transcript`,
+    which searches a project tree for Claude Code's own `agent-<agent_id>.jsonl`.
+    """
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not ID_OK.match(session_id):
+        return None
+    raw_agent = event.get("agent_id")
+    agent_id = raw_agent if isinstance(raw_agent, str) and raw_agent else None
+    if agent_id is not None and not ID_OK.match(agent_id):
+        return None
+    root = Path(os.environ.get(EVIDENCE_ROOT_ENV) or DEFAULT_EVIDENCE_ROOT)
+    return root / session_id / (f"witness-{agent_id}.jsonl" if agent_id else WITNESS_LEAD_FILE)
+
+
+def parse_witness_line(text: str) -> Any:
+    """One witness line as JSON, recovering the intact half of a torn one; None when nothing parses.
+
+    A write that dies mid-line (ENOSPC, a killed process) leaves no trailing newline, so the NEXT append is
+    glued onto its tail and a plain parse loses both lines - the torn one and a good one that had nothing
+    wrong with it. Every witness line starts `{"v":`, so the LAST occurrence of that marks where the intact
+    line begins: the torn fragment is dropped, the complete record after it is read.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = text.rfind(WITNESS_LINE_START)
+    if start <= 0:  # 0 means the line already starts there and simply does not parse - nothing to recover
+        return None
+    try:
+        return json.loads(text[start:])
+    except json.JSONDecodeError:
+        return None
+
+
+def iter_witness(path: Path) -> Iterator[dict[str, Any]]:
+    """Witness lines that parse and carry the schema keys; anything else is skipped, never fatal.
+
+    Concurrent hook processes append to this file, so the last line can be torn: one unreadable line must
+    not cost the verdict every other line supports.
+    """
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            record = parse_witness_line(stripped)
+            if not isinstance(record, dict) or "v" not in record:
+                continue
+            if isinstance(record.get("event"), str) and isinstance(record.get("tool"), str):
+                yield record
+
+
+def evidence_from_witness(lines: Iterable[dict[str, Any]], prompt_id: str | None = None) -> Evidence:
+    """Evidence from witness lines - all of them, or only one turn's when prompt_id is given.
+
+    Pass/fail comes from the EVENT (see WITNESS_OK), then from the output: a PostToolUse line is a pass
+    unless the call was interrupted or its own text reports a failure, because `pytest ... | tail` hands
+    the shell the exit code of `tail`. A PostToolUseFailure line is a failed run whose text is its error.
+    An edit line needs no confirming result the way a transcript `tool_use` does - the hook fires after
+    the tool succeeded - so a PostToolUse edit IS a confirmed edit.
+    """
+    evidence = Evidence()
+    seen: set[str] = set()
+    for line in lines:
+        if prompt_id is not None and line.get("prompt_id") != prompt_id:
+            continue
+        succeeded = line.get("event") == WITNESS_OK
+        tool = line.get("tool")
+        if tool in EDIT_TOOLS:
+            target = line.get("file_path")
+            if succeeded and isinstance(target, str) and target not in seen:
+                seen.add(target)
+                evidence.edited.append(target)
+            continue
+        if tool not in RUN_TOOLS:
+            continue
+        command = line.get("command")
+        if not isinstance(command, str):
+            continue
+        segments = classify(command)
+        if not segments:
+            continue
+        error = line.get("error")
+        raw = line.get("text") if succeeded or not isinstance(error, str) or not error else error
+        text = raw if isinstance(raw, str) else ""
+        ok = succeeded and not bool(line.get("interrupted")) and not run_failed(False, text)
+        for segment, run_kind in segments:
+            evidence.runs.append(Run(segment.strip(), run_kind, ok, text.strip()[:300]))
+    return evidence
+
+
+def witness_lines(event: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """This stop's witness lines, or None when there is no usable file - the signal to fall back.
+
+    A file that exists but yields NO parseable line is broken, not empty of events: treating [] as evidence
+    would read as "edited nothing, ran nothing" and allow a subagent's claims outright (and block the lead's).
+    Falling back on an absent file is routine and stays silent; an existing file that cannot be READ is a
+    genuinely broken state, so that one case says so on stderr - a hook that goes quiet is worse than one
+    that complains.
+    """
+    path = witness_path(event)
+    if path is None or not path.is_file():
+        return None
+    try:
+        lines = list(iter_witness(path))
+    except OSError as exc:
+        print(f"check-evidence: witness file unreadable ({exc}); using transcript.", file=sys.stderr)
+        return None
+    return lines or None
+
+
 def subagent_transcript(event: dict[str, Any]) -> Path | None:
     explicit = event.get("agent_transcript_path")
     if isinstance(explicit, str) and Path(explicit).is_file():
@@ -286,6 +436,25 @@ def subagent_transcript(event: dict[str, Any]) -> Path | None:
         for candidate in project_dir.rglob(f"agent-{agent_id}.jsonl"):
             return candidate
     return None
+
+
+def gather(event: dict[str, Any]) -> tuple[Evidence | None, str]:
+    """A subagent's evidence: its witness file when one exists, its transcript otherwise; (None, why) = fail open.
+
+    The fallback is silent on purpose (see the module docstring); `why` is only ever a broken-payload notice.
+    """
+    lines = witness_lines(event)
+    if lines is not None:
+        return evidence_from_witness(lines), ""
+    transcript = subagent_transcript(event)
+    if transcript is None:
+        return None, (
+            f"subagent transcript not found for agent_id={event.get('agent_id')!r}; allowing (claims unverified)."
+        )
+    try:
+        return read_transcript(transcript), ""
+    except OSError as exc:
+        return None, f"cannot read {transcript} ({exc}); allowing."
 
 
 def strip_negative_lines(message: str) -> str:
@@ -406,6 +575,30 @@ def decide_lead(message: str, turn: Evidence, session: Evidence) -> str | None:
     return None
 
 
+def gather_lead(event: dict[str, Any], prompt_id: str | None) -> tuple[tuple[Evidence, Evidence] | None, str]:
+    """The lead's (turn, session) evidence: its witness file when one exists, the session transcript otherwise.
+
+    Witness lines carry the `prompt_id` of the turn they happened in - the same id the Stop payload carries -
+    so the turn is a filter here rather than the transcript's slice between two user prompts. A payload with
+    NO `prompt_id` gets an empty turn: the last `prompt_id` in the file is the previous turn, whose edits and
+    runs were judged when it stopped, and re-judging them would bounce this turn for the last one's silence.
+    The session claims (rule B) are still checked, which is what an unattributable turn can honestly support.
+    Silent fallback, as for a subagent; `why` is only a broken-payload notice.
+    """
+    lines = witness_lines(event)
+    if lines is not None:
+        turn = evidence_from_witness(lines, prompt_id) if prompt_id else Evidence()
+        return (turn, evidence_from_witness(lines)), ""
+    path = Path(str(event.get("transcript_path") or ""))
+    if not path.is_file():
+        return None, f"session transcript not found ({path}); allowing (claims unverified)."
+    try:
+        records = list(iter_records(path))
+    except OSError as exc:
+        return None, f"cannot read {path} ({exc}); allowing."
+    return (evidence_from(turn_records(records, prompt_id)), evidence_from(records)), ""
+
+
 def main_lead(event: dict[str, Any]) -> int:
     if event.get("stop_hook_active") is True:
         return 0
@@ -413,17 +606,13 @@ def main_lead(event: dict[str, Any]) -> int:
     if not isinstance(message, str):
         print("check-evidence: --lead payload lacks last_assistant_message; allowing.", file=sys.stderr)
         return 0
-    path = Path(str(event.get("transcript_path") or ""))
-    if not path.is_file():
-        print(f"check-evidence: session transcript not found ({path}); allowing (claims unverified).", file=sys.stderr)
-        return 0
     prompt_id = event.get("prompt_id") if isinstance(event.get("prompt_id"), str) else None
-    try:
-        records = list(iter_records(path))
-    except OSError as exc:
-        print(f"check-evidence: cannot read {path} ({exc}); allowing.", file=sys.stderr)
+    gathered, why = gather_lead(event, prompt_id)
+    if gathered is None:
+        print(f"check-evidence: {why}", file=sys.stderr)
         return 0
-    reason = decide_lead(message, evidence_from(turn_records(records, prompt_id)), evidence_from(records))
+    turn, session = gathered
+    reason = decide_lead(message, turn, session)
     if reason is None:
         return 0
     print(f"Evidence check failed (lead).\n{reason}", file=sys.stderr)
@@ -468,17 +657,9 @@ def main() -> int:
         )
         return 0
 
-    transcript = subagent_transcript(event)
-    if transcript is None:
-        print(
-            f"check-evidence: subagent transcript not found for agent_id={agent_id!r}; allowing (claims unverified).",
-            file=sys.stderr,
-        )
-        return 0
-    try:
-        evidence = read_transcript(transcript)
-    except OSError as exc:
-        print(f"check-evidence: cannot read {transcript} ({exc}); allowing.", file=sys.stderr)
+    evidence, why = gather(event)
+    if evidence is None:
+        print(f"check-evidence: {why}", file=sys.stderr)
         return 0
 
     reason = decide(message, evidence)
