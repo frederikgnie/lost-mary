@@ -43,6 +43,66 @@ never versioned, never hand-edited.
 - **One canonical statement of the procedure** - in `skills/lost-mary/SKILL.md`.
   Do not restate it in the README or the roles.
 
+## Measuring whether the roles and skills change anything
+
+`tests/` proves the hook *scripts* behave. Nothing proved that the agents and
+skills change an **outcome** rather than merely reading well. `claude plugin
+eval` is what answers that: it runs each case with the plugin and again without
+it, and reports the delta.
+
+`.claude-plugin/plugin.json` makes this repository an eval target and
+`hooks/hooks.json` carries the wiring from `settings.example*.json` rewritten
+to `${CLAUDE_PLUGIN_ROOT}`, so the plugin arm fires the same hooks an installed
+copy does. This is **additive**: `install.sh` / `install.ps1` remain the
+supported way to use the library and are untouched.
+
+**Stage first; do not run it from the repository root.** The harness refuses a
+plugin in which any file has more than one name, it scans the whole plugin root,
+and it does not honour `.gitignore` - so a `uv`-created `.venv` (475 hard links
+out of its cache here) aborts every run with "a file in the plugin has more than
+one name (a hard link)". `evals/stage.ps1` and `evals/stage.sh` copy the six
+directories that *are* plugin content to a temp dir, fail loudly if a hard link
+survives the copy, and print the path:
+
+```powershell
+claude plugin eval (./evals/stage.ps1) --allow-tools Write --no-publish
+```
+
+**Read the delta, not the score.** A case that scores 1.0 with the plugin *and*
+1.0 without it means the plugin is not what made it pass - the model would have
+done that anyway - so the case needs sharpening or retiring. Graders marked
+`arm: with-only` are a plugin-fired indicator, not part of the score.
+
+Four cases live in `evals/<case>/prompt.md` with `evals/<case>/graders/*.md`;
+each `runs:` value carries a comment saying why it is what it is. Before adding
+one:
+
+- **No case may need `Bash`.** Granting it requires an OS sandbox backend and
+  native Windows has none, so a Bash-granting case only runs under WSL2.
+  `--allow-tools Write` is needed for `evidence-in-report`, which writes files.
+- **Tools follow graders.** A grader that implies a side effect only passes if
+  the case's `allowed_tools` permits the tool that produces it *and* the
+  operator granted it.
+- **Hooks need `python3` on `PATH`.** A versioned manifest cannot carry the
+  absolute `python.exe` path `settings.example.windows.json` needs, so on a
+  machine without `python3` the plugin's hooks fail open and the run measures
+  the agents and skills only.
+- Results land in `evals/results/` and are git-ignored, like every other piece
+  of runtime state.
+
+**First reading, 2026-09-15 (2.1.272), `spawn-contract`, 1 run per arm, $0.73.**
+`with 0.00  without 0.00  delta 0.00`, both arms failing `contract-fields` with
+"Agent called 0x". The harness works; the case does not yet. The prompt tells
+the model the checkout "is not on this machine", which makes delegating work on
+files that cannot exist the obviously futile move, so a sensible model describes
+the brief instead of spawning - and a grader keyed on `tool_used: Agent` scores
+that zero. Either scaffold a real file so delegation is worth doing, or grade
+the brief in `last_message` and stop asserting the tool call. Diagnosing the
+next iteration needs `--keep-temp` (the run sandbox holding `trace.jsonl` is
+deleted on success) or `--verbose --debug-file`. Budget it: one case, one run
+per arm, is roughly $0.73, so a four-case suite at the default three runs is
+about $9 per full reading.
+
 ## GitHub account convention
 
 This repository lives under the personal `frederikgnie` GitHub account, not the
