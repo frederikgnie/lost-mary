@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +40,7 @@ PERMIT = ROOT / "scripts" / "permit.py"
 NOPUNT = ROOT / "scripts" / "no-punt.py"
 FRICTION = ROOT / "scripts" / "friction.py"
 LEDGERPY = ROOT / "scripts" / "ledger.py"
+WITNESS = ROOT / "scripts" / "witness.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -347,6 +349,13 @@ print("check-evidence.py - SubagentStop claims vs transcript")
 EV = SCRATCH / "evidence"
 PROJECT = EV / "proj"
 PROJECT.mkdir(parents=True)
+# EVIDENCE_ROOT override for every hook child spawned from here on (run_hook inherits this process's
+# environment): check-evidence prefers the witness file over the transcript, and must never read - or let
+# witness.py write - under the real ~/.claude. Empty until a case fills it, so every existing case below
+# is the "no witness file -> transcript" fallback.
+CEROOT = EV / "witness-root"
+assert not str(CEROOT).startswith(str(Path.home() / ".claude")), "check-evidence tests must stay out of ~/.claude"
+os.environ["EVIDENCE_ROOT"] = str(CEROOT)
 
 
 def tool_use(uid: str, name: str, inp: dict[str, object]) -> dict[str, object]:
@@ -722,6 +731,222 @@ for text, want in [
     ("12 passed", False),
 ]:
     expect_true(f"reports_failure({text!r}) == {want}", ce.reports_failure(text) is want, text)
+
+# ----------------------------------------------------------- check-evidence from the witness file
+# Everything above ran with an empty EVIDENCE_ROOT, i.e. through the transcript fallback. These cases put a
+# witness file (scripts/witness.py's format) where the hook looks for one; the transcript then loses every
+# disagreement, because it is the file the docs call internal and "written asynchronously".
+print()
+print("check-evidence.py - the witness file is preferred over the transcript")
+WPROMPT = "prompt-1"
+
+
+def wline(
+    tool: str,
+    *,
+    command: str | None = None,
+    file_path: str | None = None,
+    text: str = "",
+    event: str = "PostToolUse",
+    error: str | None = None,
+    interrupted: bool = False,
+    exit_code: int | None = None,
+    prompt_id: str | None = WPROMPT,
+) -> dict[str, object]:
+    """One witness line, every schema key present - the shape the witness section below pins."""
+    return {
+        "v": 1,
+        "t": "2026-09-15T12:00:00Z",
+        "event": event,
+        "session_id": "s",
+        "prompt_id": prompt_id,
+        "agent_id": None,
+        "agent_type": None,
+        "tool_use_id": f"toolu_{uuid.uuid4().hex[:8]}",
+        "tool": tool,
+        "command": command,
+        "file_path": file_path,
+        "exit_code": exit_code,
+        "interrupted": interrupted,
+        "text": text,
+        "error": error,
+    }
+
+
+def wedit(path: str, prompt_id: str | None = WPROMPT) -> dict[str, object]:
+    return wline("Edit", file_path=path, prompt_id=prompt_id)
+
+
+def wrun(command: str, text: str, prompt_id: str | None = WPROMPT) -> dict[str, object]:
+    return wline("Bash", command=command, text=text, prompt_id=prompt_id)
+
+
+def wfail(command: str, error: str, prompt_id: str | None = WPROMPT) -> dict[str, object]:
+    """A non-zero exit: witness records it as PostToolUseFailure with the output in `error` and `text`."""
+    return wline("Bash", command=command, event="PostToolUseFailure", text=error, error=error, prompt_id=prompt_id)
+
+
+def witness_for(session: str, agent: str | None, lines: list[object]) -> None:
+    """Write a witness file where check-evidence looks for this session's calls; a str line is written raw."""
+    path = CEROOT / session / (f"agent-{agent}.jsonl" if agent else "lead.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"{x if isinstance(x, str) else json.dumps(x)}\n" for x in lines)
+    path.write_text(body, encoding="utf-8")
+
+
+p, a = make_session([*edit("src/x.py")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("transcript has the edit but not the run (the lag) -> block", rc, BLOCK, err)
+witness_for(p.stem, a, [wedit("src/x.py"), wrun("pytest tests -q", "12 passed in 0.4s")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("  ... same transcript, but the witness file has the run -> allow", rc, ALLOW, err)
+expect_true("  ... and the fallback is silent: nothing on stderr", err == "", err)
+
+p, a = make_session([*edit("src/x.py"), *bash("pytest tests -q", "Exit code 1\n1 failed", ok=False)])
+witness_for(p.stem, a, [wedit("src/x.py"), wrun("pytest tests -q", "12 passed in 0.4s")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("transcript says failed, witness says passed -> the witness file wins -> allow", rc, ALLOW, err)
+
+p, a = make_session([*edit("src/x.py"), *bash("pytest tests -q", "12 passed in 0.4s")])
+witness_for(p.stem, a, [wedit("src/x.py"), wfail("pytest tests -q", "Exit code 1\n1 failed, 2 passed")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("transcript says passed, a Failure event says otherwise -> block", rc, BLOCK, err)
+expect_true("  ... the reason quotes the run the witness file recorded", "pytest tests -q" in err, err)
+
+p, a = make_session([*edit("src/x.py")])
+cut_off = wline("Bash", command="pytest tests -q", text="12 passed", interrupted=True)
+witness_for(p.stem, a, [wedit("src/x.py"), cut_off])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("an interrupted run is not a pass, whatever its output already said -> block", rc, BLOCK, err)
+
+p, a = make_session([*edit("src/x.py")])
+witness_for(p.stem, a, [wedit("src/x.py"), wrun("pytest tests -q", "12 passed in 0.4s")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("a success with exit_code null is a pass (Bash sends none) -> allow", rc, ALLOW, err)
+
+p, a = make_session([*edit("src/x.py")])
+witness_for(
+    p.stem,
+    a,
+    [
+        wedit("src/x.py"),
+        '{"v":1,"event":"PostToolUse","tool":"Bas',
+        json.dumps({"tool": "Bash", "command": "pytest tests -q"}),
+        wrun("pytest tests -q", "12 passed in 0.4s"),
+    ],
+)
+rc, err = run_hook(EVIDENCE, stop_event(p, a, CLAIM))
+expect("a torn line and a line without the schema keys are skipped; the valid ones decide -> allow", rc, ALLOW, err)
+
+p, a = make_session([])
+witness_for(p.stem, a, [wedit("src/only-in-witness.py")])
+rc, err = run_hook(EVIDENCE, stop_event(p, a, "Done."))
+expect("a witness Edit line is a confirmed edit: changed, ran nothing -> block", rc, BLOCK, err)
+expect_true("  ... naming the file only the witness file knew about", "src/only-in-witness.py" in err, err)
+witness_for(p.stem, a, [wedit("src/only-in-witness.py"), wrun("pytest tests -q", "12 passed")])
+rc, err = run_hook(
+    EVIDENCE,
+    stop_event(p, a, "CHANGED: src/only-in-witness.py (+2/-0)\nRAN: `pytest tests -q` -> 12 passed\nDONE MEANS: met"),
+)
+expect("  ... with a run behind it, the CHANGED claim naming that file is accepted", rc, ALLOW, err)
+
+# --lead: the turn is the witness lines carrying the payload's prompt_id; the session is the whole file.
+ls = lead_session(("t1", "fix it", [*edit("src/x.py")]), ("t2", "so?", []))
+witness_for("leadses1", None, [wedit("src/x.py", "t1"), wrun("pytest tests -q", "12 passed", "t1")])
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t2", "All 12 tests pass.", session_id="leadses1"), "--lead")
+expect("lead: claim in turn 2 backed by turn 1's run in the same file -> allow", rc, ALLOW, err)
+expect_true("  ... silently, without touching the transcript that shows no run", err == "", err)
+
+witness_for(
+    "leadses2",
+    None,
+    [wedit("src/x.py", "t1"), wrun("pytest tests -q", "12 passed", "t1"), wedit("src/y.py", "t2")],
+)
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t2", "Updated the loader.", session_id="leadses2"), "--lead")
+expect("lead: turn 2 edited and ran nothing, turn 1's run does not count for rule C -> block", rc, BLOCK, err)
+expect_true("  ... naming this turn's file only", "src/y.py" in err and "src/x.py" not in err, err)
+rc, err = run_hook(EVIDENCE, lead_event(ls, None, "Updated the loader.", session_id="leadses2"), "--lead")
+expect("lead: no prompt_id in the payload -> the last turn in the file -> block", rc, BLOCK, err)
+
+ls = lead_session(("t1", "fix it", [*edit("src/x.py"), *bash("pytest tests -q", "Exit code 1\n1 failed", ok=False)]))
+witness_for("leadses3", "someagent", [wrun("pytest tests -q", "12 passed", "t1")])
+rc, err = run_hook(EVIDENCE, lead_event(ls, "t1", "Fixed the loader; all good.", session_id="leadses3"), "--lead")
+expect("lead: no lead.jsonl (a sibling agent file is not one) -> the transcript decides -> block", rc, BLOCK, err)
+
+wit = load_module(WITNESS, "witness_mod")
+expect_true(
+    "check-evidence and witness agree on EVIDENCE_ROOT, its default and the id pattern",
+    (ce.EVIDENCE_ROOT_ENV, ce.DEFAULT_EVIDENCE_ROOT, ce.ID_OK.pattern)
+    == (wit.EVIDENCE_ROOT_ENV, wit.DEFAULT_ROOT, wit.ID_OK.pattern),
+    f"{ce.DEFAULT_EVIDENCE_ROOT} vs {wit.DEFAULT_ROOT}",
+)
+
+# End to end: the real witness.py writes, the real check-evidence.py reads. This is the contract between them.
+E2E_SESSION, E2E_AGENT = "e2esession", "e2eagent"
+
+
+def witness_payload(tool: str, *, event: str = "PostToolUse", **fields: object) -> dict[str, object]:
+    """A PostToolUse / PostToolUseFailure payload in the shape measured on 2.1.272 (see capabilities.md)."""
+    return {
+        "hook_event_name": event,
+        "session_id": E2E_SESSION,
+        "prompt_id": "p-e2e",
+        "agent_id": E2E_AGENT,
+        "agent_type": "implement",
+        "tool_use_id": f"toolu_{uuid.uuid4().hex[:8]}",
+        "tool_name": tool,
+        "cwd": str(ROOT),
+        "tool_input": {},
+        **fields,
+    }
+
+
+E2E_STOP = stop_event(
+    PROJECT / "no-such-session.jsonl",
+    E2E_AGENT,
+    "CHANGED: src/e2e.py (+1/-0)\nRAN: `pytest -q` -> 3 passed\nDONE MEANS: met\nRISKS: none",
+    session_id=E2E_SESSION,
+)
+rc, err = run_hook(
+    WITNESS,
+    witness_payload(
+        "Edit",
+        tool_input={"file_path": "src/e2e.py", "old_string": "a", "new_string": "b"},
+        tool_response={"type": "update", "filePath": "src/e2e.py"},
+    ),
+)
+expect("e2e: witness.py records the Edit", rc, ALLOW, err)
+rc, err = run_hook(
+    WITNESS,
+    witness_payload(
+        "Bash",
+        tool_input={"command": "pytest -q"},
+        tool_response={"stdout": "3 passed in 0.2s", "stderr": "", "interrupted": False, "isImage": False},
+    ),
+)
+expect("e2e: witness.py records the passing run", rc, ALLOW, err)
+rc, err = run_hook(EVIDENCE, E2E_STOP)
+expect("e2e: check-evidence reads what witness wrote -> the honest report is allowed", rc, ALLOW, err)
+expect_true("  ... with no notice: the transcript was never needed (it does not exist)", err == "", err)
+rc, err = run_hook(
+    WITNESS,
+    witness_payload(
+        "Bash",
+        event="PostToolUseFailure",
+        tool_input={"command": "pytest -q"},
+        error="Exit code 1\ncollected 3 items\n1 failed, 2 passed",
+        is_interrupt=False,
+    ),
+)
+expect("e2e: witness.py records the later failure", rc, ALLOW, err)
+rc, err = run_hook(EVIDENCE, E2E_STOP)
+expect("e2e: that failure is now the last test run -> the same claim is blocked", rc, BLOCK, err)
+expect_true("  ... quoting what witness captured", "1 failed" in err, err)
+rc, err = run_hook(
+    EVIDENCE,
+    {**E2E_STOP, "last_assistant_message": "CHANGED: src/e2e.py\nRAN: `pytest -q` -> 1 failed\nDONE MEANS: not met"},
+)
+expect("e2e: the honest report of that failure is allowed", rc, ALLOW, err)
 
 # --------------------------------------------------------------------------- no-ask
 print()
@@ -2059,6 +2284,277 @@ expect("garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode()
 proc = subprocess.run([sys.executable, str(LEDGERPY)], input=b"{}", capture_output=True, env=LENV)
 expect("no mode -> exit 0 with usage on stderr", proc.returncode, ALLOW, proc.stderr.decode())
 expect_true("... usage names both modes", "record|recall" in proc.stderr.decode(), proc.stderr.decode())
+
+# --------------------------------------------------------------------------- witness
+print()
+print("witness.py - PostToolUse / PostToolUseFailure evidence lines")
+WIT = SCRATCH / "witness"
+WROOT = WIT / "evidence"  # EVIDENCE_ROOT override: the tests never write under the real ~/.claude
+WENV = {**os.environ, "EVIDENCE_ROOT": str(WROOT)}
+assert not str(WROOT).startswith(str(Path.home() / ".claude")), "witness tests must stay out of ~/.claude"
+BASH_OK = {"interrupted": False, "isImage": False, "noOutputExpected": False}
+
+
+def witness_event(
+    tool: str,
+    *,
+    session: str = "s1",
+    agent: str | None = None,
+    tool_input: dict[str, object] | None = None,
+    response: object = None,
+    error: str | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    """A PostToolUse / PostToolUseFailure payload in the shape measured on 2.1.272 (see capabilities.md)."""
+    payload: dict[str, object] = {
+        "hook_event_name": "PostToolUseFailure" if error is not None else "PostToolUse",
+        "session_id": session,
+        "prompt_id": "prompt-1",
+        "tool_use_id": "toolu_w1",
+        "tool_name": tool,
+        "cwd": str(REPO),
+        "permission_mode": "auto",
+        "tool_input": tool_input or {},
+    }
+    if agent is not None:  # a subagent's calls carry both; the lead's carry neither
+        payload["agent_id"] = agent
+        payload["agent_type"] = "implement"
+    if response is not None:
+        payload["tool_response"] = response
+    if error is not None:
+        payload["error"] = error
+    payload.update(extra)
+    return payload
+
+
+def witness_file(session: str = "s1", agent: str | None = None) -> Path:
+    return WROOT / session / (f"agent-{agent}.jsonl" if agent else "lead.jsonl")
+
+
+def witness_lines(session: str = "s1", agent: str | None = None) -> list[dict[str, object]]:
+    path = witness_file(session, agent)
+    if not path.is_file():
+        return []
+    raw = path.read_bytes().decode("utf-8")
+    return [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+
+WX = str(REPO / "src" / "w.py")
+edit_input: dict[str, object] = {"file_path": WX, "old_string": "a", "new_string": "b"}
+rc, err = run_hook(WITNESS, witness_event("Edit", tool_input=edit_input), env=WENV)
+expect("Edit -> exit 0", rc, ALLOW, err)
+rows = witness_lines()
+expect_true("a lead Edit is one line in lead.jsonl", len(rows) == 1, str(rows))
+row = rows[0] if rows else {}
+expect_true(
+    "... with v, event, tool, file_path and a null command",
+    row.get("v") == 1
+    and row.get("event") == "PostToolUse"
+    and row.get("tool") == "Edit"
+    and row.get("file_path") == WX
+    and row.get("command") is None,
+    str(row),
+)
+expect_true(
+    "... every schema key is present, ids included",
+    set(row)
+    == {
+        "v",
+        "t",
+        "event",
+        "session_id",
+        "prompt_id",
+        "agent_id",
+        "agent_type",
+        "tool_use_id",
+        "tool",
+        "command",
+        "file_path",
+        "exit_code",
+        "interrupted",
+        "text",
+        "error",
+    }
+    and row.get("session_id") == "s1"
+    and row.get("prompt_id") == "prompt-1"
+    and row.get("agent_id") is None
+    and row.get("tool_use_id") == "toolu_w1",
+    str(row),
+)
+expect_true(
+    "... timestamped to the second in UTC", str(row.get("t", "")).endswith("Z") and "T" in str(row.get("t")), str(row)
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event(
+        "Bash",
+        tool_input={"command": "pytest -q"},
+        response={"stdout": "12 passed in 0.4s", "stderr": "warn: slow", **BASH_OK},
+    ),
+    env=WENV,
+)
+expect("Bash success -> exit 0", rc, ALLOW, err)
+rows = witness_lines()
+row = rows[-1] if rows else {}
+expect_true("two calls -> two lines, both parse", len(rows) == 2, str(rows))
+expect_true(
+    "a successful Bash call records its command, stdout+stderr, and no exit code",
+    row.get("command") == "pytest -q"
+    and row.get("text") == "12 passed in 0.4s\nwarn: slow"
+    and row.get("exit_code") is None
+    and row.get("error") is None
+    and row.get("interrupted") is False
+    and row.get("file_path") is None,
+    str(row),
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event(
+        "Bash", tool_input={"command": "pytest -q"}, error="Exit code 1\n1 failed, 2 passed", is_interrupt=False
+    ),
+    env=WENV,
+)
+expect("Bash failure -> exit 0", rc, ALLOW, err)
+row = witness_lines()[-1]
+expect_true(
+    "a non-zero exit arrives as PostToolUseFailure: exit code parsed, output kept in text and error",
+    row.get("event") == "PostToolUseFailure"
+    and row.get("exit_code") == 1
+    and row.get("text") == "Exit code 1\n1 failed, 2 passed"
+    and row.get("error") == row.get("text"),
+    str(row),
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event("Bash", tool_input={"command": "sleep 300"}, error="Exit code 143", is_interrupt=True),
+    env=WENV,
+)
+expect("interrupted failure -> exit 0", rc, ALLOW, err)
+expect_true(
+    "is_interrupt on the payload becomes interrupted on the line", witness_lines()[-1].get("interrupted") is True, ""
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event(
+        "Write",
+        agent="a2930f3e80ad5d652",
+        tool_input={"file_path": WX, "content": "x = 1\n"},
+        response={"type": "create", "filePath": WX, "content": "x = 1\n", "userModified": False},
+    ),
+    env=WENV,
+)
+expect("subagent Write -> exit 0", rc, ALLOW, err)
+sub = witness_lines(agent="a2930f3e80ad5d652")
+expect_true(
+    "a subagent's calls land in agent-<id>.jsonl, not lead.jsonl", len(sub) == 1 and len(witness_lines()) == 4, str(sub)
+)
+expect_true(
+    "... carrying agent_id and agent_type, with filePath as the target and no file content",
+    sub[0].get("agent_id") == "a2930f3e80ad5d652"
+    and sub[0].get("agent_type") == "implement"
+    and sub[0].get("file_path") == WX
+    and sub[0].get("text") == "",
+    str(sub),
+)
+
+before = sorted(p.name for p in (WROOT / "s1").iterdir())
+rc, err = run_hook(
+    WITNESS, witness_event("Read", tool_input={"file_path": WX}, response={"file": {"numLines": 3}}), env=WENV
+)
+expect("a tool outside the recorded set -> exit 0", rc, ALLOW, err)
+expect_true(
+    "... and writes nothing (belt and braces behind the matcher)",
+    sorted(p.name for p in (WROOT / "s1").iterdir()) == before and len(witness_lines()) == 4,
+    err,
+)
+
+proc = subprocess.run([sys.executable, str(WITNESS)], input=b"\xef\xbb\xbfnot json", capture_output=True, env=WENV)
+expect("garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true(
+    "... with a witness: notice on stderr and nothing recorded",
+    "witness:" in proc.stderr.decode() and len(witness_lines()) == 4,
+    proc.stderr.decode(),
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event(
+        "Bash",
+        tool_input={"command": "ruff check ."},
+        response={"stdout": "All checks passed!", "stderr": "", **BASH_OK},
+    ),
+    bom=True,
+    env=WENV,
+)
+expect("BOM-prefixed payload -> exit 0", rc, ALLOW, err)
+expect_true(
+    "... and is recorded (a PowerShell pipe prepends one)",
+    witness_lines()[-1].get("command") == "ruff check .",
+    str(witness_lines()[-1]),
+)
+
+rc, err = run_hook(
+    WITNESS,
+    witness_event("Bash", session="../evil", tool_input={"command": "echo hi"}, response={"stdout": "hi", **BASH_OK}),
+    env=WENV,
+)
+expect("a session_id that is a path traversal -> exit 0", rc, ALLOW, err)
+expect_true(
+    "... refused with a notice, nothing written outside the sandbox root",
+    "witness:" in err and not (WIT / "evil").exists() and sorted(p.name for p in WROOT.iterdir()) == ["s1"],
+    err + " / " + str(sorted(p.name for p in WROOT.iterdir())),
+)
+rc, err = run_hook(
+    WITNESS,
+    witness_event("Bash", agent="../evil", tool_input={"command": "echo hi"}, response={"stdout": "hi", **BASH_OK}),
+    env=WENV,
+)
+expect("an agent_id that is a path traversal -> exit 0", rc, ALLOW, err)
+expect_true("... refused as well", "witness:" in err and len(witness_lines()) == 5, err)
+
+long_out = "HEADMARK" + ("x" * 5000) + "TAILMARK"
+rc, err = run_hook(
+    WITNESS,
+    witness_event("Bash", tool_input={"command": "pytest -q"}, response={"stdout": long_out, "stderr": "", **BASH_OK}),
+    env=WENV,
+)
+expect("5000-char stdout -> exit 0", rc, ALLOW, err)
+row = witness_lines()[-1]
+text = str(row.get("text", ""))
+expect_true(
+    "long output keeps its head and its TAIL (the summary is at the end), with the middle elided",
+    text.startswith("HEADMARK") and text.endswith("TAILMARK") and " ... " in text and len(text) == 1805,
+    text[:80] + " | " + text[-40:],
+)
+expect_true(
+    "... and the whole line stays under 4000 bytes",
+    max(len(line) for line in witness_file().read_bytes().splitlines()) < 4000,
+    str(max(len(line) for line in witness_file().read_bytes().splitlines())),
+)
+
+stale = WROOT / "stale-session"
+fresh = WROOT / "fresh-session"
+for directory, age_days in ((stale, 20), (fresh, 2)):
+    directory.mkdir(parents=True)
+    (directory / "lead.jsonl").write_text('{"v": 1}\n', encoding="utf-8")
+    old = datetime.now(UTC).timestamp() - age_days * 86400
+    os.utime(directory / "lead.jsonl", (old, old))
+    os.utime(directory, (old, old))
+rc, err = run_hook(
+    WITNESS,
+    witness_event("Bash", session="s2", tool_input={"command": "echo hi"}, response={"stdout": "hi", **BASH_OK}),
+    env=WENV,
+)
+expect("a new session directory -> exit 0", rc, ALLOW, err)
+expect_true(
+    "creating a session directory prunes siblings older than EVIDENCE_KEEP_DAYS, keeps the recent ones",
+    not stale.exists() and fresh.exists() and (WROOT / "s2" / "lead.jsonl").is_file(),
+    str(sorted(p.name for p in WROOT.iterdir())),
+)
 
 nuke(SCRATCH)
 
