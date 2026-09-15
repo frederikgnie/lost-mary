@@ -9,10 +9,12 @@ there multiply or ship. `implement` on opus - execution, caught by the spawn
 contract, the hooks and the tests. Never sonnet for code. Pass `model:` on a
 spawn only to move off those defaults, and say why.
 
-If fable runs out it does NOT fall back: `fallbackModel` excludes usage limits,
-and the Fable cap raises a usage-credits consent prompt that Remote Control
-cannot display, so the session just stops answering. Recovery: `/model opus`
-first (works from the phone), then answering at the desktop, then the weekly
-reset. While fable is out, spawn explore and review with `model: opus`.
+The lead consumes the weekly budget, not the subagents - so the lead runs on
+fable too (`/model fable` persists as the new default). It frames, routes and
+judges evidence; it executes nothing.
 
-The lead session, not the subagents, consumes the weekly budget.
+Nothing switches model when an allowance runs out. `fallbackModel` covers
+overload and unavailable only, no hook can set a model, and the Fable cap
+raises a usage-credits consent prompt that Remote Control cannot display - so
+the session just stops answering. Recovery is manual: `/model opus` (works from
+the phone). While fable is out, spawn explore and review with `model: opus`.
