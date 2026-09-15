@@ -1117,8 +1117,14 @@ def refused(uid: str, command: str) -> list[dict[str, object]]:
     return [assistant(tool_use(uid, "Bash", {"command": command})), result(uid, text, is_error=True)]
 
 
-def said(text: str) -> dict[str, object]:
-    return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+def said(text: str, when: str = "") -> dict[str, object]:
+    record: dict[str, object] = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+    if when:  # every real record carries one; friction dates its findings from it, not from the mtime
+        record["timestamp"] = when
+    return record
 
 
 def jsonl(records: list[dict[str, object]]) -> str:
@@ -1132,8 +1138,8 @@ def jsonl(records: list[dict[str, object]]) -> str:
             ask(True),
             ask(False),
             *refused("r1", "cd /repo && EU_env/.venv/Scripts/python.exe -m pytest -q"),
-            said("Done. I'll leave the flaky test for you."),
-            said("Done. I'll leave the flaky test for you."),  # streamed twice - one hand-back
+            said("Done. I'll leave the flaky test for you.", "2026-09-04T09:12:00.000Z"),
+            said("Done. I'll leave the flaky test for you.", "2026-09-04T09:12:01.000Z"),  # streamed - one hand-back
             assistant(
                 tool_use(
                     "q9",
@@ -1158,6 +1164,7 @@ def jsonl(records: list[dict[str, object]]) -> str:
             prose("do y"),
             *refused("r2", "# restart the run role\n$p = Get-Process -Id 1\nStop-ScheduledTask -TaskName OBF-run"),
             said("All fixed; FOUND: a.py - typo, fixed."),
+            said("Shipped. I'll leave the release notes for you.", "2026-09-10T15:30:00.000Z"),
         ]
     ),
     encoding="utf-8",
@@ -1188,11 +1195,24 @@ expect_true(
     and data["refused_commands"].get("Stop-ScheduledTask") == 1,
     str(data),
 )
-expect_true("one hand-back (streamed twice); the FOUND: line is not one", data["hand_backs"] == 1, str(data))
+expect_true("two hand-backs (one streamed twice); the FOUND: line is not one", data["hand_backs"] == 2, str(data))
 expect_true(
     "the example names the matched phrase",
-    data["hand_back_examples"] and "leave the flaky test for you" in data["hand_back_examples"][0],
+    any("leave the flaky test for you" in e for e in data["hand_back_examples"]),
     str(data),
+)
+# Dating: an undated hand-back reads as a live one. The example carries the record's own date, the most
+# recent comes first, and the reported window is the span of the records - not of the files' mtimes.
+expect_true(
+    "hand-back examples are dated and newest-first",
+    data["hand_back_examples"][0].startswith("2026-09-10  [c--repo-b]")
+    and data["hand_back_examples"][1].startswith("2026-09-04  [c--repo-a]"),
+    str(data["hand_back_examples"]),
+)
+expect_true(
+    "the window comes from the record timestamps, not the file mtimes",
+    data["first"] == "2026-09-04" and data["last"] == "2026-09-10",
+    f"{data['first']}..{data['last']}",
 )
 expect_true(
     "dead allow rules: exact Bash entries only",
@@ -1232,20 +1252,95 @@ out = proc.stdout.decode("utf-8", "replace")
 expect_true(
     "--history lists the saved reading", proc.returncode == 0 and "recorded (UTC)" in out and out.count("\n") >= 1, out
 )
+# A reading saved by an older version knows none of today's keys. A new column that raises on it would
+# take the whole comparison table down, which is the one thing the saved readings exist for.
+(FR / "readings" / "20260906T210740Z.json").write_text(
+    json.dumps(
+        {
+            "sessions": 40,
+            "first": "2026-09-02",
+            "last": "2026-09-06",
+            "questions": 9,
+            "recommended": 4,
+            "blocked": 1,
+            "refusals": 12,
+            "hand_backs": 8,
+            "allow_total": 45,
+            "dead_allow": ["Bash(git push)"],
+            "refused_commands": {"git": 3},
+            "refused_tools": {"Bash": 12},
+            "projects": {},
+            "hand_back_examples": ["[c--repo-a] 'leave that for you'"],
+            "notes": [],
+            "recorded_at": "2026-09-06T21:07:40Z",
+        }
+    ),
+    encoding="utf-8",
+)
+proc = subprocess.run([sys.executable, str(FRICTION), "--history"], capture_output=True, env=fr_env)
+out = proc.stdout.decode("utf-8", "replace")
+rows = [line for line in out.splitlines() if line and not line.startswith("recorded (UTC)")]
+expect("--history over a pre-schema reading exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true(
+    "... and renders BOTH rows, the old one included",
+    len(rows) == 2 and any(r.startswith("2026-09-06T21:07:40Z") for r in rows) and "unexpected error" not in out,
+    out,
+)
 
 
-# Hook health: Claude Code records each firing as an `attachment`; exit 2 is a deliberate block, exit 0 with
-# stderr is a hook that failed OPEN and explained itself where nobody looks. Both must be counted.
-def hook_record(event: str, code: object, stderr: str = "") -> dict[str, object]:
+# Hook firings, in the THREE shapes Claude Code really writes (verified 2026-09-15 against
+# ~/.claude/projects on 2.1.260 - 222 blocking errors, 86 successes, 34 additional-context records).
+# The keys differ per shape: `hook_blocking_error` carries NO exitCode - the block text and the hook's
+# own command line live under `blockingError` - `hook_success` carries command/exitCode/stdout/stderr,
+# and `hook_additional_context` carries only `content`. The fixture here used to be an invented
+# `{"type": "hook", "exitCode": 2}`, which is why "blocks: exitCode == 2" shipped green while friction
+# reported 0 blocks through 222 real ones. Keep these shapes tied to a real transcript.
+HOOK_CMD = '"C:/py/python.exe" "C:/Users/x/.claude/agent-library/scripts/{}" {}'  # quoted paths, then args
+
+
+def blocked_by(event: str, script: str, args: str, text: str, when: str) -> dict[str, object]:
     return {
         "type": "attachment",
+        "timestamp": when,
         "attachment": {
-            "type": "hook",
-            "hookEvent": event,
+            "type": "hook_blocking_error",
             "hookName": f"{event}:x",
-            "exitCode": code,
+            "toolUseID": "toolu_01",
+            "hookEvent": event,
+            "blockingError": {"blockingError": text, "command": HOOK_CMD.format(script, args)},
+        },
+    }
+
+
+def hook_ok(event: str, script: str, args: str, when: str, stderr: str = "") -> dict[str, object]:
+    return {
+        "type": "attachment",
+        "timestamp": when,
+        "attachment": {
+            "type": "hook_success",
+            "hookName": f"{event}:x",
+            "toolUseID": "toolu_02",
+            "hookEvent": event,
+            "command": HOOK_CMD.format(script, args),
+            "content": "",
+            "durationMs": 21,
+            "exitCode": 0,
             "stdout": "",
             "stderr": stderr,
+        },
+    }
+
+
+def hook_context(event: str, when: str) -> dict[str, object]:
+    return {
+        "type": "attachment",
+        "timestamp": when,
+        "attachment": {
+            "type": "hook_additional_context",
+            "hookName": event,
+            "toolUseID": "toolu_03",
+            "hookEvent": event,
+            "content": ["Ledger for c--repo-a - what agents actually edited and ran."],
         },
     }
 
@@ -1253,11 +1348,13 @@ def hook_record(event: str, code: object, stderr: str = "") -> dict[str, object]
 (PROJ_A / "s3.jsonl").write_text(
     jsonl(
         [
-            hook_record("PostToolUse", None),
-            hook_record("Stop", 2, "Nothing is left on the table (no-punt)."),
-            hook_record("Stop", 0, "check-evidence: payload lacks ['agent_id']; allowing."),
-            hook_record("SubagentStart", 0, "ledger: usage: ledger.py record|recall|attach"),
-            hook_record("SessionStart", 0),
+            blocked_by("PostToolUse", "pycheck.py", "--hook", "pycheck: 11 in a.py", "2026-09-14T08:00:00.0Z"),
+            blocked_by("PostToolUse", "pycheck.py", "--hook", "pycheck: 2 in b.py", "2026-09-15T08:30:00.0Z"),
+            blocked_by("Stop", "no-punt.py", "", "Nothing is left on the table (no-punt).", "2026-09-15T09:00:00.0Z"),
+            hook_ok("Stop", "check-evidence.py", "--lead", "2026-09-06T20:39:00.0Z", "check-evidence: lacks x."),
+            hook_ok("SubagentStart", "ledger.py", "brief", "2026-09-06T20:45:00.0Z", "ledger: usage: record|recall"),
+            hook_ok("SessionStart", "ledger.py", "recall", "2026-09-15T09:30:00.0Z"),
+            hook_context("SubagentStart", "2026-09-15T09:31:00.0Z"),
         ]
     ),
     encoding="utf-8",
@@ -1265,12 +1362,24 @@ def hook_record(event: str, code: object, stderr: str = "") -> dict[str, object]
 proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--json"], capture_output=True)
 data = json.loads(proc.stdout.decode("utf-8"))
 expect_true(
-    "hook fires counted per event",
-    data["hook_fires"].get("Stop") == 2 and data["hook_fires"].get("PostToolUse") == 1,
+    "hook fires counted per event, all three shapes",
+    data["hook_fires"].get("PostToolUse") == 2
+    and data["hook_fires"].get("Stop") == 2
+    and data["hook_fires"].get("SubagentStart") == 2,
     str(data.get("hook_fires")),
 )
+# The regression test for "0 blocks while pycheck blocked 222 edits": a blocking error has no exitCode,
+# so any test on exitCode counts none of them.
 expect_true(
-    "exit 2 counted as a block, not a notice", data["hook_blocks"].get("Stop") == 1, str(data.get("hook_blocks"))
+    "a hook_blocking_error is counted as a block, though it carries no exitCode",
+    data["hook_blocks"].get("PostToolUse") == 2 and data["hook_blocks"].get("Stop") == 1,
+    str(data.get("hook_blocks")),
+)
+expect_true(
+    "blocks attributed to the script the hook command names",
+    data["hooks_seen"].get("pycheck.py --hook", {}).get("blocks") == 2
+    and data["hooks_seen"]["pycheck.py --hook"]["last"].startswith("2026-09-15"),
+    str(data.get("hooks_seen")),
 )
 notices = data["hook_notices"]
 expect_true("exit 0 with stderr counted as a fail-open notice", len(notices) == 2, str(notices))
@@ -1278,10 +1387,99 @@ expect_true(
     "... naming the event and the message", any(k.startswith("Stop: check-evidence") for k in notices), str(notices)
 )
 expect_true(
-    "a clean firing is neither a block nor a notice", not any("SessionStart" in k for k in notices), str(notices)
+    "each notice carries the date of its most recent occurrence",
+    all(v.startswith("2026-09-06") for v in data["hook_notice_last"].values()) and len(data["hook_notice_last"]) == 2,
+    str(data.get("hook_notice_last")),
+)
+expect_true(
+    "additional context and a quiet success are firings, not blocks or notices",
+    data["hooks_seen"].get("ledger.py recall", {}).get("fires") == 1
+    and data["hooks_seen"]["ledger.py recall"]["blocks"] == 0
+    and data["hooks_seen"].get("(SubagentStart)", {}).get("fires") == 1,
+    str(data.get("hooks_seen")),
 )
 out = subprocess.run([sys.executable, str(FRICTION), *fr_args], capture_output=True).stdout.decode("utf-8")
-expect_true("text report shows the hooks line and the notices", "hooks " in out and "fail-open notice" in out, out)
+expect_true(
+    "text report shows the hooks line, the per-hook table and the notices",
+    "hooks " in out and "fail-open notice" in out and "pycheck.py --hook" in out,
+    out,
+)
+
+# --since: two readings must be able to cover disjoint windows instead of double-counting the overlap.
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--json", "--since", "2026-09-15"], capture_output=True)
+expect("friction --since exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "--since drops the older records and is recorded in the reading",
+    data["since"] == "2026-09-15"
+    and data["hand_backs"] == 0
+    and data["hook_blocks"].get("PostToolUse") == 1
+    and not data["hook_notices"],
+    str({k: data[k] for k in ("since", "hand_backs", "hook_blocks", "hook_notices")}),
+)
+proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--since", "last tuesday"], capture_output=True)
+expect_true("a malformed --since is refused, not guessed", proc.returncode == 2, proc.stderr.decode())
+
+# --health: liveness comes from the wiring, not the transcripts. A hook that succeeds quietly leaves no
+# record at all, so silence must never be rendered as "dead".
+HEALTH = FR / "health"
+(HEALTH / "scripts").mkdir(parents=True)
+(HEALTH / "scripts" / "good-hook.py").write_text("import sys\n\nprint(sys.argv)\n", encoding="utf-8")
+health_settings = HEALTH / "settings.json"
+health_settings.write_text(
+    json.dumps(
+        {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": f'"py" "{HEALTH / "scripts" / "good-hook.py"}"'}],
+                    }
+                ],
+                "Stop": [{"hooks": [{"type": "command", "command": f'"py" "{HEALTH / "scripts" / "gone.py"}"'}]}],
+                "SessionStart": [
+                    {"matcher": "startup", "hooks": [{"type": "command", "command": 'cat "$HOME/x.md" || true'}]}
+                ],
+            }
+        }
+    ),
+    encoding="utf-8",
+)
+health_env = {**os.environ, "FRICTION_ROOT": str(FR / "health-readings")}
+proc = subprocess.run(
+    [
+        sys.executable,
+        str(FRICTION),
+        "--projects-dir",
+        str(FR / "projects"),
+        "--settings",
+        str(health_settings),
+        "--health",
+        "--record",
+    ],
+    capture_output=True,
+    env=health_env,
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect("friction --health exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+health_lines = [line for line in out.splitlines() if line.startswith("  ")]
+expect_true("--health reports one line per wired hook", len(health_lines) == 3, out)
+expect_true(
+    "a python hook that exists and parses is ok, and unseen is not called dead",
+    any("good-hook.py" in ln and "ok - exists, parses" in ln and "not seen - expected" in ln for ln in health_lines),
+    out,
+)
+expect_true(
+    "a wired script that is not on disk is broken",
+    any("gone.py" in ln and "BROKEN - script missing" in ln for ln in health_lines),
+    out,
+)
+expect_true(
+    "a non-python hook command is skipped, not broken",
+    any("skipped - not a python hook" in ln and "BROKEN" not in ln for ln in health_lines),
+    out,
+)
+expect_true("--health writes nothing, not even with --record", not (FR / "health-readings").exists(), out)
 
 # ---------------------------------------------------------------------------- ledger
 print()

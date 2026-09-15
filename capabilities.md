@@ -160,12 +160,37 @@ and depends on the same transcript shape as `check-evidence`.
 | ships Bash sandboxing on Windows | consider giving `explore` a read-only Bash for `git log`/`blame`; keep `review` without. |
 | ships per-agent `permissions` in settings | prefer that over tool omission where finer control is wanted. |
 
-**How to see whether a hook is actually working.** Claude Code records every firing in the session
-transcript as an `attachment` object carrying `hookEvent`, `hookName`, `exitCode`, `stdout` and `stderr`
-(observed 2026-09-06, not documented). Exit 2 is the hook blocking on purpose; **exit 0 with `stderr` is a
-hook that failed open and explained itself on a stream nobody reads** - a stale install or a wrong payload
-assumption hides there. `scripts/friction.py` counts both, so `friction.py --record` is also the hook
-health check. Two real defects were found this way on 2026-09-06, hours after they started: an installed
+**How to see whether a hook is actually working.** Claude Code records a firing in the session transcript
+as an `attachment` object - in **three shapes with different keys**, so a check written against one of
+them sees nothing of the other two (verified 2026-09-15 on 2.1.260 by direct inspection of
+`~/.claude/projects`; over the last 50 transcripts: 222, 86 and 34 records respectively).
+
+| `attachment.type` | keys | what it means |
+| --- | --- | --- |
+| `hook_blocking_error` | `blockingError`, `hookEvent`, `hookName`, `toolUseID`, `type` - **no `exitCode`, no `stderr`** | the hook blocked. The message and the hook's own command line are at `blockingError.blockingError` and `blockingError.command`. |
+| `hook_success` | `command`, `content`, `durationMs`, `exitCode`, `hookEvent`, `hookName`, `stderr`, `stdout`, `toolUseID`, `type` | the hook ran and printed something. **Exit 0 with `stderr` is a hook that failed open** and explained itself on a stream nobody reads - a stale install or a wrong payload assumption hides there. |
+| `hook_additional_context` | `content`, `hookEvent`, `hookName`, `toolUseID`, `type` - no `exitCode`, no `command` | the hook injected context (SessionStart, SubagentStart, `ledger attach`). Nothing is wrong; the only name it carries is `hookName`. |
+
+Two consequences worth holding on to. **A hook that succeeds quietly leaves no record at all** - `no-ask`
+allowing a menu, `pycheck` finding nothing - so silence in the transcripts is not evidence of a dead hook,
+and counting firings can never prove one is alive. `friction.py --health` answers liveness from the wiring
+instead: every command under `hooks[event][*].hooks[*].command` in `settings.json`, whether its script
+exists, whether it still parses (`ast.parse`, never an import - a health check must not run the thing it
+checks), and when that script was last seen firing; expected silence is reported as expected, never as
+"dead". Second, **a `PreToolUse` block reaches the model as `tool_result` text**, not as an attachment,
+which is why `friction.py` finds blocked menus by their message in the result body and counts them under
+`blocked` rather than under the hook blocks.
+
+Testing a block with `exitCode == 2` therefore matches nothing, ever. `scripts/friction.py` did exactly
+that until 2026-09-15 and reported "0 blocks" while `pycheck` had blocked 222 bad Python edits since
+09-03 - read, reasonably, as "the hooks are doing nothing". The fixture in `tests/test-hooks.py` had been
+invented rather than taken from a transcript, so the defect shipped green; it now pins all three real
+shapes, and findings carry the record's own `timestamp` so a problem fixed in September cannot keep
+reading as a live one. When the surface shifts again, re-derive it from a real transcript and update
+`scan_hook_record` together with those fixtures.
+
+`friction.py --record` remains the fail-open watch, now with dates on every notice. Two real defects were
+found this way on 2026-09-06, hours after they started: an installed
 `ledger.py` without `brief` (`usage:` on every `SubagentStart`) and an installed `check-evidence.py`
 without `--lead` (`payload lacks ['agent_id']` on every `Stop`). Both failed open, so nothing broke and
 nothing was reported - which is exactly why the counter exists.
