@@ -2,11 +2,15 @@
 type: tool_used
 tool: Agent
 min: 1
-weight: 1
+weight: 3
 input_match: '(?=[\s\S]*OWNED)(?=[\s\S]*OFF-LIMITS)(?=[\s\S]*DONE MEANS)(?=[\s\S]*VALIDATION)'
 ---
 
 At least one `Agent` call whose prompt carries all four scope fields.
+
+Three times the weight of `delegated`: with the package staged in the run's
+working directory and no Edit or Write in this session, spawning is close to
+forced, and what the spawn carries is the behaviour under test.
 
 The task text above supplies the raw material for each one - the file to change,
 the file that must not be touched, the behaviour that counts as done, the two

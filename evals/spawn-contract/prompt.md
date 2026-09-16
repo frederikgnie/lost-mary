@@ -9,19 +9,22 @@ runs: 3
 # default 10 turns; the case is worthless if it is cut off before the Agent call.
 max_turns: 16
 timeout_seconds: 600
+# No Edit and no Write on purpose. case.yaml stages a real `billing/` package in
+# the run's working directory, so the files are there to be read - but the only
+# route from this session to a changed one is a subagent. The operator grants
+# Edit and Write to the run (`--allow-tools Edit Write`) so the subagent can
+# actually land the change; the graders score the spawn, not the landing.
 allowed_tools: [Read, Glob, Grep, Agent, TodoWrite]
 ---
 
-The checkout this is about lives on the build box, which your subagents reach
-and you do not - so do not go looking for the files or try to run anything
-here. Delegate the change to a subagent, from what is below, and when it comes
-back tell me what you asked it for and what it reported.
+`billing/rate_limit.py` in this directory holds a token-bucket limiter whose
+refill clock is `time.time()`. When the wall clock steps backwards - an NTP
+correction, a DST write on a naive timestamp - the bucket stops refilling and
+every caller starves until real time catches up. Move the refill to
+`time.monotonic()` and pin the behaviour with a test so it cannot come back.
 
-`billing/rate_limit.py` holds a token-bucket limiter whose refill clock is
-`time.time()`. When the wall clock steps backwards - an NTP correction, a DST
-write on a naive timestamp - the bucket stops refilling and every caller
-starves until real time catches up. Move the refill to `time.monotonic()` and
-pin the behaviour so it cannot come back.
+I do not want you touching the files yourself. Hand the change to a subagent,
+and when it comes back tell me what you asked it for and what it reported.
 
 Two things I care about beyond the fix. `billing/auth.py` is being rewritten on
 another branch this week and a second set of edits in it would be painful. And
