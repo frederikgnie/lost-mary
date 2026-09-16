@@ -70,6 +70,10 @@ survives the copy, and print the path:
 claude plugin eval (./evals/stage.ps1) --allow-tools Write --no-publish
 ```
 
+From a script or any shell without a terminal add `--trust-plugin`: a freshly
+staged directory is untrusted, and with nobody to ask the run aborts before it
+spends anything (measured 2026-09-16, 2.1.273).
+
 **Read the delta, not the score.** A case that scores 1.0 with the plugin *and*
 1.0 without it means the plugin is not what made it pass - the model would have
 done that anyway - so the case needs sharpening or retiring. Graders marked

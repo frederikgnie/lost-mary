@@ -1922,6 +1922,85 @@ expect_true(
 )
 expect_true("--health writes nothing, not even with --record", not (FR / "health-readings").exists(), out)
 
+# ------------------------------------------------------------------------------ usage
+print()
+print("usage.py - token usage by model and role, from transcripts")
+USAGE = ROOT / "scripts" / "usage.py"
+US = SCRATCH / "usage" / "projects" / "c--repo-u"
+(US / "s1" / "subagents").mkdir(parents=True)
+
+
+def usage_record(mid: str, model: str, out: int, cache_r: int, when: str) -> dict[str, object]:
+    """An `assistant` record as Claude Code writes it: model and usage live under `message`."""
+    return {
+        "type": "assistant",
+        "timestamp": when,
+        "message": {
+            "id": mid,
+            "model": model,
+            "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": out,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_r,
+            },
+        },
+    }
+
+
+(US / "s1.jsonl").write_text(
+    jsonl(
+        [
+            {"type": "user", "timestamp": "2026-09-15T09:59:00.000Z", "message": {"role": "user", "content": "do x"}},
+            usage_record("m1", "claude-fable-5-1", 100, 1000, "2026-09-15T10:00:00.000Z"),
+            usage_record("m1", "claude-fable-5-1", 100, 1000, "2026-09-15T10:00:01.000Z"),  # same response, next block
+            usage_record("m2", "claude-opus-5", 50, 500, "2026-09-15T10:01:00.000Z"),
+            usage_record("m0", "claude-fable-5-1", 999, 9, "2026-09-01T10:00:00.000Z"),  # before --since
+        ]
+    )
+    + "not json at all\n"
+    + json.dumps({"type": "assistant", "timestamp": "2026-09-15T10:03:00.000Z", "message": "no usage"})
+    + "\n",
+    encoding="utf-8",
+)
+(US / "s1" / "subagents" / "agent-a1.jsonl").write_text(
+    jsonl([usage_record("m3", "claude-fable-5-1", 7, 70, "2026-09-15T10:02:00.000Z")]), encoding="utf-8"
+)
+usage_mod = load_module(USAGE, "usage_mod")
+u_totals, u_files = usage_mod.collect(US.parent, "2026-09-10")
+lead_fable = u_totals[("lead", "claude-fable-5-1")]
+expect_true("both transcript files were read", u_files == 2, str(u_files))
+expect_true(
+    "records sharing one message.id are one message",
+    lead_fable["msgs"] == 1 and lead_fable["out"] == 100,
+    str(dict(lead_fable)),
+)
+expect_true(
+    "a message dated before --since is not counted",
+    lead_fable["cache_r"] == 1000,
+    str(dict(lead_fable)),
+)
+expect_true(
+    "a transcript under subagents/ is the subagent role",
+    u_totals[("subagent", "claude-fable-5-1")]["out"] == 7,
+    str({k: dict(v) for k, v in u_totals.items()}),
+)
+expect_true(
+    "models are kept apart",
+    u_totals[("lead", "claude-opus-5")]["out"] == 50,
+    str(dict(u_totals[("lead", "claude-opus-5")])),
+)
+proc = subprocess.run(
+    [sys.executable, str(USAGE), "--root", str(US.parent), "--since", "2026-09-10"], capture_output=True
+)
+u_out = proc.stdout.decode("utf-8", "replace")
+expect(
+    "usage.py exits 0 over a malformed line and a record without usage", proc.returncode, ALLOW, proc.stderr.decode()
+)
+expect_true("the report ends with the fable share", "fable share" in u_out and "claude-fable-5-1" in u_out, u_out)
+
 # ---------------------------------------------------------------------------- ledger
 print()
 print("ledger.py - SubagentStop record / SessionStart recall")
