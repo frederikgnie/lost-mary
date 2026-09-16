@@ -70,6 +70,10 @@ survives the copy, and print the path:
 claude plugin eval (./evals/stage.ps1) --allow-tools Write --no-publish
 ```
 
+From a script or any shell without a terminal add `--trust-plugin`: a freshly
+staged directory is untrusted, and with nobody to ask the run aborts before it
+spends anything (measured 2026-09-16, 2.1.273).
+
 **Read the delta, not the score.** A case that scores 1.0 with the plugin *and*
 1.0 without it means the plugin is not what made it pass - the model would have
 done that anyway - so the case needs sharpening or retiring. Graders marked
@@ -81,7 +85,9 @@ one:
 
 - **No case may need `Bash`.** Granting it requires an OS sandbox backend and
   native Windows has none, so a Bash-granting case only runs under WSL2.
-  `--allow-tools Write` is needed for `evidence-in-report`, which writes files.
+  `--allow-tools Write` is needed for `evidence-in-report`, which writes files,
+  and `--scaffold --allow-tools Edit Write` for `spawn-contract`, which stages a
+  package and hands the edit to a subagent.
 - **Tools follow graders.** A grader that implies a side effect only passes if
   the case's `allowed_tools` permits the tool that produces it *and* the
   operator granted it.
@@ -94,16 +100,82 @@ one:
 
 **First reading, 2026-09-15 (2.1.272), `spawn-contract`, 1 run per arm, $0.73.**
 `with 0.00  without 0.00  delta 0.00`, both arms failing `contract-fields` with
-"Agent called 0x". The harness works; the case does not yet. The prompt tells
-the model the checkout "is not on this machine", which makes delegating work on
-files that cannot exist the obviously futile move, so a sensible model describes
-the brief instead of spawning - and a grader keyed on `tool_used: Agent` scores
-that zero. Either scaffold a real file so delegation is worth doing, or grade
-the brief in `last_message` and stop asserting the tool call. Diagnosing the
-next iteration needs `--keep-temp` (the run sandbox holding `trace.jsonl` is
-deleted on success) or `--verbose --debug-file`. Budget it: one case, one run
-per arm, is roughly $0.73, so a four-case suite at the default three runs is
-about $9 per full reading.
+"Agent called 0x". The harness works; the case did not. The prompt told the
+model the checkout was on a build box it could not reach, which makes delegating
+work on files that cannot exist the obviously futile move, so a sensible model
+described the brief instead of spawning - and a grader keyed on
+`tool_used: Agent` scores that zero.
+
+**Second reading, 2026-09-16 (2.1.273), after a prompt rewrite, $0.76.**
+Identical - `with 0.00  without 0.00  delta 0.00`, "Agent called 0x" in both
+arms, both answering in 2 turns, 91-98 s. Rewriting the prose around the same
+fiction changed nothing. The case had to stop pretending the files were
+elsewhere.
+
+**The redesign, 2026-09-16.** Three changes, all inside `evals/spawn-contract/`:
+
+- `scaffold.sh` stages a real `billing/` package in the run's working directory:
+  a token bucket refilling off `time.time()`, an `auth.py` that must not be
+  touched, one test. `scaffold_script` cannot live in `prompt.md` - the loader
+  accepts a fixed key list there (`schema_version`, `name`, `description`,
+  `tags`, `plugins`, `runs`, `expected_outcome` plus the execution keys) and
+  rejects anything else as an unknown frontmatter key - so the case also carries
+  a `case.yaml` with `context.scaffold_script`, which the harness merges with the
+  prose file (the report calls that source `mixed`). It runs only under
+  `--scaffold`, as `bash <script>` with cwd set to the run's workspace, before
+  the model starts: a non-zero exit aborts the run for $0.
+- `prompt.md` drops the build-box fiction and asks for the change on the staged
+  files, naming the off-limits file and the two check commands in plain words
+  and the four fields nowhere. `allowed_tools` carries no Edit and no Write, so
+  the only route from the session to a changed file is a subagent; the operator
+  grants `--allow-tools Edit Write` so the subagent can land it.
+- the grading splits in two - `delegated` (`tool_used: Agent`, weight 1) and
+  `contract-fields` (the same call plus the four-field `input_match`, weight 3) -
+  so "never delegated" (0.00) and "delegated without a contract" (0.25) stop
+  reading alike.
+
+**Third reading, 2026-09-16 (2.1.273), 1 run per arm, `--scaffold --allow-tools
+Edit Write`, 880 s, $3.38.** Verbatim:
+
+```text
+  spawn-contract run 1/1 [with]: score 0.25  $1.67
+    ✗ contract-fields (weight 3): Agent called 0x (expected 1..∞)
+    ✓ delegated (weight 1): Agent called 4x (expected 1..∞)
+  spawn-contract run 1/1 [without]: score 0.25  $1.71
+    ✗ contract-fields (weight 3): Agent called 0x (expected 1..∞)
+    ✓ delegated (weight 1): Agent called 4x (expected 1..∞)
+✗ spawn-contract  with 0.25  without 0.25  Δ 0.00  (2 runs)  $3.38
+
+CASE            WITH  W/OUT Δ      RUNS COST    NOTES
+spawn-contract  0.25  0.25  0.00   2    $3.38   contract-fields: Agent called 0x (expected 1..∞)
+```
+
+with: 11 turns, 415 s, $1.674. without: 2 turns, 465 s, $1.709.
+
+The case now measures something. Both arms delegate - four `Agent` calls each -
+and neither spawn carries the contract; that is a different reading from "never
+delegated", which is what the split was for. What it still does not produce is a
+delta.
+
+Why, as far as this reading can say - the run sandboxes holding `trace.jsonl`
+are deleted on success and `--keep-temp` was not passed, so what follows is
+inference, not evidence. None of the plugin's three mechanisms can reach a spawn
+like this one. The eval child runs with `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, so
+`global-CLAUDE.md` is not in context at all; `skills/lost-mary/SKILL.md` loads
+when it is invoked, and a plain task prompt does not invoke it; and
+`scripts/check-spawn.py` governs `subagent_type: implement` only, so a
+`general-purpose` or `explore` spawn passes it untouched. The with-arm's 11 turns
+against the without-arm's 2 says something pushed back, but not what. Next
+iteration: pass `--keep-temp` and read the four `Agent` inputs before changing
+anything else. The grader is not the suspect - the `input_match` lookaheads match
+a `JSON.stringify`d Agent input that carries the four fields and reject a plain
+brief.
+
+Budget has moved with the scaffold: a case whose subagent actually edits cost
+$1.67-1.71 per arm, not $0.73, so a four-case suite at the default three runs is
+well past $9. Keep `--max-cost-usd` on, and read it for what it is - the ceiling
+is checked before each run launches, so it bounds the next run, not the ones in
+flight; $2 here let $3.38 through and said so.
 
 **Where the tokens go.** `python scripts/usage.py --since 2026-09-15` sums the
 per-message `usage` every transcript under `~/.claude/projects` carries, by

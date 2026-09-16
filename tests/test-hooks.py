@@ -1704,6 +1704,111 @@ expect_true(
     out,
 )
 
+
+# A hook that BLOCKS on the Stop event leaves no attachment behind at all: the block comes back as a
+# plain `user` record whose `message.content` is a STRING - "<Event> hook feedback:\n[<the command,
+# exactly as settings.json spells it>]: <the hook's stderr>" (measured 2026-09-16 on 2.1.273: 60 such
+# records across the transcripts on disk, every one of them string-form). Reading attachments alone
+# counted none of them. A `tool_result` that merely QUOTES the phrase arrives as a LIST, which is the
+# only thing telling the two apart - so one of those sits in the fixture as well.
+def stop_feedback(event: str, script: str, args: str, text: str, when: str, uid: str) -> dict[str, object]:
+    return {
+        "parentUuid": "0a1b2c3d-0000-4000-8000-000000000001",
+        "isSidechain": False,
+        "userType": "external",
+        "cwd": str(ROOT),
+        "sessionId": "355c56ad-7387-4f27-8a4e-1c0c3b43a7b6",
+        "version": "2.1.273",
+        "gitBranch": "main",
+        "type": "user",
+        "message": {"role": "user", "content": f"{event} hook feedback:\n[{HOOK_CMD.format(script, args)}]: {text}"},
+        "isMeta": False,
+        "uuid": uid,
+        "timestamp": when,
+        "promptId": "0a1b2c3d-0000-4000-8000-000000000002",
+        "entrypoint": "cli",
+    }
+
+
+SFB = FR / "stop-feedback" / "c--repo-sfb"
+SFB.mkdir(parents=True)
+LEAD_TEXT = "check-evidence: the report names no command that ran."
+PUNT_TEXT = "Nothing is left on the table (no-punt)."
+(SFB / "s.jsonl").write_text(
+    jsonl(
+        [
+            stop_feedback("Stop", "check-evidence.py", "--lead", LEAD_TEXT, "2026-09-15T18:31:12.122Z", "fb-1"),
+            stop_feedback("Stop", "no-punt.py", "", PUNT_TEXT, "2026-09-06T15:41:12.122Z", "fb-2"),
+            result("t1", f"Stop hook feedback:\n[py no-punt.py]: {PUNT_TEXT}"),  # quoted, not a block
+        ]
+    ),
+    encoding="utf-8",
+)
+sfb_args = ["--projects-dir", str(FR / "stop-feedback"), "--settings", str(fr_settings)]
+proc = subprocess.run([sys.executable, str(FRICTION), *sfb_args, "--json"], capture_output=True)
+expect("friction over Stop hook feedback exits 0", proc.returncode, ALLOW, proc.stderr.decode())
+data = json.loads(proc.stdout.decode("utf-8"))
+seen_hooks = data["hooks_seen"]
+expect_true(
+    "a block fed back as a user record is counted as one, though it leaves no attachment",
+    data["hook_fires"].get("Stop") == 2 and data["hook_blocks"].get("Stop") == 2,
+    str({k: data[k] for k in ("hook_fires", "hook_blocks")}),
+)
+expect_true(
+    "... attributed to the script its command names, dated and evented by the record itself",
+    seen_hooks.get("check-evidence.py --lead", {}).get("blocks") == 1
+    and seen_hooks["check-evidence.py --lead"]["fires"] == 1
+    and seen_hooks["check-evidence.py --lead"]["events"] == ["Stop"]
+    and seen_hooks["check-evidence.py --lead"]["last"].startswith("2026-09-15"),
+    str(seen_hooks),
+)
+expect_true(
+    "a tool_result that merely quotes the feedback phrase is not a block",
+    sorted(seen_hooks) == ["check-evidence.py --lead", "no-punt.py"] and not data["hook_notices"],
+    str(seen_hooks),
+)
+out = subprocess.run([sys.executable, str(FRICTION), *sfb_args], capture_output=True).stdout.decode("utf-8")
+expect_true(
+    "... and the per-hook table carries the row",
+    any(
+        "no-punt.py" in ln and "1 block(s)" in ln and "[Stop]" in ln and "last 2026-09-06" in ln
+        for ln in out.splitlines()
+    ),
+    out,
+)
+# A resumed session writes the same feedback record a second time under the SAME uuid. One block.
+DUP = FR / "stop-dupe" / "c--repo-dup"
+DUP.mkdir(parents=True)
+twice = stop_feedback("Stop", "check-evidence.py", "--lead", LEAD_TEXT, "2026-09-15T18:31:12.122Z", "fb-1")
+(DUP / "s.jsonl").write_text(jsonl([twice, twice]), encoding="utf-8")
+dup_args = ["--projects-dir", str(FR / "stop-dupe"), "--settings", str(fr_settings), "--json"]
+proc = subprocess.run([sys.executable, str(FRICTION), *dup_args], capture_output=True)
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "the same feedback record written twice counts once (dedupe on uuid)",
+    data["hook_blocks"].get("Stop") == 1 and data["hooks_seen"].get("check-evidence.py --lead", {}).get("fires") == 1,
+    str(data.get("hooks_seen")),
+)
+# --since has to reach these records too, or two readings double-count the days they share.
+proc = subprocess.run(
+    [sys.executable, str(FRICTION), *sfb_args, "--json", "--since", "2026-09-15"], capture_output=True
+)
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "--since drops a feedback record older than the window",
+    data["hook_blocks"].get("Stop") == 1 and "no-punt.py" not in data["hooks_seen"],
+    str(data.get("hooks_seen")),
+)
+proc = subprocess.run(
+    [sys.executable, str(FRICTION), *sfb_args, "--json", "--since", "2026-09-16"], capture_output=True
+)
+data = json.loads(proc.stdout.decode("utf-8"))
+expect_true(
+    "... and a window that starts after all of them counts none",
+    not data["hook_blocks"] and not data["hooks_seen"],
+    str({k: data[k] for k in ("hook_blocks", "hooks_seen")}),
+)
+
 # --since: two readings must be able to cover disjoint windows instead of double-counting the overlap.
 proc = subprocess.run([sys.executable, str(FRICTION), *fr_args, "--json", "--since", "2026-09-15"], capture_output=True)
 expect("friction --since exits 0", proc.returncode, ALLOW, proc.stderr.decode())
@@ -1921,6 +2026,85 @@ expect_true(
     out,
 )
 expect_true("--health writes nothing, not even with --record", not (FR / "health-readings").exists(), out)
+
+# ------------------------------------------------------------------------------ usage
+print()
+print("usage.py - token usage by model and role, from transcripts")
+USAGE = ROOT / "scripts" / "usage.py"
+US = SCRATCH / "usage" / "projects" / "c--repo-u"
+(US / "s1" / "subagents").mkdir(parents=True)
+
+
+def usage_record(mid: str, model: str, out: int, cache_r: int, when: str) -> dict[str, object]:
+    """An `assistant` record as Claude Code writes it: model and usage live under `message`."""
+    return {
+        "type": "assistant",
+        "timestamp": when,
+        "message": {
+            "id": mid,
+            "model": model,
+            "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": out,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_r,
+            },
+        },
+    }
+
+
+(US / "s1.jsonl").write_text(
+    jsonl(
+        [
+            {"type": "user", "timestamp": "2026-09-15T09:59:00.000Z", "message": {"role": "user", "content": "do x"}},
+            usage_record("m1", "claude-fable-5-1", 100, 1000, "2026-09-15T10:00:00.000Z"),
+            usage_record("m1", "claude-fable-5-1", 100, 1000, "2026-09-15T10:00:01.000Z"),  # same response, next block
+            usage_record("m2", "claude-opus-5", 50, 500, "2026-09-15T10:01:00.000Z"),
+            usage_record("m0", "claude-fable-5-1", 999, 9, "2026-09-01T10:00:00.000Z"),  # before --since
+        ]
+    )
+    + "not json at all\n"
+    + json.dumps({"type": "assistant", "timestamp": "2026-09-15T10:03:00.000Z", "message": "no usage"})
+    + "\n",
+    encoding="utf-8",
+)
+(US / "s1" / "subagents" / "agent-a1.jsonl").write_text(
+    jsonl([usage_record("m3", "claude-fable-5-1", 7, 70, "2026-09-15T10:02:00.000Z")]), encoding="utf-8"
+)
+usage_mod = load_module(USAGE, "usage_mod")
+u_totals, u_files = usage_mod.collect(US.parent, "2026-09-10")
+lead_fable = u_totals[("lead", "claude-fable-5-1")]
+expect_true("both transcript files were read", u_files == 2, str(u_files))
+expect_true(
+    "records sharing one message.id are one message",
+    lead_fable["msgs"] == 1 and lead_fable["out"] == 100,
+    str(dict(lead_fable)),
+)
+expect_true(
+    "a message dated before --since is not counted",
+    lead_fable["cache_r"] == 1000,
+    str(dict(lead_fable)),
+)
+expect_true(
+    "a transcript under subagents/ is the subagent role",
+    u_totals[("subagent", "claude-fable-5-1")]["out"] == 7,
+    str({k: dict(v) for k, v in u_totals.items()}),
+)
+expect_true(
+    "models are kept apart",
+    u_totals[("lead", "claude-opus-5")]["out"] == 50,
+    str(dict(u_totals[("lead", "claude-opus-5")])),
+)
+proc = subprocess.run(
+    [sys.executable, str(USAGE), "--root", str(US.parent), "--since", "2026-09-10"], capture_output=True
+)
+u_out = proc.stdout.decode("utf-8", "replace")
+expect(
+    "usage.py exits 0 over a malformed line and a record without usage", proc.returncode, ALLOW, proc.stderr.decode()
+)
+expect_true("the report ends with the fable share", "fable share" in u_out and "claude-fable-5-1" in u_out, u_out)
 
 # ---------------------------------------------------------------------------- ledger
 print()

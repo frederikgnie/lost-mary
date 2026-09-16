@@ -1,0 +1,12 @@
+# Only the one thing prompt.md cannot carry. The loader accepts a fixed list of
+# frontmatter keys there - schema_version, name, description, tags, plugins,
+# runs, expected_outcome and the execution keys - and rejects anything else with
+# "unknown frontmatter key"; `scaffold_script` is not on it. A case that stages a
+# workspace therefore needs a case.yaml, which the loader merges with prompt.md
+# (the prose file wins on every key it carries, so name/runs/tools stay there).
+schema_version: "1.1"
+name: spawn-contract
+context:
+  # Relative to this directory, and it must stay inside it. Not run unless the
+  # operator passes --scaffold.
+  scaffold_script: scaffold.sh
