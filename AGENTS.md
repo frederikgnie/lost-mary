@@ -105,6 +105,16 @@ deleted on success) or `--verbose --debug-file`. Budget it: one case, one run
 per arm, is roughly $0.73, so a four-case suite at the default three runs is
 about $9 per full reading.
 
+**Where the tokens go.** `python scripts/usage.py --since 2026-09-15` sums the
+per-message `usage` every transcript under `~/.claude/projects` carries, by
+model and by role (lead vs subagent), deduplicated on `message.id` because one
+API response is written as several records. It is not installed and reads
+nothing but transcripts. It is what set the lead's model on 2026-09-16: over
+2,174 messages a fable lead was 90-97% of all fable tokens and the explore and
+review spawns 3-10%, so `model-policy.example.md` now puts the lead on opus.
+Re-run it when an allowance drains faster than expected, before changing the
+policy.
+
 ## GitHub account convention
 
 This repository lives under the personal `frederikgnie` GitHub account, not the
