@@ -43,10 +43,13 @@ Usage:
 Runtime dependencies (see capabilities.md): the transcript record shape -
 `type: assistant|user`, a top-level ISO `timestamp`, `message.content[]` items
 of type `tool_use` {id, name, input} / `tool_result` {tool_use_id, content} /
-`text` {text}, and hook firings as an `attachment` in one of three shapes
-(`hook_blocking_error` / `hook_success` / `hook_additional_context`, verified
-2026-09-15 on 2.1.260) - all of which Claude Code documents as internal.
-Unreadable records are skipped.
+`text` {text}, and hook firings in two places: an `attachment` in one of
+three shapes (`hook_blocking_error` / `hook_success` / `hook_additional_context`,
+verified 2026-09-15 on 2.1.260) and - for a hook that blocked on the Stop event,
+which leaves no attachment at all - a `user` record whose `message.content` is a
+STRING beginning "<Event> hook feedback:" and naming the hook's own command in
+square brackets (verified 2026-09-16 on 2.1.273). All of these Claude Code
+documents as internal. Unreadable records are skipped.
 """
 
 from __future__ import annotations
@@ -82,6 +85,8 @@ PS_ASSIGNMENT = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*\s*=")
 WRAPPERS = frozenset({"sudo", "timeout", "nohup", "env", "command", "time"})
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SHELL_TOKEN = re.compile(r"\"[^\"]*\"|'[^']*'|\S+")  # a hook command quotes its interpreter and script paths
+# "<Event> hook feedback:\n[<the hook command>]: <its stderr>" - a block on Stop, as it reaches the transcript
+HOOK_FEEDBACK = re.compile(r"^(\w+) hook feedback:\n\[(.*?)\]: (.*)", re.DOTALL)
 
 
 @dataclass
@@ -287,6 +292,37 @@ def scan_hook_record(record: dict[str, Any], report: Report, when: str = "") -> 
     record_hook_fire(report, identity, event, when, block=False, notice=False, commandless=not command)
 
 
+def scan_hook_feedback(record: dict[str, Any], report: Report, when: str, counted: set[str]) -> None:
+    """A hook that BLOCKED on the Stop event, as Claude Code records it: a plain `user` record.
+
+    No attachment is written for such a block - the Stop attachments in the transcripts are
+    `hook_success` notices - so scanning attachments alone counted none of the 60 records of this
+    shape on disk (measured 2026-09-16, 2.1.273). The content is a STRING: the event name, then
+    "hook feedback:", then the hook's command in square brackets exactly as settings.json spells it,
+    then the hook's stderr. A `tool_result` that merely quotes that phrase carries a LIST instead,
+    and is not a block. The event name is read from the record rather than assumed, and a resumed
+    session can write the same record twice, so `uuid` decides what has already been counted.
+    """
+    if record.get("type") != "user":
+        return
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        return
+    match = HOOK_FEEDBACK.match(content)
+    if match is None:
+        return
+    uid = str(record.get("uuid") or "")
+    if uid:
+        if uid in counted:
+            return
+        counted.add(uid)
+    event, command = match.group(1), match.group(2)
+    report.hook_fires[event] += 1
+    report.hook_blocks[event] += 1
+    record_hook_fire(report, hook_identity(command), event, when, block=True, notice=False, commandless=not command)
+
+
 def clean_line(text: str) -> str:
     return CONTROL.sub("", " ".join(text.split()))[:120]
 
@@ -307,11 +343,14 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
     pending: dict[str, tuple[str, str]] = {}  # tool_use id -> (tool name, command)
     asked: dict[str, tuple[int, int]] = {}  # AskUserQuestion id -> (questions, of which with a recommended option)
     seen: set[str] = set()  # streaming writes one message as several records; count it once
+    fed_back: set[str] = set()  # uuid of each hook-feedback record counted here; a resume repeats them
     project = path.parent.name
     dates: list[str] = []
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            if not any(k in line for k in ('"tool_use"', '"tool_result"', '"assistant"', '"hookEvent"')):
+            if not any(
+                k in line for k in ('"tool_use"', '"tool_result"', '"assistant"', '"hookEvent"', "hook feedback:")
+            ):
                 continue
             try:
                 record = json.loads(line)
@@ -325,6 +364,7 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
             if when:
                 dates.append(when[:10])
             scan_hook_record(record, report, when)
+            scan_hook_feedback(record, report, when, fed_back)
             message = record.get("message")  # a string here (seen in the wild) must cost this record, not the run
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, list):
