@@ -51,6 +51,39 @@ AT_IMPORT = re.compile(r"^\s*@[~./\w-]+\.(?:md|json|ya?ml|txt)\s*$", re.MULTILIN
 failures: list[str] = []
 
 
+def repeated_blocks(text: str) -> list[str]:
+    """Runs of consecutive non-blank lines (80+ characters, whitespace-normalised) that
+    repeat an earlier run, one entry per copy: "lines 17-20 repeat lines 13-16".
+
+    A rule pasted twice loads twice into every session and reads as a botched edit. On
+    2026-09-17 global-CLAUDE.md carried one inside a single bullet - no blank line between
+    the copies, so a paragraph split cannot see it - and skills/lost-mary/SKILL.md one as
+    its own paragraph; every suite passed. Headings and table rows are short and recur
+    legitimately, hence the length floor.
+    """
+    keyed = [(n, " ".join(line.split())) for n, line in enumerate(text.splitlines(), 1)]
+    keyed = [(n, line) for n, line in keyed if line]
+    hits: list[str] = []
+    i = 0
+    while i < len(keyed):
+        best, origin = 0, 0
+        for j in range(i):
+            length = 0
+            while j + length < i and i + length < len(keyed) and keyed[j + length][1] == keyed[i + length][1]:
+                length += 1
+            if length > best:
+                best, origin = length, j
+        if best and len(" ".join(line for _, line in keyed[i : i + best])) >= 80:
+            hits.append(
+                f"lines {keyed[i][0]}-{keyed[i + best - 1][0]} repeat "
+                f"lines {keyed[origin][0]}-{keyed[origin + best - 1][0]}"
+            )
+            i += best
+        else:
+            i += 1
+    return hits
+
+
 def parse_frontmatter(text: str, label: str) -> dict[str, str] | None:
     if not text.startswith("---"):
         failures.append(f"{label}: file does not open with a '---' frontmatter block")
@@ -128,8 +161,19 @@ def main() -> int:
         if "$ARGUMENTS" not in body and "argument-hint" in front:
             failures.append(f"{label}: declares argument-hint but body never uses $ARGUMENTS")
 
+        for hit in repeated_blocks(text):
+            failures.append(f"{label}: {hit} (a rule pasted twice)")
+
         if not [f for f in failures if f.startswith(label)]:
             print(f"  ok   {label} (/{directory.name})")
+
+    # The always-on rules file is prose too, and no other test reads it.
+    rules = ROOT / "global-CLAUDE.md"
+    if rules.is_file():
+        for hit in repeated_blocks(rules.read_text(encoding="utf-8")):
+            failures.append(f"global-CLAUDE.md: {hit} (a rule pasted twice)")
+        if not [f for f in failures if f.startswith("global-CLAUDE.md")]:
+            print("  ok   global-CLAUDE.md (no repeated block)")
 
     print()
     if failures:

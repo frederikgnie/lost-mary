@@ -47,7 +47,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | [`/validate [paths]`](skills/validate/SKILL.md) | Lint + typecheck + tests for what changed, commands taken from the project's `CLAUDE.md`, exact results reported. Claude may invoke it itself before declaring something done. |
 | [`/pr [notes]`](skills/pr/SKILL.md) | Push and open a PR with the GitHub account that owns the repository (personal vs work), then switch `gh` back. User-invoked only. |
 | [`/ledger [n]`](skills/ledger/SKILL.md) | Show the ledger's latest entries for the current project on demand - what agents actually edited and ran. Claude may invoke it itself when a report needs checking against the record. |
-| [`global-CLAUDE.md`](global-CLAUDE.md) | ~2.4 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
+| [`global-CLAUDE.md`](global-CLAUDE.md) | ~2.8 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
 | [`capabilities.md`](capabilities.md) | Every runtime field, frontmatter key and file layout the library depends on, how each was verified, and how it degrades. |
 
 ## Layout
@@ -196,7 +196,7 @@ live; restart if it does not.
 | 13-key JSON handoff envelope + schema + validator + `SubagentStop` format hook | 4-line prose report + `check-evidence` transcript hook | Nothing downstream parsed the JSON except the hook; it enforced the *shape* of a claim, not its truth. The transcript is the evidence. |
 | `PreToolUse` regex denylist keeping review roles from writing via Bash | Review roles have no Bash | A denylist over shell text is bypassable (v1 said so itself); no sandbox exists on Windows; the lead can paste `git diff`. |
 | 7 persona roles, no model routing | 3 roles with `model`/`effort` in frontmatter | Persona text moves modern models little; routing moves cost a lot. |
-| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~2.2 KB) | Rules compete for attention; one canonical copy, on demand. |
+| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~2.8 KB) | Rules compete for attention; one canonical copy, on demand. |
 | Manual `git worktree add` convention | Agent tool `isolation: worktree` | The runtime does it. |
 | Nothing runs on edit | `pycheck` PostToolUse hook | The single highest-leverage mechanism for a typed codebase. |
 
