@@ -29,6 +29,9 @@ never versioned, never hand-edited.
   wedges every edit is worse than one that misses; a hook that goes quiet is
   worse than one that complains.
 - **Read stdin as bytes, decode `utf-8-sig`.** PowerShell pipes prepend a BOM.
+- **A hook imported by path is registered in `sys.modules` before `exec_module`.**
+  Python 3.14's `dataclasses` looks the module up there; without it the import
+  raises and `friction` silently counts nothing (2026-09-17).
 - **Tests never touch the real `~/.claude`.** Installer scenarios run against a
   sandboxed `HOME` and assert the sandbox is not the real one before writing.
   A CI step run locally without that gate has destroyed a developer's config
@@ -79,7 +82,7 @@ spends anything (measured 2026-09-16, 2.1.273).
 done that anyway - so the case needs sharpening or retiring. Graders marked
 `arm: with-only` are a plugin-fired indicator, not part of the score.
 
-Four cases live in `evals/<case>/prompt.md` with `evals/<case>/graders/*.md`;
+Five cases live in `evals/<case>/prompt.md` with `evals/<case>/graders/*.md`;
 each `runs:` value carries a comment saying why it is what it is. Before adding
 one:
 
@@ -91,10 +94,15 @@ one:
 - **Tools follow graders.** A grader that implies a side effect only passes if
   the case's `allowed_tools` permits the tool that produces it *and* the
   operator granted it.
-- **Hooks need `python3` on `PATH`.** A versioned manifest cannot carry the
-  absolute `python.exe` path `settings.example.windows.json` needs, so on a
-  machine without `python3` the plugin's hooks fail open and the run measures
-  the agents and skills only.
+- **Hooks run through `hooks/run.sh`.** A versioned manifest cannot carry the
+  absolute `python.exe` path `settings.example.windows.json` needs, and inside
+  the eval sandbox `python3` on PATH was the Windows Python Install Manager
+  shim with no runtimes (the sandbox redirects the profile), so every plugin
+  hook had failed open in every reading before 2026-09-17. The shim, invoked as
+  `/bin/bash` (a bare `bash` reaches the WSL stub on Windows), tries
+  `$LOST_MARY_PYTHON`, `python3`, `python`, then the user's `pythoncore-3*`
+  directories. When a with-arm transcript shows `hook_non_blocking_error` on
+  every Stop, the hooks are not running and the reading measures agents only.
 - Results land in `evals/results/` and are git-ignored, like every other piece
   of runtime state.
 
@@ -111,6 +119,27 @@ Identical - `with 0.00  without 0.00  delta 0.00`, "Agent called 0x" in both
 arms, both answering in 2 turns, 91-98 s. Rewriting the prose around the same
 fiction changed nothing. The case had to stop pretending the files were
 elsewhere.
+
+**Fourth reading, 2026-09-17 (2.1.274), `keep-going`, 3 runs per arm, $0.55, 108 s.**
+`with 0.67  without 0.22  delta +0.44` - and worthless as a hook measurement:
+the with-arm transcripts show all three Stop hooks failing with exit 1 (the
+Python Install Manager shim, see `capabilities.md`), so no bounce ever fired.
+The regex grader failed all six runs: every reply, both arms, ended on "say
+the word and I'll add a `procces_rows = process_rows` shim" - exactly the
+hand-back the hook exists to bounce. The llm grader passed 3/3 with and 1/3
+without, which with three runs is within noise. `hooks/run.sh` came out of
+this reading; the next one is the first in which the hooks can fire.
+
+**Fifth reading, 2026-09-17 (2.1.274), `keep-going` with `hooks/run.sh`, $0.59, 161 s.**
+`with 1.00  without 0.44  delta +0.56`, pass rate 3/3 with and 0/3 without.
+One with-arm run took two turns: its sandbox transcript holds a `Stop hook
+feedback:` record whose bracketed command is `/bin/bash ".../hooks/run.sh"
+".../scripts/no-punt.py"` - the first bounce ever fired inside the eval - and
+its final message passes both graders. The other two with-arm runs closed
+cleanly in one turn. All three without-arm runs ended on the shim offer
+("say the word and I'll add the alias", "drop that line if you'd rather").
+This is the first reading in this repository where the delta is the hooks'
+doing and can be read as such.
 
 **The redesign, 2026-09-16.** Three changes, all inside `evals/spawn-contract/`:
 
@@ -186,6 +215,24 @@ nothing but transcripts. It is what set the lead's model on 2026-09-16: over
 review spawns 3-10%, so `model-policy.example.md` now puts the lead on opus.
 Re-run it when an allowance drains faster than expected, before changing the
 policy.
+
+**Where the turns end.** `python scripts/friction.py --since <date>` reports
+turn-ending hand-backs - a text-only message followed by a real user record,
+judged with `no-punt.py`'s own detector - how many of them `no-punt` bounced,
+and how many turns closed on `BLOCKED:`. The 2026-09-17 baseline: 474 of
+1,646 turn ends since 09-01 handed the turn back, 5 bounced. Watch that number
+fall; if it does not, the detector is missing the phrasing (add it to
+`GO_AHEAD_PATTERNS` with a test) or the bounce is not reaching the model.
+
+The keep-going design rests on published mechanisms rather than on prose:
+Claude Code's Stop-hook contract and its eight-block cap
+(code.claude.com/docs/en/hooks, hooks-guide), the `ralph-wiggum` plugin's
+completion promise (github.com/anthropics/claude-code, plugins/ralph-wiggum),
+`taskmaster`'s `TASKMASTER_DONE` token (github.com/blader/taskmaster), `/goal`
+(code.claude.com/docs/en/goal), and Anthropic's agentic-persistence prompting
+guidance (platform.claude.com, prompting best practices). The common thread is
+an explicit end token the hook demands; `DONE:` / `IN FLIGHT:` / `BLOCKED:` is
+ours.
 
 ## GitHub account convention
 

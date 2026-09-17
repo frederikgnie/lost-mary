@@ -32,6 +32,24 @@ a credential, a name). Never present a menu whose first entry you already
 prefer. `MISSING: <field>` from a subagent is yours to fill from the
 repository, never a question for the user.
 
+**The turn ends when the work does.** A list of findings is a queue: work it
+to the end in this turn, and look things up - the repository, its docs, the
+web - before asking anything. Close on the line that is true: `DONE: <the
+Done-means check you re-ran and what it showed>`, `IN FLIGHT: <the named agent
+or branch carrying the rest, and what resumes you>`, or `BLOCKED: <what only
+the user can supply, or the irreversible action>`. Anything else at the end of
+a turn that did work - an offer, a menu, "say the word", a `Remaining:` list -
+is bounced by the Stop hook and the turn continues.
+
+**The turn ends when the work does.** A list of findings is a queue: work it
+to the end in this turn, and look things up - the repository, its docs, the
+web - before asking anything. Close on the line that is true: `DONE: <the
+Done-means check you re-ran and what it showed>`, `IN FLIGHT: <the named agent
+or branch carrying the rest, and what resumes you>`, or `BLOCKED: <what only
+the user can supply, or the irreversible action>`. Anything else at the end of
+a turn that did work - an offer, a menu, "say the word", a `Remaining:` list -
+is bounced by the Stop hook and the turn continues.
+
 ## 2. Smallest mode that can work
 
 | Signal | Do |
@@ -95,7 +113,8 @@ Shrink the diff to what the predicate needs. Re-check the predicate. Report:
 what changed, what you ran (exact commands, results), residual risk. Residual
 risk is what you could not verify - never a defect you saw and skipped: every
 finding is fixed, in flight under a named agent or branch, or has a failing
-test committed for it. No agent transcripts. If the branch is meant to become a pull request, `/pr` opens it
+test committed for it. No agent transcripts. The last line is `DONE:`,
+`IN FLIGHT:` or `BLOCKED:`. If the branch is meant to become a pull request, `/pr` opens it
 with the account that owns the repository and carries those results into the
 body.
 
