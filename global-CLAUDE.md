@@ -14,10 +14,6 @@ verified commands, invariants and danger zones. Read them before editing.
   branch>` or `BLOCKED: <what only the user can supply>` - never on an offer,
   a menu or "say the word". A list of findings is a queue: work it to the end,
   consulting the repository, its docs and the web before asking anyone.
-  A turn that did work ends on `DONE: <check re-run>`, `IN FLIGHT: <agent or
-  branch>` or `BLOCKED: <what only the user can supply>` - never on an offer,
-  a menu or "say the word". A list of findings is a queue: work it to the end,
-  consulting the repository, its docs and the web before asking anyone.
 - Nothing is left on the table. A defect you find is fixed in place if small,
   else handed to its own `implement` (worktree) or pinned by a failing test on
   a branch - reported fixed or in flight, never "I'll leave that for you".
