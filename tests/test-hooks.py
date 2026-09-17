@@ -1394,6 +1394,390 @@ expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
 proc = subprocess.run([sys.executable, str(NOPUNT)], input=b"\xef\xbb\xbfnot json", capture_output=True)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
 
+# The second class of hand-back: the turn stops to ask for a go-ahead. Measured over every lead
+# transcript since 2026-09-01 (1,646 turn-ending messages): 279 ended this way and no-punt had bounced
+# 4 of them; the user's replies were "then do it?", "why do you ask for my permission?", "go".
+print()
+print("no-punt.py - Stop: a final message that stops for a go-ahead is bounced; BLOCKED: is the way out")
+GO_AHEADS = [
+    "Fixed the port identity. Say the word and I'll fix the allow-list entry and trace how v8 resolves its model.",
+    "Both are ready. Want me to apply the threshold fix and bounce the trainer?",
+    "The mapping stays a finding in README. If you want the code to make it, say so and I'll put it in tally.yaml.",
+    "Two actions are ready and both are yours to release with one word.",
+    "Tests green. Standing by.",
+    "Still waiting on your call: may I edit OBF_ops, or should another session own that package?",
+    "I did not open PRs - it should be your call, not mine.",
+    "Nothing is committed yet; I left staging to you.",
+    "Three items remain:\n\n1. the skip wording\n2. the cleanup\n3. the docs\n\nWhich first?",
+    "The guard is uncommitted (3 files, tests green). Commit it or bin it?",
+    "Let me know if you want the remaining two done the same way.",
+    "I'm not going to start reshaping the feature list unprompted.",
+    "Shall I proceed with the other two packages?",
+    "Tell me which server you mean and I will trace where it runs.",
+    "I can also pull main into both branches first, if you'd like.",
+    "Parser fixed and pushed.\n\nRemaining:\n- the loader\n- the tests",
+    "DONE: pytest -q -> 41 passed. Want me to also tidy the imports?",
+    "Done with the parser. Waiting for your confirmation to continue with the loader and the tests.",
+]
+for i, msg in enumerate(GO_AHEADS):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"go-ahead #{i + 1} -> block", rc, BLOCK, err)
+expect_true("the block quotes the phrase", "waiting for your confirmation" in err.lower(), err)
+expect_true(
+    "... says the turn is not over and names the way out",
+    "not over" in err and "BLOCKED:" in err and "Assumption:" in err,
+    err,
+)
+rc, err = run_hook(NOPUNT, stop_payload(GO_AHEADS[15]))
+expect_true("a leftover list is bounced as a queue", "queue" in err and "Remaining:" in err, err)
+
+KEEP_GOING_OK = [
+    "All three items are done: parser, loader, tests. Ran `pytest -q` -> 41 passed.",
+    "Both branches are pushed. Residual risk: the DST path is untested here; a failing test is committed on fix/dst.",
+    "Fixed. Why did it fail? The retry wrapper swallowed the timeout. That is now a test.",
+    "I proceeded without waiting for your go-ahead: Assumption: the smaller default is the one you want.",
+    "Nothing is waiting on you. The job runs at 02:00 and the monitor is armed.",
+    "The docs said `say the word` triggers the release job; I renamed that step to `release`.",
+    "Two decisions were open; I took both and recorded them as Assumption: lines above.",
+    "Run it yourself later with:\n\n```powershell\n.venv\\Scripts\\python.exe verify.py --browser\n```"
+    "\n\nThe check passes here.",
+    "All done.\n\nRemaining: none. Next steps: none.",
+    "The remaining three tests pass as well; the suite is green.",
+    "BLOCKED: the production DB password is not on this machine and nothing in the repo or the vault docs "
+    "names where it lives - which secret store should I read it from?",
+    "Item 5 of your list came through empty.\n\n**BLOCKED:** what was item 5? Everything else on the list is "
+    "done and verified (`pytest -q` -> 41 passed).",
+    "- BLOCKED: merging to main is a production deploy for this repo; say merge and I will. Everything else is done.",
+]
+for i, msg in enumerate(KEEP_GOING_OK):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"legitimate closing #{i + 1} -> allow", rc, ALLOW, err)
+
+# The loop guard reads the turn from the transcript: this hook's own feedback records since the prompt.
+# Two bounces in a row that brought no tool call mean the model only rephrased - the third stop is allowed;
+# with work in between it is bounced again, up to six in the turn (Claude Code's own cap is eight).
+PID = "p-keep"
+
+
+def kg_prompt(text: str, pid: str = PID) -> dict[str, object]:
+    return {"type": "user", "uuid": uuid.uuid4().hex, "promptId": pid, "message": {"role": "user", "content": text}}
+
+
+def kg_feedback(pid: str = PID, hook: str = "no-punt.py", uid: str | None = None) -> dict[str, object]:
+    return {
+        "type": "user",
+        "uuid": uid or uuid.uuid4().hex,
+        "promptId": pid,
+        "isMeta": True,  # as written by 2.1.273
+        "message": {"role": "user", "content": f"Stop hook feedback:\n[py {hook}]: The turn is not over (no-punt)."},
+    }
+
+
+def kg_said(text: str) -> dict[str, object]:
+    return {
+        "type": "assistant",
+        "uuid": uuid.uuid4().hex,
+        "message": {"id": uuid.uuid4().hex, "role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+
+
+def kg_tool() -> dict[str, object]:
+    content = [{"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "pytest"}}]
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": content}}
+
+
+def kg_transcript(name: str, records: list[dict[str, object]]) -> Path:
+    path = NP / name
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+ASKS = GO_AHEADS[0]
+t = kg_transcript(
+    "idle.jsonl",
+    [kg_prompt("do all three"), kg_said("one done"), kg_feedback(), kg_said(ASKS), kg_feedback(), kg_said(ASKS)],
+)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("two bounces without a tool call in between -> the third stop is allowed", rc, ALLOW, err)
+expect_true("... and the notice says why", "rephras" in err or "without progress" in err, err)
+
+t = kg_transcript("idle1.jsonl", [kg_prompt("do all three"), kg_said("one done"), kg_feedback(), kg_said(ASKS)])
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("one bounce without progress -> still bounced (stop_hook_active alone no longer allows)", rc, BLOCK, err)
+
+busy = [kg_prompt("do all three")]
+for _ in range(5):
+    busy += [kg_said(ASKS), kg_feedback(), kg_tool()]
+busy += [kg_said(ASKS)]
+t = kg_transcript("busy5.jsonl", busy)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("five bounces, each followed by work -> the sixth is still a bounce", rc, BLOCK, err)
+busy = busy[:-1] + [kg_said(ASKS), kg_feedback(), kg_tool(), kg_said(ASKS)]
+t = kg_transcript("busy6.jsonl", busy)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("six bounces in one turn -> the seventh stop is allowed", rc, ALLOW, err)
+
+# Only this turn counts, only this hook's records, and a record repeated after a resume counts once.
+t = kg_transcript(
+    "other-turn.jsonl",
+    [
+        kg_prompt("earlier", "p-old"),
+        kg_said(ASKS),
+        kg_feedback("p-old"),
+        kg_said(ASKS),
+        kg_feedback("p-old"),
+        kg_said("ok"),
+        kg_prompt("now"),
+        kg_said("one done"),
+        kg_feedback(hook="check-evidence.py --lead"),
+        kg_said(ASKS),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("an earlier turn's bounces and another hook's block do not count", rc, BLOCK, err)
+dupe = kg_feedback(uid="same-uuid")
+t = kg_transcript("resumed.jsonl", [kg_prompt("do all three"), kg_said(ASKS), dupe, dupe, kg_said(ASKS)])
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("the same feedback record written twice (resume) is one bounce", rc, BLOCK, err)
+
+# Without a prompt_id the turn starts at the last real prompt - hook feedback and meta records are not prompts.
+t = kg_transcript(
+    "no-pid.jsonl",
+    [kg_prompt("do all three"), kg_said(ASKS), kg_feedback(), kg_said(ASKS), kg_feedback(), kg_said(ASKS)],
+)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), stop_hook_active=True))
+expect("no prompt_id: the turn is counted from the last real prompt -> allowed after two idle bounces", rc, ALLOW, err)
+
+# The bounce carries the turn's own task back, so the model re-reads the whole ask, not the last item.
+t = kg_transcript("task.jsonl", [kg_prompt("fix the parser, the loader and the tests"), kg_said(ASKS)])
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID))
+expect("bounced with the task", rc, BLOCK, err)
+expect_true("... quoting the prompt", "fix the parser, the loader and the tests" in err, err)
+LM = (
+    "<command-message>lost-mary</command-message>\n<command-name>/lost-mary</command-name>\n"
+    "<command-args>make it keep going</command-args>"
+)
+t = kg_transcript("skill-task.jsonl", [kg_prompt(LM), kg_said(ASKS)])
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID))
+expect_true(
+    "a /lost-mary prompt is quoted by its arguments",
+    rc == BLOCK and "make it keep going" in err and "<command" not in err,
+    err,
+)
+
+# stop_hook_active with no transcript to count from keeps the old one-strike behaviour: allow.
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, stop_hook_active=True))
+expect("stop_hook_active and no transcript -> allow (one strike, as before)", rc, ALLOW, err)
+
+# A subagent that stops to ask gets the subagent wording: it cannot ask anyone; MISSING: or finish.
+rc, err = run_hook(
+    NOPUNT, stop_payload("Shall I proceed with the other two packages?", agent_id="a1", agent_type="implement")
+)
+expect("a subagent asking for a go-ahead -> block", rc, BLOCK, err)
+expect_true("... told to return MISSING: or finish", "MISSING:" in err and "cannot ask" in err, err)
+
+# Under /lost-mary a turn that called tools ends with DONE:, IN FLIGHT: or BLOCKED: - the completion token
+# that every working keep-going design demands - and the bounce quotes the lead's own Done-means line.
+FRAMED = "**Done means:** `pytest -q` -> 0 failures across the three modules.\n\nStarting with the parser."
+OPEN_END = "Parser fixed, ruff and ty clean, 41 tests pass. The loader and the tests are untouched."
+t = kg_transcript("lm-open.jsonl", [kg_prompt(LM), kg_said(FRAMED), kg_tool(), kg_said(OPEN_END)])
+rc, err = run_hook(NOPUNT, stop_payload(OPEN_END, transcript_path=str(t), prompt_id=PID))
+expect("/lost-mary turn that called tools and has no closing line -> block", rc, BLOCK, err)
+expect_true(
+    "... names the three states and quotes Done means",
+    "DONE:" in err and "IN FLIGHT:" in err and "BLOCKED:" in err and "0 failures across the three modules" in err,
+    err,
+)
+CLOSINGS = [
+    "\n\nDONE: `pytest -q` -> 41 passed, re-run after the last edit.",
+    "\n\nIN FLIGHT: implement agent on branch fix/loader (worktree); its task notification resumes this turn.",
+    "\n\n**BLOCKED:** merging to main deploys to production here - say merge and I will.",
+]
+for i, tail_text in enumerate(CLOSINGS):
+    closed = OPEN_END + tail_text
+    t = kg_transcript(f"lm-closed{i}.jsonl", [kg_prompt(LM), kg_said(FRAMED), kg_tool(), kg_said(closed)])
+    rc, err = run_hook(NOPUNT, stop_payload(closed, transcript_path=str(t), prompt_id=PID))
+    expect(f"/lost-mary turn closed with {tail_text.strip()[:12]!r} -> allow", rc, ALLOW, err)
+talk = "Yes - it was installed by PR #15; install.ps1 -Verify returned OK."
+t = kg_transcript("lm-talk.jsonl", [kg_prompt(LM), kg_said(talk)])
+rc, err = run_hook(NOPUNT, stop_payload(talk, transcript_path=str(t), prompt_id=PID))
+expect("a /lost-mary turn that only talked needs no closing line", rc, ALLOW, err)
+t = kg_transcript("plain-open.jsonl", [kg_prompt("fix all three"), kg_tool(), kg_said(OPEN_END)])
+rc, err = run_hook(NOPUNT, stop_payload(OPEN_END, transcript_path=str(t), prompt_id=PID))
+expect("outside /lost-mary no closing line is required", rc, ALLOW, err)
+t = kg_transcript(
+    "lm-cleared.jsonl",
+    [
+        kg_prompt(LM, "p-lm"),
+        kg_prompt("<command-name>/clear</command-name>", "p-clear"),
+        kg_prompt("fix all three"),
+        kg_tool(),
+        kg_said(OPEN_END),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(OPEN_END, transcript_path=str(t), prompt_id=PID))
+expect("/clear ends the procedure: no closing line required after it", rc, ALLOW, err)
+t = kg_transcript("lm-ask.jsonl", [kg_prompt(LM), kg_said(FRAMED), kg_tool(), kg_said(GO_AHEADS[1])])
+rc, err = run_hook(NOPUNT, stop_payload(GO_AHEADS[1], transcript_path=str(t), prompt_id=PID))
+expect_true(
+    "a go-ahead under /lost-mary is told to close with one of the three lines",
+    rc == BLOCK and "DONE:" in err and "IN FLIGHT:" in err and "Done means, as you framed it" in err,
+    err,
+)
+
+# The detector is importable: friction counts what the hook bounces, with the same code.
+np_mod = load_module(NOPUNT, "np_mod")
+hb = np_mod.hand_back("Done. Say the word and I'll do the rest.")
+expect_true(
+    "hand_back() names the kind and the phrase",
+    hb is not None and hb.kind == "go-ahead" and "say the word" in hb.phrase.lower(),
+    str(hb),
+)
+expect_true(
+    "a parked defect is the other kind", np_mod.hand_back(PUNTS[0]).kind == "parked", str(np_mod.hand_back(PUNTS[0]))
+)
+expect_true(
+    "closing_states() reads the three lines; a lower-case status line is not one",
+    np_mod.closing_states("DONE: x\n\n- IN FLIGHT: y\n\n**BLOCKED:** z") == {"DONE", "IN FLIGHT", "BLOCKED"}
+    and np_mod.closing_states("`DONE:` `pytest -q` -> 41 passed") == {"DONE"}
+    and np_mod.closing_states("blocked: none\ndone: 3 of 5\n`DONE:`") == set(),
+    "",
+)
+
+# Review 2026-09-17: the guard must never go inert, and these closing sentences are not hand-backs.
+print()
+print("no-punt.py - guard fallbacks and false positives from review")
+garbage = NP / "garbage.jsonl"
+garbage.write_text('not json\n{"type": "user"}\n', encoding="utf-8")
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(garbage), stop_hook_active=True))
+expect("a transcript without a single prompt + stop_hook_active -> one strike, allow", rc, ALLOW, err)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(garbage)))
+expect("... and without stop_hook_active the first stop is still bounced", rc, BLOCK, err)
+t = kg_transcript(
+    "id-mismatch.jsonl",
+    [
+        kg_prompt("x", "p-other"),
+        kg_said(ASKS),
+        kg_feedback("p-other"),
+        kg_said(ASKS),
+        kg_feedback("p-other"),
+        kg_said(ASKS),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("a prompt_id matching no record falls back to the last real prompt -> two idle bounces, allow", rc, ALLOW, err)
+t = kg_transcript(
+    "plugin-bracket.jsonl",
+    [
+        kg_prompt("x"),
+        kg_said(ASKS),
+        kg_feedback(hook="/bin/bash ${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"),
+        kg_said(ASKS),
+        kg_feedback(hook="/bin/bash run.sh"),
+        kg_said(ASKS),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(ASKS, transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("a bounce whose bracketed command does not name the script is still ours - the header says so", rc, ALLOW, err)
+
+NOT_HAND_BACKS = [
+    "Kept your choice of Europe/Berlin for the index.",
+    "The user's decision is recorded in the ADR.",
+    "Your permission rules already allow `git push`.",
+    "The trace shows your call to parse() passes a naive timestamp.",
+    "If you want the long version, the doc is at docs/x.md.",
+    "If you'd like to reproduce it: `pytest -k dst`.",
+    "Remaining risk: the DST path is untested here.",
+    "Next steps:\n\nNone - the release is out.",
+    "I am standing by the decision to index in Europe/Berlin.",
+    "The assertion messages tell me which branch fired.",
+    "The worker is waiting for the signal file before it starts.",
+    "The parser raises when you give it a naive timestamp.",
+    "The tests say so.",
+    "Is it safe? I'd say yes - both suites are green.",
+    "The logs say when it last ran.",
+    "The PR is ready for your review.",
+    "Also fixed the two unrelated lints unprompted.",
+    "I renamed the step on my own initiative; both suites are green.",
+]
+for i, msg in enumerate(NOT_HAND_BACKS):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"not a hand-back #{i + 1} -> allow", rc, ALLOW, err)
+STILL_CAUGHT = [
+    "Leftover: the loader.",
+    "Pending: the loader and the tests.",
+    "Parser done. Say which and I'll do it.",
+    "Not re-arming until you say so. Holding.",
+    "Both are ready; it should be your call, not mine.",
+    "Ready for your go-ahead on the merge.",
+]
+for i, msg in enumerate(STILL_CAUGHT):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"still caught #{i + 1} -> block", rc, BLOCK, err)
+
+
+def kg_tool_named(name: str) -> dict[str, object]:
+    content = [{"type": "tool_use", "id": "t", "name": name, "input": {}}]
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": content}}
+
+
+answer = "It parses the roster and returns the slots; nothing else touches the file."
+t = kg_transcript("lm-read-only.jsonl", [kg_prompt(LM), kg_tool_named("Read"), kg_said(answer)])
+rc, err = run_hook(NOPUNT, stop_payload(answer, transcript_path=str(t), prompt_id=PID))
+expect("a /lost-mary turn that only read files to answer needs no closing line", rc, ALLOW, err)
+t = kg_transcript("lm-edited.jsonl", [kg_prompt(LM), kg_tool_named("Edit"), kg_said(answer)])
+rc, err = run_hook(NOPUNT, stop_payload(answer, transcript_path=str(t), prompt_id=PID))
+expect("... one that edited does", rc, BLOCK, err)
+
+# The plugin wiring: every hooks.json entry runs its script through hooks/run.sh, which finds a Python
+# that works and passes the payload through. In `claude plugin eval` the `python3` on PATH was the
+# Windows Python Install Manager shim with no runtimes (sandboxed profile), and every hook failed open.
+print()
+print("hooks/run.sh - the plugin's interpreter shim runs a hook with its payload")
+RUN_SH = ROOT / "hooks" / "run.sh"
+wiring = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+entries = [h for groups in wiring["hooks"].values() for g in groups for h in g["hooks"] if "run.sh" in h["command"]]
+expect_true(
+    "every scripted hook runs through hooks/run.sh and names a script that exists",
+    entries
+    and all(
+        h["command"].startswith('/bin/bash "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/')
+        and (ROOT / h["command"].split('"')[3].replace("${CLAUDE_PLUGIN_ROOT}/", "")).is_file()
+        for h in entries
+    ),
+    str([h["command"] for h in entries]),
+)
+# Git's bash, the one Claude Code runs hook command strings in; on Windows a bare `bash` on PATH can be the
+# WSL stub in System32.
+git_exe = shutil.which("git")
+git_bash = Path(git_exe).resolve().parents[1] / "usr" / "bin" / "bash.exe" if git_exe else None
+bash_exe = str(git_bash) if git_bash is not None and git_bash.is_file() else shutil.which("bash")
+if bash_exe is None:
+    print("  skip bash not on PATH - the shim is not exercised here")
+else:
+    proc = subprocess.run(
+        [bash_exe, str(RUN_SH), str(NOPUNT)], input=json.dumps(stop_payload(GO_AHEADS[0])).encode(), capture_output=True
+    )
+    expect(
+        "the shim runs no-punt with the payload on stdin -> the hand-back is bounced",
+        proc.returncode,
+        BLOCK,
+        proc.stderr.decode(),
+    )
+    proc = subprocess.run(
+        [bash_exe, str(RUN_SH), str(NOPUNT)],
+        input=json.dumps(stop_payload(GO_AHEADS[0])).encode(),
+        capture_output=True,
+        env={**os.environ, "LOST_MARY_PYTHON": sys.executable},
+    )
+    expect("LOST_MARY_PYTHON names the interpreter first", proc.returncode, BLOCK, proc.stderr.decode())
+    proc = subprocess.run(
+        [bash_exe, str(RUN_SH), str(NOPUNT)],
+        input=json.dumps(stop_payload(KEEP_GOING_OK[0])).encode(),
+        capture_output=True,
+    )
+    expect("... and a clean closing passes through as exit 0", proc.returncode, ALLOW, proc.stderr.decode())
+
 # --------------------------------------------------------------------------- friction
 print()
 print("friction.py - read-only report over transcripts and settings")
@@ -1439,6 +1823,21 @@ def jsonl(records: list[dict[str, object]]) -> str:
             *refused("r1", "cd /repo && EU_env/.venv/Scripts/python.exe -m pytest -q"),
             said("Done. I'll leave the flaky test for you.", "2026-09-04T09:12:00.000Z"),
             said("Done. I'll leave the flaky test for you.", "2026-09-04T09:12:01.000Z"),  # streamed - one hand-back
+            {
+                "type": "user",
+                "isMeta": True,
+                "uuid": "fb-s1",
+                "message": {
+                    "role": "user",
+                    "content": "Stop hook feedback:\n[py no-punt.py]: Nothing is left on the table (no-punt).",
+                },
+            },
+            said(
+                "Fixed the flaky test too.\n\nBLOCKED: merging to main is production; "
+                "I'll leave the release notes for you.",
+                "2026-09-04T09:13:00.000Z",
+            ),
+            prose("go on"),  # the prompt that followed: the messages above ended their turns
             assistant(
                 tool_use(
                     "q9",
@@ -1463,7 +1862,27 @@ def jsonl(records: list[dict[str, object]]) -> str:
             prose("do y"),
             *refused("r2", "# restart the run role\n$p = Get-Process -Id 1\nStop-ScheduledTask -TaskName OBF-run"),
             said("All fixed; FOUND: a.py - typo, fixed."),
+            prose("ok"),  # ends that turn, so the FOUND: line is judged - and is not a hand-back
             said("Shipped. I'll leave the release notes for you.", "2026-09-10T15:30:00.000Z"),
+            {  # check-evidence blocked the same stop first ...
+                "type": "user",
+                "isMeta": True,
+                "uuid": "fb-s2a",
+                "message": {
+                    "role": "user",
+                    "content": "Stop hook feedback:\n[py check-evidence.py --lead]: Evidence check failed.",
+                },
+            },
+            {  # ... and no-punt's bounce came one record later - by its header, the plugin wiring names no script
+                "type": "user",
+                "isMeta": True,
+                "uuid": "fb-s2b",
+                "message": {
+                    "role": "user",
+                    "content": "Stop hook feedback:\n[/bin/bash run.sh]: Nothing is left on the table (no-punt).",
+                },
+            },
+            said("Shipped; release notes written and pushed.", "2026-09-10T15:31:00.000Z"),
         ]
     ),
     encoding="utf-8",
@@ -1495,6 +1914,14 @@ expect_true(
     str(data),
 )
 expect_true("two hand-backs (one streamed twice); the FOUND: line is not one", data["hand_backs"] == 2, str(data))
+expect_true(
+    "both were bounced by no-punt (one behind a check-evidence block); the BLOCKED: stop is audited and flagged",
+    data["hand_backs_bounced"] == 2
+    and data["blocked_stops"] == 1
+    and data["blocked_with_hand_back"] == 1
+    and any("BLOCKED: merging to main" in e and "parked" in e for e in data["blocked_examples"]),
+    str({k: data[k] for k in ("hand_backs_bounced", "blocked_stops", "blocked_with_hand_back", "blocked_examples")}),
+)
 expect_true(
     "the example names the matched phrase",
     any("leave the flaky test for you" in e for e in data["hand_back_examples"]),
@@ -1663,7 +2090,7 @@ data = json.loads(proc.stdout.decode("utf-8"))
 expect_true(
     "hook fires counted per event, all three shapes",
     data["hook_fires"].get("PostToolUse") == 2
-    and data["hook_fires"].get("Stop") == 2
+    and data["hook_fires"].get("Stop") == 5  # 2 here + the three Stop feedback records in s1/s2 above
     and data["hook_fires"].get("SubagentStart") == 2,
     str(data.get("hook_fires")),
 )
@@ -1671,7 +2098,7 @@ expect_true(
 # so any test on exitCode counts none of them.
 expect_true(
     "a hook_blocking_error is counted as a block, though it carries no exitCode",
-    data["hook_blocks"].get("PostToolUse") == 2 and data["hook_blocks"].get("Stop") == 1,
+    data["hook_blocks"].get("PostToolUse") == 2 and data["hook_blocks"].get("Stop") == 4,  # 1 + the three in s1/s2
     str(data.get("hook_blocks")),
 )
 expect_true(
@@ -1722,7 +2149,7 @@ def stop_feedback(event: str, script: str, args: str, text: str, when: str, uid:
         "gitBranch": "main",
         "type": "user",
         "message": {"role": "user", "content": f"{event} hook feedback:\n[{HOOK_CMD.format(script, args)}]: {text}"},
-        "isMeta": False,
+        "isMeta": True,  # as written by 2.1.273, measured 2026-09-17
         "uuid": uid,
         "timestamp": when,
         "promptId": "0a1b2c3d-0000-4000-8000-000000000002",

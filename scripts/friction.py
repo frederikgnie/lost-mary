@@ -12,8 +12,12 @@ evidence is already on disk: every session transcript under
                option - a decision the model had already made;
   refusals     tool calls refused by a permission prompt or the auto-mode
                classifier, grouped by the command's leading token;
-  hand-backs   assistant messages that hand work back to the user, matched
-               with the same patterns as scripts/no-punt.py;
+  hand-backs   turn-ending messages that hand work back to the user or stop
+               to ask for a go-ahead, judged with scripts/no-punt.py's own
+               detector (only a message that ended a turn counts - the next
+               record is a real user record, or the file ends); how many of
+               them no-punt bounced; and how many turns ended on a BLOCKED:
+               line, the declared, auditable way to stop early;
   hooks        the firings a hook LEFT BEHIND, split into blocks (the hook
                doing its job), fail-open notices (exit 0 with stderr - a hook
                that could not do its job and said so on a stream nobody reads)
@@ -97,6 +101,9 @@ class ProjectStats:
     blocked: int = 0  # menus no-ask stopped before they reached the user
     refusals: int = 0
     hand_backs: int = 0
+    hand_backs_bounced: int = 0  # of those, followed by a no-punt bounce
+    blocked_stops: int = 0  # turns that ended on a BLOCKED: line
+    blocked_with_hand_back: int = 0  # of those, still carrying a hand-back - the hatch used as a bypass
 
 
 @dataclass
@@ -124,6 +131,7 @@ class Report:
     refused_tools: Counter[str] = field(default_factory=Counter)
     # (timestamp, rendered example); kept newest-first so a fixed problem cannot read as a live one
     hand_backs_seen: list[tuple[str, str]] = field(default_factory=list)
+    blocked_seen: list[tuple[str, str]] = field(default_factory=list)  # the BLOCKED: lines, to be read
     hook_fires: Counter[str] = field(default_factory=Counter)
     hook_blocks: Counter[str] = field(default_factory=Counter)
     hook_notices: Counter[str] = field(default_factory=Counter)
@@ -157,17 +165,34 @@ class Report:
     def blocked(self) -> int:
         return sum(p.blocked for p in self.projects.values())
 
+    @property
+    def hand_backs_bounced(self) -> int:
+        return sum(p.hand_backs_bounced for p in self.projects.values())
 
-def load_punt_check() -> tuple[Any, str | None]:
-    """The hand-back detector from no-punt.py, imported by path (the file name has a hyphen)."""
+    @property
+    def blocked_stops(self) -> int:
+        return sum(p.blocked_stops for p in self.projects.values())
+
+    @property
+    def blocked_with_hand_back(self) -> int:
+        return sum(p.blocked_with_hand_back for p in self.projects.values())
+
+    @property
+    def blocked_examples(self) -> list[str]:
+        return [text for _, text in sorted(self.blocked_seen, reverse=True)[:8]]
+
+
+def load_no_punt() -> tuple[Any, str | None]:
+    """no-punt.py as a module, imported by path (the file name has a hyphen): hand_back() and closing_states()."""
     path = Path(__file__).with_name("no-punt.py")
     try:
         spec = importlib.util.spec_from_file_location("no_punt", path)
         if spec is None or spec.loader is None:
             return None, f"cannot load {path}"
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # dataclasses in the hook look the module up here (3.14)
         spec.loader.exec_module(module)
-        return module.punt_phrase, None
+        return module, None
     except (OSError, ImportError, AttributeError, SyntaxError) as exc:
         return None, f"hand-backs not counted: {exc}"
 
@@ -338,18 +363,78 @@ def record_time(record: dict[str, Any]) -> str:
     return stamp[:24] if isinstance(stamp, str) and ISO_DATE.match(stamp[:10]) else ""
 
 
-def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase: Any) -> tuple[str, str] | None:
+def is_no_punt_feedback(record: dict[str, Any]) -> bool:
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        return False
+    feedback = HOOK_FEEDBACK.match(content)
+    return bool(feedback and ("no-punt" in feedback.group(2) or "(no-punt)." in content[:600]))
+
+
+def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: Any) -> tuple[str, str] | None:
     """Count one transcript. Returns the (first, last) dates its records carry, or None when none do."""
     pending: dict[str, tuple[str, str]] = {}  # tool_use id -> (tool name, command)
     asked: dict[str, tuple[int, int]] = {}  # AskUserQuestion id -> (questions, of which with a recommended option)
-    seen: set[str] = set()  # streaming writes one message as several records; count it once
     fed_back: set[str] = set()  # uuid of each hook-feedback record counted here; a resume repeats them
     project = path.parent.name
     dates: list[str] = []
+    # The message that may have ended a turn: the current assistant message (records sharing message.id),
+    # whether it called a tool, and when it was said. It is judged when the next real user record arrives or
+    # the file ends: a message followed by a tool result did not end the turn, and mid-turn text is narrative.
+    current_id: object = None
+    parts: list[str] = []
+    called_tool = False
+    said_at = ""
+    final: tuple[str, str] | None = None
+    unbounced = False  # the last judged hand-back has not (yet) been followed by a no-punt bounce
+
+    def close_message() -> None:
+        nonlocal final, parts, called_tool
+        joined = "\n".join(parts)
+        if called_tool:
+            final = None
+        elif joined.strip():
+            final = (joined, said_at)
+        parts, called_tool = [], False
+
+    def judge(follow: dict[str, Any] | None) -> None:
+        nonlocal final, unbounced
+        if final is None or no_punt is None:
+            return
+        text, when = final
+        final = None
+        found = no_punt.hand_back(text)
+        day = when[:10] or "(undated)"
+        if "BLOCKED" in no_punt.closing_states(text):
+            stats.blocked_stops += 1
+            line = next((ln.strip() for ln in text.splitlines() if "BLOCKED" in ln), "")
+            shown = CONTROL.sub("", " ".join(line.split()))[:110]
+            if found is not None:
+                stats.blocked_with_hand_back += 1
+                shown += f"  (also {found.kind}: {CONTROL.sub('', found.phrase)!r})"
+            report.blocked_seen.append((when, f"{day}  [{project}] {shown}"))
+            if len(report.blocked_seen) > 200:
+                report.blocked_seen = sorted(report.blocked_seen, reverse=True)[:8]
+            return
+        if found is None:
+            return
+        stats.hand_backs += 1
+        if follow is not None and is_no_punt_feedback(follow):
+            stats.hand_backs_bounced += 1
+        else:
+            unbounced = True  # a second hook's block may sit between the message and no-punt's bounce
+        snippet = CONTROL.sub("", " ".join(text.split()))
+        clean_phrase = CONTROL.sub("", found.phrase)
+        report.hand_backs_seen.append((when, f"{day}  [{project}] {found.kind} {clean_phrase!r}  {snippet[:110]}"))
+        if len(report.hand_backs_seen) > 200:  # dropped ones are older than all we keep
+            report.hand_backs_seen = sorted(report.hand_backs_seen, reverse=True)[:8]
+
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             if not any(
-                k in line for k in ('"tool_use"', '"tool_result"', '"assistant"', '"hookEvent"', "hook feedback:")
+                k in line
+                for k in ('"tool_use"', '"tool_result"', '"assistant"', '"user"', '"hookEvent"', "hook feedback:")
             ):
                 continue
             try:
@@ -367,22 +452,32 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
             scan_hook_feedback(record, report, when, fed_back)
             message = record.get("message")  # a string here (seen in the wild) must cost this record, not the run
             content = message.get("content") if isinstance(message, dict) else None
+            kind = record.get("type")
+            if kind == "assistant" and isinstance(message, dict):
+                unbounced = False
+                message_id: object = message.get("id") or record.get("uuid") or object()
+                if message_id != current_id:
+                    close_message()
+                    current_id = message_id
+                parts.append(text_of(content) if isinstance(content, list) else "")
+                said_at = when or said_at
+                if isinstance(content, list) and any(
+                    isinstance(i, dict) and i.get("type") == "tool_use" for i in content
+                ):
+                    called_tool = True
+            elif kind == "user" and not (
+                isinstance(content, list)
+                and any(isinstance(i, dict) and i.get("type") == "tool_result" for i in content)
+            ):
+                close_message()
+                current_id = None
+                if final is None and unbounced and is_no_punt_feedback(record):
+                    stats.hand_backs_bounced += 1  # the bounce behind another hook's block
+                    unbounced = False
+                else:
+                    judge(record)
             if not isinstance(content, list):
                 continue
-            kind = record.get("type")
-            if kind == "assistant":
-                text = text_of(content)
-                if text.strip() and text not in seen and punt_phrase is not None:
-                    seen.add(text)
-                    phrase = punt_phrase(text)
-                    if phrase:
-                        stats.hand_backs += 1
-                        snippet = CONTROL.sub("", " ".join(text.split()))
-                        clean_phrase = CONTROL.sub("", phrase)
-                        day = when[:10] or "(undated)"
-                        report.hand_backs_seen.append((when, f"{day}  [{project}] {clean_phrase!r}  {snippet[:110]}"))
-                        if len(report.hand_backs_seen) > 200:  # dropped ones are older than all we keep
-                            report.hand_backs_seen = sorted(report.hand_backs_seen, reverse=True)[:8]
             for item in content:
                 if not isinstance(item, dict):
                     continue
@@ -421,6 +516,8 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, punt_phrase
                         report.refused_tools[name] += 1
                         if command:
                             report.refused_commands[leading_token(command)] += 1
+    close_message()
+    judge(None)
     # Menus whose result never arrived (session cut off) were still asked.
     for count, recommended in asked.values():
         stats.questions += count
@@ -470,9 +567,9 @@ def build_report(
     without hand-backs rather than loading one of the scripts it is about to judge.
     """
     report = Report(since=since)
-    punt_phrase: Any = None
+    no_punt: Any = None
     if hand_backs:
-        punt_phrase, note = load_punt_check()
+        no_punt, note = load_no_punt()
         if note:
             report.notes.append(note)
     # Only the lead's own transcripts: subagents (<project>/<session>/subagents/) and
@@ -495,7 +592,7 @@ def build_report(
         stats.sessions += 1
         span: tuple[str, str] | None = None
         try:
-            span = scan_transcript(path, stats, report, punt_phrase)
+            span = scan_transcript(path, stats, report, no_punt)
         except Exception as exc:  # one unreadable transcript costs its file, never the whole report
             report.notes.append(f"skipped {path.name}: {exc}")
         if span is not None:
@@ -524,6 +621,10 @@ def as_json(report: Report) -> dict[str, Any]:
         "blocked": report.blocked,
         "refusals": report.refusals,
         "hand_backs": report.hand_backs,
+        "hand_backs_bounced": report.hand_backs_bounced,
+        "blocked_stops": report.blocked_stops,
+        "blocked_with_hand_back": report.blocked_with_hand_back,
+        "blocked_examples": report.blocked_examples,
         "hook_fires": dict(report.hook_fires.most_common()),
         "hook_blocks": dict(report.hook_blocks.most_common()),
         "hook_notices": dict(report.hook_notices.most_common()),
@@ -550,6 +651,9 @@ def as_json(report: Report) -> dict[str, Any]:
                 "blocked": p.blocked,
                 "refusals": p.refusals,
                 "hand_backs": p.hand_backs,
+                "hand_backs_bounced": p.hand_backs_bounced,
+                "blocked_stops": p.blocked_stops,
+                "blocked_with_hand_back": p.blocked_with_hand_back,
             }
             for name, p in sorted(report.projects.items())
         },
@@ -626,7 +730,11 @@ def as_text(report: Report) -> str:
     )
     tools = ", ".join(f"{n} {c}" for n, c in report.refused_tools.most_common(4))
     lines.append(f"refusals      {report.refusals} tool call(s) refused" + (f"  ({tools})" if tools else ""))
-    lines.append(f"hand-backs    {report.hand_backs} assistant message(s) hand work back to the user")
+    lines.append(
+        f"hand-backs    {report.hand_backs} message(s) ended a turn on a hand-back or a go-ahead request "
+        f"(a bounced message and its rewrite both count), {report.hand_backs_bounced} bounced by no-punt; "
+        f"{report.blocked_stops} turn(s) ended on BLOCKED:, {report.blocked_with_hand_back} still carrying a hand-back"
+    )
     fires, blocks, notices = (
         sum(report.hook_fires.values()),
         sum(report.hook_blocks.values()),
@@ -654,6 +762,9 @@ def as_text(report: Report) -> str:
     if report.hand_back_examples:
         lines += ["", "hand-back examples"]
         lines += [f"  {example}" for example in report.hand_back_examples]
+    if report.blocked_examples:
+        lines += ["", "BLOCKED: stops - the declared early ends, to be read, not trusted"]
+        lines += [f"  {example}" for example in report.blocked_examples]
     if report.dead_allow:
         lines += ["", "dead allow rules (exact Bash entries - prefer `Bash(cmd *)`)"]
         lines += [f"  {CONTROL.sub('', rule)[:110]}" for rule in report.dead_allow[:12]]

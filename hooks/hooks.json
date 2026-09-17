@@ -1,13 +1,12 @@
 {
-  "description": "The same wiring as settings.example.json / settings.example.windows.json, for the plugin way of consuming this library. Two differences, both forced: script paths resolve through ${CLAUDE_PLUGIN_ROOT} instead of an install directory, and every hook that runs one of them uses the exec form (command + args), because a command string goes through Git Bash or PowerShell on Windows and quoting an absolute path through either is where this wiring used to break. The interpreter is `python3` on PATH - a versioned manifest cannot carry the machine-specific absolute python.exe path the Windows settings example needs - so on Windows the hooks fail open, loudly, until python3 resolves. The one shell-form entry is the model-policy print: it is a shell one-liner with a fallback, not a script, and it reads a file the installer creates rather than anything this plugin ships.",
+  "description": "The same wiring as settings.example.json / settings.example.windows.json, for the plugin way of consuming this library. Two differences, both forced: script paths resolve through ${CLAUDE_PLUGIN_ROOT} instead of an install directory, and every hook that runs one of them goes through hooks/run.sh as a command string, `/bin/bash <shim> <script>`: Claude Code runs a command string in Git Bash on Windows (the same shell as the Bash tool), where /bin/bash is Git's own bash, while a bare `bash` - in the exec form or in the string - resolves through the Windows PATH to the WSL stub in System32 first on a machine without WSL (measured 2026-09-17). The interpreter is found by hooks/run.sh - a versioned manifest cannot carry the machine-specific absolute python.exe path the Windows settings example needs, and on Windows the `python3` on PATH can be the Python Install Manager shim, which finds no runtimes once the profile directories are redirected (claude plugin eval does exactly that, and every hook failed open in the with-arm until 2026-09-17). The shim tries $LOST_MARY_PYTHON, python3, python, then the user's pymanager runtime directories, and fails open with a notice. The one shell-form entry is the model-policy print: it is a shell one-liner with a fallback, not a script, and it reads a file the installer creates rather than anything this plugin ships.",
   "hooks": {
     "SubagentStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "brief"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py\" brief",
             "timeout": 10
           }
         ]
@@ -19,8 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "recall"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py\" recall",
             "timeout": 10
           },
           {
@@ -37,8 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permit.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/permit.py\"",
             "timeout": 10
           }
         ]
@@ -50,8 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-spawn.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/check-spawn.py\"",
             "timeout": 10
           }
         ]
@@ -61,8 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/no-ask.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/no-ask.py\"",
             "timeout": 10
           }
         ]
@@ -73,8 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/no-punt.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/no-punt.py\"",
             "timeout": 10
           }
         ]
@@ -83,8 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "record"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py\" record",
             "timeout": 20
           }
         ]
@@ -93,8 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py", "--lead"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py\" --lead",
             "timeout": 20
           }
         ]
@@ -106,8 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "attach"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py\" attach",
             "timeout": 10
           }
         ]
@@ -117,8 +108,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pycheck.py", "--hook"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pycheck.py\" --hook",
             "timeout": 90
           }
         ]
@@ -128,8 +118,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/witness.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/witness.py\"",
             "timeout": 10
           }
         ]
@@ -141,8 +130,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/witness.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/witness.py\"",
             "timeout": 10
           }
         ]
@@ -154,8 +142,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/check-evidence.py\"",
             "timeout": 20
           }
         ]
@@ -164,8 +151,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py", "record"],
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py\" record",
             "timeout": 20
           }
         ]
