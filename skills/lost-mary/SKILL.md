@@ -41,15 +41,6 @@ the user can supply, or the irreversible action>`. Anything else at the end of
 a turn that did work - an offer, a menu, "say the word", a `Remaining:` list -
 is bounced by the Stop hook and the turn continues.
 
-**The turn ends when the work does.** A list of findings is a queue: work it
-to the end in this turn, and look things up - the repository, its docs, the
-web - before asking anything. Close on the line that is true: `DONE: <the
-Done-means check you re-ran and what it showed>`, `IN FLIGHT: <the named agent
-or branch carrying the rest, and what resumes you>`, or `BLOCKED: <what only
-the user can supply, or the irreversible action>`. Anything else at the end of
-a turn that did work - an offer, a menu, "say the word", a `Remaining:` list -
-is bounced by the Stop hook and the turn continues.
-
 ## 2. Smallest mode that can work
 
 | Signal | Do |
