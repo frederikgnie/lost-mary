@@ -148,6 +148,24 @@ and depends on the same transcript shape as `check-evidence`.
   keys or documented how to. No allow rule lifts this. Prepare the change,
   put the JSON in the reply, let the user apply it. A project
   `.claude/settings.json` in the cwd is writable via the Write tool.
+  Re-checked 2026-09-24 (2.1.281): writing a merged copy to the scratchpad is
+  refused too (`[Self-Modification]`), and so was a `grep` over
+  `settings.example*.json` issued right after it - the denial covers the
+  outcome, not the path. The reply is the only channel.
+- `gh pr merge` in auto mode (verified 2026-09-24, 2.1.281, against
+  `permission-modes` and `auto-mode-config`): a built-in default blocks
+  "merging a pull request no human has approved, approving Claude's own pull
+  request, or disabling CI checks", reported to the model as
+  `[Merge Without Review]`. "Review" means a human approval on the PR: a
+  `review` spawn cannot satisfy it, because the classifier sees user messages,
+  non-read-only tool calls and CLAUDE.md but tool results are stripped - so a
+  subagent's verdict is invisible to it. Transcripts confirm it: sessions in
+  `c--repo-powercountant` with six `review` spawns were denied the merge
+  twice (2026-09-23). The rule is a `soft_deny`: an `autoMode.allow` rule
+  overrides it, and so does a user message naming the exact merge (one went
+  through on 2026-09-23 after the user said to merge). A chained
+  `push && pr create && pr merge` is denied as a whole - nothing in the chain
+  runs - so a merge, when allowed, is its own call.
 
 ## Degradation guidance
 
