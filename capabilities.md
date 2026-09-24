@@ -117,8 +117,10 @@ The `hooks` block is prescribed; `autoMode` is a template (below). Agent Teams
 model; the Agent tool's `isolation: worktree` covers concurrent writers.
 
 **`autoMode` template and the extra `--verify` checks (2026-09-04).** The
-examples carry `autoMode.allow` with `"$defaults"` plus two prose rules; auto
-mode reads it from `~/.claude/settings.json` only. `--verify` reports DRIFT when
+examples carry `autoMode.allow` with `"$defaults"` plus three prose rules (the
+third, the PR-merge exception, added 2026-09-24 - see the `gh pr merge` entry
+below); auto mode reads it from `~/.claude/settings.json` only. `--verify`
+reports DRIFT when
 `autoMode.allow` exists without `"$defaults"` (the list would replace the
 built-in classifier rules), a NOTE when `defaultMode` is `auto` with no
 `autoMode.allow`, and a NOTE when five or more `Bash(...)` allow rules are exact
@@ -148,6 +150,28 @@ and depends on the same transcript shape as `check-evidence`.
   keys or documented how to. No allow rule lifts this. Prepare the change,
   put the JSON in the reply, let the user apply it. A project
   `.claude/settings.json` in the cwd is writable via the Write tool.
+  Re-checked 2026-09-24 (2.1.281): writing a merged copy to the scratchpad is
+  refused too (`[Self-Modification]`), and so was a `grep` over
+  `settings.example*.json` issued right after it - the denial covers the
+  outcome, not the path. The reply is the only channel.
+- `gh pr merge` in auto mode (verified 2026-09-24, 2.1.281, against
+  `permission-modes` and `auto-mode-config`): a built-in default blocks
+  "merging a pull request no human has approved, approving Claude's own pull
+  request, or disabling CI checks", reported to the model as
+  `[Merge Without Review]`. "Review" means a human approval on the PR: a
+  `review` spawn cannot satisfy it, because the classifier sees user messages,
+  non-read-only tool calls and CLAUDE.md but tool results are stripped - so a
+  subagent's verdict is invisible to it. Transcripts confirm it: sessions in
+  `c--repo-powercountant` with six `review` spawns were denied the merge
+  twice (2026-09-23). Not `hard_deny`: a user message naming the merge got
+  one through on 2026-09-23, which only a `soft_deny` permits, so an
+  `autoMode.allow` rule overrides it too (the docs do not name the tier; this
+  is the inference). The template rule's preconditions are what the
+  classifier can see - that the checks and the `review` spawn were *called*,
+  not that they passed; pass/fail stays with `check-evidence`. A chained
+  `push && pr create && pr merge` is denied as a whole - the classifier
+  judges the Bash call as one unit, unlike the prefix-rule matching above -
+  so a merge, when allowed, is its own call.
 
 ## Degradation guidance
 
