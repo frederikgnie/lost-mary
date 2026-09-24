@@ -117,7 +117,9 @@ The `hooks` block is prescribed; `autoMode` is a template (below). Agent Teams
 model; the Agent tool's `isolation: worktree` covers concurrent writers.
 
 **`autoMode` template and the extra `--verify` checks (2026-09-04).** The
-examples carry `autoMode.allow` with `"$defaults"` plus two prose rules; auto
+examples carry `autoMode.allow` with `"$defaults"` plus three prose rules (the
+third, the PR-merge exception, added 2026-09-24 - see the `gh pr merge` entry
+below); auto
 mode reads it from `~/.claude/settings.json` only. `--verify` reports DRIFT when
 `autoMode.allow` exists without `"$defaults"` (the list would replace the
 built-in classifier rules), a NOTE when `defaultMode` is `auto` with no

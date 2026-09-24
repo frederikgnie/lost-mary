@@ -101,8 +101,10 @@ The installer never touches `settings.json`. Merge the `hooks` block from
 `~/.claude/settings.json`. A running Claude Code normally picks it up live;
 restart if it does not.
 
-The examples also carry an `autoMode` template: two prose rules the auto-mode
-classifier reads, alongside `"$defaults"`, which keeps the built-in rules -
+The examples also carry an `autoMode` template: three prose rules the auto-mode
+classifier reads (non-main pushes, the project's own checks, and merging a PR
+the session opened and reviewed - the built-in `[Merge Without Review]` block
+otherwise denies every `gh pr merge`), alongside `"$defaults"`, which keeps the built-in rules -
 without it your list *replaces* them, and `--verify` flags that as drift. Edit
 the placeholders or drop the block; auto mode reads `autoMode` from
 `~/.claude/settings.json` only, never from a project's `.claude/settings.json`.

@@ -164,7 +164,8 @@
     "allow": [
       "$defaults",
       "Pushing to a git branch that is not main or master, in repositories under <YOUR REPO ROOT>, is routine and pre-approved; pushes to main or master, force-pushes and history rewrites are not covered.",
-      "Running a project's own tests, lint and type-check through its virtual environment (pytest, ruff, ty) is pre-approved, including when chained after cd or with output redirected to a log file under the repository."
+      "Running a project's own tests, lint and type-check through its virtual environment (pytest, ruff, ty) is pre-approved, including when chained after cd or with output redirected to a log file under the repository.",
+      "Merging a pull request with gh pr merge into main of a repository under <YOUR REPO ROOT> is pre-approved when this session pushed the branch and opened the PR, spawned a review agent on the PR's diff, and ran the project's checks: the user has asked not to be prompted for these merges. Merging a PR this session did not open, approving a PR, and disabling or bypassing CI checks are not covered."
     ]
   }
 }
