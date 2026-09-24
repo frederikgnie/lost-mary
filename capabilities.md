@@ -119,8 +119,8 @@ model; the Agent tool's `isolation: worktree` covers concurrent writers.
 **`autoMode` template and the extra `--verify` checks (2026-09-04).** The
 examples carry `autoMode.allow` with `"$defaults"` plus three prose rules (the
 third, the PR-merge exception, added 2026-09-24 - see the `gh pr merge` entry
-below); auto
-mode reads it from `~/.claude/settings.json` only. `--verify` reports DRIFT when
+below); auto mode reads it from `~/.claude/settings.json` only. `--verify`
+reports DRIFT when
 `autoMode.allow` exists without `"$defaults"` (the list would replace the
 built-in classifier rules), a NOTE when `defaultMode` is `auto` with no
 `autoMode.allow`, and a NOTE when five or more `Bash(...)` allow rules are exact
@@ -163,11 +163,15 @@ and depends on the same transcript shape as `check-evidence`.
   non-read-only tool calls and CLAUDE.md but tool results are stripped - so a
   subagent's verdict is invisible to it. Transcripts confirm it: sessions in
   `c--repo-powercountant` with six `review` spawns were denied the merge
-  twice (2026-09-23). The rule is a `soft_deny`: an `autoMode.allow` rule
-  overrides it, and so does a user message naming the exact merge (one went
-  through on 2026-09-23 after the user said to merge). A chained
-  `push && pr create && pr merge` is denied as a whole - nothing in the chain
-  runs - so a merge, when allowed, is its own call.
+  twice (2026-09-23). Not `hard_deny`: a user message naming the merge got
+  one through on 2026-09-23, which only a `soft_deny` permits, so an
+  `autoMode.allow` rule overrides it too (the docs do not name the tier; this
+  is the inference). The template rule's preconditions are what the
+  classifier can see - that the checks and the `review` spawn were *called*,
+  not that they passed; pass/fail stays with `check-evidence`. A chained
+  `push && pr create && pr merge` is denied as a whole - the classifier
+  judges the Bash call as one unit, unlike the prefix-rule matching above -
+  so a merge, when allowed, is its own call.
 
 ## Degradation guidance
 

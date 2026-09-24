@@ -103,8 +103,9 @@ restart if it does not.
 
 The examples also carry an `autoMode` template: three prose rules the auto-mode
 classifier reads (non-main pushes, the project's own checks, and merging a PR
-the session opened and reviewed - the built-in `[Merge Without Review]` block
-otherwise denies every `gh pr merge`), alongside `"$defaults"`, which keeps the built-in rules -
+the session opened and reviewed - the built-in `[Merge Without Review]` rule
+otherwise denies merging a PR no human has approved), alongside
+`"$defaults"`, which keeps the built-in rules -
 without it your list *replaces* them, and `--verify` flags that as drift. Edit
 the placeholders or drop the block; auto mode reads `autoMode` from
 `~/.claude/settings.json` only, never from a project's `.claude/settings.json`.
