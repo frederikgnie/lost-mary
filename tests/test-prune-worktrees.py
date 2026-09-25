@@ -105,6 +105,22 @@ def age_tree(root: Path, seconds: float) -> None:
             os.utime(Path(dirpath) / f, (stamp, stamp))
 
 
+def age_gitdir(wt: Path, seconds: float) -> None:
+    """Age git's own records for a worktree (index, HEAD, logs/HEAD): the pruner counts them as activity."""
+    stamp = time.time() - seconds
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir").strip())
+    for name in ("index", "HEAD", "logs/HEAD"):
+        f = gitdir / name
+        if f.exists():
+            os.utime(f, (stamp, stamp))
+
+
+def merge_to_main(wt: Path, branch: str) -> None:
+    git(wt, "push", "-q", "origin", branch)
+    git(PROJ, "merge", "-q", "--ff-only", branch)
+    git(PROJ, "push", "-q", "origin", "main")
+
+
 def load_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("prune_worktrees", PRUNE)
     assert spec is not None and spec.loader is not None
@@ -125,33 +141,42 @@ git(WORK, "clone", "-q", str(TMP / "origin.git"), str(PROJ))
 
 wt_merged = worktree("merged", "-b", "feat/merged")
 commit(wt_merged, "merged.txt")
-git(wt_merged, "push", "-q", "origin", "feat/merged")
-git(PROJ, "merge", "-q", "--ff-only", "feat/merged")
-git(PROJ, "push", "-q", "origin", "main")
+merge_to_main(wt_merged, "feat/merged")
+wt_cache = worktree("cache", "-b", "feat/cache")  # merged; only an ignored cache left behind: removable
+commit(wt_cache, "cache.txt")
+merge_to_main(wt_cache, "feat/cache")
+wt_active = worktree("active", "-b", "feat/active")  # merged, but a file changed just now
+commit(wt_active, "active.txt")
+merge_to_main(wt_active, "feat/active")
+wt_fresh = worktree("fresh", "-b", "feat/fresh")  # just added from main: an ancestor of it, no work done yet
 
 wt_dirty = worktree("dirty", "-b", "feat/dirty")
 (wt_dirty / "scratch.txt").write_text("wip", encoding="utf-8")
-wt_ignored = worktree("ignored", "-b", "feat/ignored")  # only an ignored file: still clean
+wt_ignored = worktree("ignored", "-b", "feat/ignored")  # an ignored file `worktree remove` would delete: kept
 (wt_ignored / ".git-info-exclude-probe").write_text("x", encoding="utf-8")
 exclude = Path(git(wt_ignored, "rev-parse", "--git-path", "info/exclude").strip())
 exclude = exclude if exclude.is_absolute() else wt_ignored / exclude
 exclude.parent.mkdir(parents=True, exist_ok=True)
-exclude.write_text(".git-info-exclude-probe\n", encoding="utf-8")
+exclude.write_text(".git-info-exclude-probe\n__pycache__/\n", encoding="utf-8")
+(wt_cache / "__pycache__").mkdir()
+(wt_cache / "__pycache__" / "x.cpython-313.pyc").write_bytes(b"\0")
+# Review 2026-09-25: user config must not hide an untracked file from the clean check.
+git(PROJ, "config", "status.showUntrackedFiles", "no")
 
 wt_unpushed = worktree("unpushed", "-b", "feat/unpushed")
 commit(wt_unpushed, "unpushed.txt")
 wt_open = worktree("open", "-b", "feat/open")
 commit(wt_open, "open.txt")
 git(wt_open, "push", "-q", "origin", "feat/open")
-wt_active = worktree("active", "-b", "feat/active")
 wt_detached = worktree("detached", "--detach")
 wt_locked = worktree("locked", "-b", "feat/locked")
 git(PROJ, "worktree", "lock", str(wt_locked))
 wt_frozen = worktree("frozen", "-b", "feat/frozen")
 
-for wt in (wt_merged, wt_dirty, wt_ignored, wt_unpushed, wt_open, wt_detached, wt_locked, wt_frozen):
+ALL_WT = (wt_merged, wt_cache, wt_active, wt_fresh, wt_dirty, wt_ignored, wt_unpushed, wt_open, wt_detached)
+for wt in (*ALL_WT, wt_locked, wt_frozen):
     age_tree(wt, 2 * 86400)
-age_tree(wt_active, 2 * 86400)
+    age_gitdir(wt, 2 * 86400)
 (wt_active / "README").touch()  # one file changed just now
 
 leftover = WORK / "proj_wt_gone"
@@ -168,7 +193,9 @@ EXPECTED = {
     PROJ: ("KEPT", "main"),
     wt_merged: ("REMOVABLE", "clean, pushed, merged, idle"),
     wt_dirty: ("KEPT", "dirty"),
-    wt_ignored: ("REMOVABLE", "clean, pushed, merged, idle"),
+    wt_ignored: ("KEPT", "ignored file .git-info-exclude-probe (remove would delete it)"),
+    wt_cache: ("REMOVABLE", "clean, pushed, merged, idle"),
+    wt_fresh: ("KEPT", "no commits of its own yet"),
     wt_unpushed: ("KEPT", "unpushed"),
     wt_open: ("KEPT", "not merged"),
     wt_active: ("KEPT", "active 0m ago"),
@@ -205,7 +232,7 @@ check("dry run: branch reported", rows.get(norm_key(wt_merged), {}).get("branch"
 summ = json.loads(r.stdout)["summary"] if r.returncode == 0 else {}
 check(
     "dry run: summary counts",
-    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 1, 0, 10),
+    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 1, 0, 12),
     str(summ),
 )
 check("dry run changed no worktree", git(PROJ, "worktree", "list", "--porcelain") == worktrees_before)
@@ -243,14 +270,31 @@ for label, prs, want in cases:
 wt_m = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_merged.name)
 got = mod.judge(wt_m, False, [], 6.0, lambda _cwd, _branch: [mod.PR(9, "OPEN", "x")])
 check("judge: an open PR keeps even an ancestor of origin/HEAD", got == "open PR #9", repr(got))
+age_gitdir(wt_merged, 0)  # a session's `git status` or commit touches these; the files stay two days old
+got = mod.judge(wt_m, False, [], 6.0, lambda _cwd, _branch: None)
+check("judge: fresh git records alone keep a merged worktree", str(got).startswith("active"), repr(got))
+age_gitdir(wt_merged, 2 * 86400)
+wt_f = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_fresh.name)
+got = mod.judge(
+    wt_f, False, [], 6.0, lambda _cwd, _branch: [mod.PR(3, "MERGED", git(wt_fresh, "rev-parse", "HEAD").strip())]
+)
+check("judge: a merged PR whose head is HEAD removes even a branch without own reflog", got is None, repr(got))
+check(
+    "disposable(): caches yes, data no",
+    mod.disposable("__pycache__/")
+    and mod.disposable("a/b.pyc")
+    and not mod.disposable(".env")
+    and not mod.disposable("runner_state.sqlite3"),
+)
 
 # --- apply ------------------------------------------------------------------------------------------
 r = cli("--apply")
 check("--apply exits 0", r.returncode == 0, r.stderr)
 check("--apply reports REMOVED lines", r.stdout.count("REMOVED") == 3, r.stdout)
 check("--apply removed the merged worktree", not wt_merged.exists())
-check("--apply removed the ignored-only worktree", not wt_ignored.exists())
-for kept in (wt_dirty, wt_unpushed, wt_open, wt_active, wt_detached, wt_locked, wt_frozen, PROJ):
+check("--apply removed the worktree holding only an ignored cache", not wt_cache.exists())
+check("--apply kept the worktree holding an ignored non-cache file", (wt_ignored / ".git-info-exclude-probe").exists())
+for kept in (wt_dirty, wt_unpushed, wt_open, wt_active, wt_fresh, wt_detached, wt_locked, wt_frozen, PROJ):
     check(f"--apply kept {kept.name}", kept.is_dir())
 check("--apply kept the branch locally", "feat/merged" in git(PROJ, "branch", "--list", "feat/merged"))
 check("--apply kept the branch on origin", "feat/merged" in git(PROJ, "ls-remote", "origin", "feat/merged"))

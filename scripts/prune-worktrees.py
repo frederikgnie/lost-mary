@@ -14,14 +14,24 @@ config (`$LOST_MARY_SHARED_CHECKOUTS`, else
 The config's `frozen` roots are honoured either way.
 
 A worktree is REMOVABLE only when all of these hold:
-  1. clean     - `git status --porcelain` is empty (ignored files do not count);
+  1. clean     - `git status --porcelain --ignored --untracked-files=all
+                 --ignore-submodules=none` shows nothing outside the cache allowlist
+                 (.venv, __pycache__, .pytest_cache, .ruff_cache, .mypy_cache,
+                 node_modules, *.pyc): `git worktree remove` deletes ignored files,
+                 so an ignored .env or runner_state.sqlite3 keeps the worktree. The
+                 flags override status.showUntrackedFiles and submodule ignore config;
   2. pushed    - HEAD is in some remote-tracking branch (`git branch -r --contains`);
   3. merged    - a merged PR for the branch has headRefOid == HEAD (`gh pr list`),
-                 or HEAD is an ancestor of `origin/HEAD`. Without gh (missing,
+                 or HEAD is an ancestor of `origin/HEAD` AND the branch has a commit
+                 of its own (its reflog holds more than "Created from" - a worktree
+                 just added with -b is an ancestor of main and has done nothing yet).
+                 Without gh (missing,
                  failing, or LOST_MARY_NO_GH=1) only the ancestor test counts;
                  an open PR for the branch keeps the worktree either way;
-  4. idle      - no file under it (outside .git, .venv and tool caches) changed
-                 within --idle-hours (default 6).
+  4. idle      - no file under it (outside .git, .venv and tool caches) and none
+                 of git's own records for it (index, HEAD, logs/HEAD in its gitdir,
+                 touched by a session's `git status` or commit) changed within
+                 --idle-hours (default 24).
 Never considered: the main worktree, a detached HEAD, a locked or missing
 worktree, anything at or under a `frozen` root. Every KEPT line names the first
 reason that failed.
@@ -52,6 +62,10 @@ from types import ModuleType
 
 NO_GH_ENV = "LOST_MARY_NO_GH"
 SKIP_DIRS = frozenset({".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"})
+# Ignored paths `git worktree remove` may delete without losing anything: rebuildable caches only.
+DISPOSABLE = frozenset({".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"})
+DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
+DEFAULT_IDLE_HOURS = 24.0
 GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}  # a scan must not take index locks other sessions contend for
 
 
@@ -107,7 +121,7 @@ def under(path: str | Path, roots: list[tuple[str, ...]]) -> bool:
     return any(k[: len(r)] == r for r in roots if r)
 
 
-def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def git(cwd: Path, *args: str, timeout: float | None = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
@@ -115,7 +129,7 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         env=GIT_ENV,
-        timeout=120,
+        timeout=timeout,
     )
 
 
@@ -222,6 +236,39 @@ def newest_mtime(root: Path) -> float:
     return newest
 
 
+def git_activity(wt: Path) -> float:
+    """The newest mtime of git's own records for a linked worktree: its gitdir's index, HEAD and logs/HEAD."""
+    r = git(wt, "rev-parse", "--absolute-git-dir")
+    if r.returncode != 0 or not r.stdout.strip():
+        return 0.0
+    gitdir = Path(r.stdout.strip())
+    newest = 0.0
+    for name in ("index", "HEAD", "logs/HEAD"):
+        try:
+            newest = max(newest, (gitdir / name).stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def disposable(path: str) -> bool:
+    """An ignored path that is only a rebuildable cache."""
+    parts = [x for x in path.strip().strip('"').replace(chr(92), "/").split("/") if x]
+    return any(x in DISPOSABLE for x in parts) or path.strip().rstrip("/").endswith(DISPOSABLE_SUFFIXES)
+
+
+def own_commits(wt: Worktree) -> bool:
+    """Whether the branch ever got a commit of its own: its reflog holds more than the "Created from" entry.
+
+    No reflog at all (expired, or a branch fetched rather than created here) cannot show work was done, so it
+    reads False and the ancestry route keeps the worktree; a merged PR whose head is HEAD still removes it.
+    """
+    r = git(wt.path, "reflog", "show", "--format=%gs", f"refs/heads/{wt.branch}", "--")
+    if r.returncode != 0:
+        return False
+    return any(line.strip() and not line.startswith("branch: Created from") for line in r.stdout.splitlines())
+
+
 def first_line(r: subprocess.CompletedProcess[str]) -> str:
     return (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f"exit {r.returncode}"])[0]
 
@@ -238,11 +285,16 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
         return "locked"
     if wt.prunable or not wt.path.is_dir():
         return "missing (git worktree prune clears it)"
-    status = git(wt.path, "status", "--porcelain")
+    status = git(wt.path, "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none")
     if status.returncode != 0:
         return f"git status failed: {first_line(status)}"
-    if status.stdout.strip():
-        return "dirty"
+    for line in status.stdout.splitlines():
+        code, entry = line[:2], line[3:]
+        if code == "!!":
+            if not disposable(entry):
+                return f"ignored file {entry.strip()} (remove would delete it)"
+        elif line.strip():
+            return "dirty"
     contains = git(wt.path, "branch", "-r", "--contains", wt.head)
     if contains.returncode != 0 or not contains.stdout.strip():
         return "unpushed"
@@ -254,7 +306,9 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
         ancestor = git(wt.path, "merge-base", "--is-ancestor", wt.head, "origin/HEAD")
         if ancestor.returncode != 0:
             return "not merged"
-    age = time.time() - newest_mtime(wt.path)
+        if not own_commits(wt):
+            return "no commits of its own yet"
+    age = time.time() - max(newest_mtime(wt.path), git_activity(wt.path))
     if age < idle_hours * 3600:
         return f"active {fmt_age(max(age, 0.0))} ago"
     return None
@@ -287,16 +341,22 @@ def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLo
         if reason is None:
             row.reason = "clean, pushed, merged, idle"
             if apply:
-                r = git(main, "worktree", "remove", str(wt.path))
-                if r.returncode == 0:
-                    row.verdict, removed = "REMOVED", True
-                else:
-                    row.verdict, row.reason = "FAILED", first_line(r)
+                try:  # no timeout: killing git mid-delete leaves a half-removed, still registered tree
+                    r = git(main, "worktree", "remove", str(wt.path), timeout=None)
+                    if r.returncode == 0:
+                        row.verdict, removed = "REMOVED", True
+                    else:
+                        row.verdict, row.reason = "FAILED", first_line(r)
+                except OSError as exc:
+                    row.verdict, row.reason = "FAILED", f"worktree remove failed ({exc!r})"
         rows.append(row)
     if apply and removed:
-        r = git(main, "worktree", "prune")
-        if r.returncode != 0:
-            notice(f"{main}: git worktree prune failed: {first_line(r)}")
+        try:
+            r = git(main, "worktree", "prune")
+            if r.returncode != 0:
+                notice(f"{main}: git worktree prune failed: {first_line(r)}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            notice(f"{main}: git worktree prune failed ({exc!r})")
     return rows, main
 
 
@@ -316,7 +376,8 @@ def leftovers(mains: list[Path], registered: set[tuple[str, ...]], cfg: Config, 
             if k in seen or not entry.name.lower().startswith(main.name.lower() + "_"):
                 continue
             seen.add(k)
-            if entry.is_symlink() or entry.is_junction() or not entry.is_dir() or under(entry, cfg.frozen):
+            junction = getattr(entry, "is_junction", lambda: False)()  # Path.is_junction is 3.12+; CI runs 3.11
+            if entry.is_symlink() or junction or not entry.is_dir() or under(entry, cfg.frozen):
                 continue
             try:
                 if any(entry.iterdir()):
@@ -342,7 +403,11 @@ def run(repos: list[Path], idle_hours: float, apply: bool, prs: PrLookup) -> tup
     mains: list[Path] = []
     done: set[tuple[str, ...]] = set()
     for repo in repos:
-        result = scan_repo(repo, cfg, idle_hours, apply, prs)
+        try:
+            result = scan_repo(repo, cfg, idle_hours, apply, prs)
+        except Exception as exc:  # one repo's failure never aborts the others
+            notice(f"{repo}: scan failed ({exc!r}) - skipped")
+            continue
         if result is None:
             continue
         repo_rows, main = result
@@ -371,7 +436,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     ap.add_argument("repos", nargs="*", type=Path, help="repos to scan (default: `shared` in the guard's config)")
     ap.add_argument("--apply", action="store_true", help="remove REMOVABLE worktrees and empty leftover dirs")
-    ap.add_argument("--idle-hours", type=float, default=6.0, help="a file changed more recently keeps it (default 6)")
+    ap.add_argument(
+        "--idle-hours",
+        type=float,
+        default=DEFAULT_IDLE_HOURS,
+        help="a file or git record changed more recently keeps it (default 24)",
+    )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
     if args.idle_hours < 0:
