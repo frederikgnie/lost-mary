@@ -95,6 +95,9 @@ More live checks, one minute each, for the hooks the suite can only simulate:
   new file with the files it edited and the commands it ran. Start a new session
   in the same repo: the first context it sees is "Ledger for <project> ..."
   with that entry.
+- **guard-shared-checkouts** (only if you configured it, see section 6). From a
+  shared checkout ask Claude to run `git switch -c probe`: the call should be
+  refused with the `worktree add` hint, while `git status` runs as usual.
 
 Then take the baseline the rules will be judged against:
 
@@ -155,6 +158,14 @@ thing you can do is put these in each repository's `CLAUDE.md` / `AGENT.md`:
 
 `implement` and `review` read those files first and are told they win over the
 library's defaults.
+
+**Shared checkouts.** If several sessions work in the same checkouts at once
+(or a scheduler runs a tree live), copy
+[`shared-checkouts.example.json`](shared-checkouts.example.json) to
+`~/.claude/agent-library/shared-checkouts.json` and edit the lists: `shared`
+checkouts keep their branch and stash (sessions work in their own worktree),
+`frozen` trees change only through `frozen_by`. The hook reads the file on every
+call - no restart; without it the hook does nothing.
 
 ## 7. Troubleshooting
 

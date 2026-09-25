@@ -19,13 +19,13 @@ DRIFT_COUNT=0
 INCOMPLETE_COUNT=0
 
 # What v2 manages under ~/.claude/agent-library.
-LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py scripts/friction.py scripts/ledger.py scripts/check-spawn.py scripts/permit.py scripts/witness.py global-CLAUDE.md capabilities.md)
+LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py scripts/friction.py scripts/ledger.py scripts/check-spawn.py scripts/permit.py scripts/witness.py scripts/guard-shared-checkouts.py global-CLAUDE.md capabilities.md)
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
 RETIRED_AGENTS=(architect researcher implementer debugger tester reviewer security-reviewer)
 V1_AGENT_SIGNATURE='agent-library/orchestration/handoff.schema.json'
-RETIRED_LIB=(orchestration scripts/check-handoff-hook.py scripts/guard-readonly-bash.py scripts/validate-handoff.py scripts/validate-handoff.sh scripts/validate-handoff.ps1)
+RETIRED_LIB=(orchestration scripts/check-handoff-hook.py scripts/guard-readonly-bash.py scripts/validate-handoff.py scripts/validate-handoff.sh scripts/validate-handoff.ps1 scripts/test_guard_shared_checkouts.py)
 V1_HOOK_PATTERN='check-handoff-hook\.py|guard-readonly-bash\.py'
 
 usage() {
@@ -266,7 +266,7 @@ def commands(event):
     for entry in hooks.get(event) or []:
         for h in entry.get("hooks") or []:
             yield str(h.get("command", "")), str(entry.get("matcher", ""))
-for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py")):
+for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py"), ("PreToolUse", "guard-shared-checkouts.py")):
     found = [(c, m) for c, m in commands(event) if script in c]
     if not found:
         print(f"DRIFT {event} does not run {script} - merge the hooks block from settings.example.json")
@@ -308,6 +308,7 @@ PYEOF
   if grep -q 'check-spawn.py' "$SETTINGS"; then echo "OK check-spawn.py referenced"; else echo "DRIFT check-spawn.py not referenced"; fi
   if grep -q 'permit.py' "$SETTINGS"; then echo "OK permit.py referenced"; else echo "DRIFT permit.py not referenced"; fi
   if grep -q 'witness.py' "$SETTINGS"; then echo "OK witness.py referenced"; else echo "DRIFT witness.py not referenced"; fi
+  if grep -q 'guard-shared-checkouts.py' "$SETTINGS"; then echo "OK guard-shared-checkouts.py referenced"; else echo "DRIFT guard-shared-checkouts.py not referenced"; fi
   if grep -q 'ABSOLUTE/PATH/TO' "$SETTINGS"; then echo "DRIFT placeholder interpreter path"; fi
 }
 
@@ -392,9 +393,9 @@ fi
 ensure_import
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" "$DEST_LIB/scripts/friction.py" "$DEST_LIB/scripts/ledger.py" "$DEST_LIB/scripts/check-spawn.py" "$DEST_LIB/scripts/permit.py" "$DEST_LIB/scripts/witness.py" 2>/dev/null || true
+  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" "$DEST_LIB/scripts/friction.py" "$DEST_LIB/scripts/ledger.py" "$DEST_LIB/scripts/check-spawn.py" "$DEST_LIB/scripts/permit.py" "$DEST_LIB/scripts/witness.py" "$DEST_LIB/scripts/guard-shared-checkouts.py" 2>/dev/null || true
 else
-  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py $DEST_LIB/scripts/friction.py $DEST_LIB/scripts/ledger.py $DEST_LIB/scripts/check-spawn.py $DEST_LIB/scripts/permit.py $DEST_LIB/scripts/witness.py"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py $DEST_LIB/scripts/friction.py $DEST_LIB/scripts/ledger.py $DEST_LIB/scripts/check-spawn.py $DEST_LIB/scripts/permit.py $DEST_LIB/scripts/witness.py $DEST_LIB/scripts/guard-shared-checkouts.py"
 fi
 
 echo

@@ -130,6 +130,7 @@ jobs:
           test -x "$FAKE_HOME/.claude/agent-library/scripts/pycheck.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/check-evidence.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/no-ask.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/guard-shared-checkouts.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/no-punt.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/friction.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/ledger.py"
@@ -344,6 +345,7 @@ jobs:
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/pycheck.py'))) { throw 'pycheck.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/check-evidence.py'))) { throw 'check-evidence.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/no-ask.py'))) { throw 'no-ask.py did not install.' }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/guard-shared-checkouts.py'))) { throw 'guard-shared-checkouts.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/no-punt.py'))) { throw 'no-punt.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/friction.py'))) { throw 'friction.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/ledger.py'))) { throw 'ledger.py did not install.' }

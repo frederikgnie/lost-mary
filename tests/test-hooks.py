@@ -43,6 +43,7 @@ NOPUNT = ROOT / "scripts" / "no-punt.py"
 FRICTION = ROOT / "scripts" / "friction.py"
 LEDGERPY = ROOT / "scripts" / "ledger.py"
 WITNESS = ROOT / "scripts" / "witness.py"
+GUARD = ROOT / "scripts" / "guard-shared-checkouts.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "pycheck"
 SCRATCH = ROOT / ".tmp-pycheck"
 
@@ -1278,6 +1279,169 @@ rc, err = run_hook(
     bom=True,
 )
 expect("BOM-prefixed payload still decides (exit 0)", rc, ALLOW, err)
+
+# -------------------------------------------------------------------- guard-shared-checkouts
+print()
+print("guard-shared-checkouts.py - PreToolUse: shared checkouts keep their branch, frozen trees stay frozen")
+GS = SCRATCH / "guard"
+GS.mkdir(parents=True)
+GS_HOME = GS / "home"  # the default config location resolves under this, never under the real ~/.claude
+GS_HOME.mkdir()
+GS_CONFIG = GS / "shared-checkouts.json"
+GS_CONFIG.write_text((ROOT / "shared-checkouts.example.json").read_text(encoding="utf-8"), encoding="utf-8")
+GS_ENV = {**os.environ, "HOME": str(GS_HOME), "USERPROFILE": str(GS_HOME), "LOST_MARY_SHARED_CHECKOUTS": str(GS_CONFIG)}
+guard = load_module(GUARD, "guard_shared_checkouts")
+GS_CFG = guard.parse_config(json.loads(GS_CONFIG.read_text(encoding="utf-8")))
+expect_true("the shipped example parses as a config", not isinstance(GS_CFG, str), str(GS_CFG))
+GS_SHARED = "C:\\repo\\EU\\OBF_experiments"
+GS_ELSE = "C:\\Users\\x"
+
+GS_BLOCKED = [
+    ("git checkout -b feat/typed-identity-legs", GS_SHARED),  # the 2026-09-24 incident
+    ("git switch feature/new_running", GS_SHARED),
+    ("git checkout feature/new_running", GS_SHARED),
+    ("cd /c/repo/EU/OBF_ops && git checkout main", GS_ELSE),
+    ("git -C /c/repo/EU/gsd checkout -B hotfix", GS_ELSE),
+    ('git -C "C:\\repo\\EU\\OBF_experiments" switch -c x', GS_ELSE),
+    ("git -C /c/repo/EU/deploy/OBF_experiments checkout --detach abc123", GS_ELSE),
+    ("git reset --hard origin/x", "C:\\repo\\EU\\deploy\\OBF_ops"),
+    ("cd /c/repo/EU/deploy/gsd; git pull", GS_ELSE),
+    ("git stash", GS_SHARED),
+    ("git stash pop", GS_SHARED),
+    ("git reset --hard", GS_SHARED),
+    ("git rebase origin/main", GS_SHARED),
+    ("git clean -fd", GS_SHARED),
+    ("git clean -fdx", GS_SHARED),
+    ("cd OBF_ops && git checkout main", "C:/repo/EU"),  # relative cd: the source hook missed this
+    ("git -C OBF_ops switch x", "C:/repo/EU"),
+    ("cd OBF_experiments/src && git switch x", "C:/repo/EU"),  # a subdir of a shared checkout
+    ("Set-Location C:\\repo\\EU\\OBF_ops; git switch main", GS_ELSE),
+    ("git -C C:/repo/EU/deploy/.staging/OBF_ops fetch", GS_ELSE),  # a frozen subdir
+    ("git -C c:/REPO/eu/obf_ops switch main", GS_ELSE),  # case-insensitive
+]
+for cmd, cwd in GS_BLOCKED:
+    reason = guard.check_command(cmd, cwd, GS_CFG)
+    expect_true(f"block: {cmd[:60]!r} (cwd {cwd})", reason is not None, str(reason))
+
+GS_ALLOWED = [
+    ("git status --short", GS_SHARED),
+    ("git commit -F msg.txt -- src/a.py", GS_SHARED),
+    ("git checkout -- src/OBF_experiments/experiments2", GS_SHARED),  # file restore
+    ("git checkout HEAD~1 -- src/a.py", GS_SHARED),
+    ("git checkout .", GS_SHARED),
+    ("git -C /c/repo/EU/OBF_experiments worktree add /c/repo/EU/OBF_experiments_wt_x -b x", GS_ELSE),
+    ("git checkout -b feat/x", "C:\\repo\\EU\\OBF_experiments_wt_x"),  # own worktree, a sibling by name only
+    ("git switch main", "C:\\repo\\other-project"),
+    ("bash /c/repo/EU/deploy/deploy.sh --apply", GS_ELSE),
+    ("bash C:/repo/EU/OBF_experiments/scripts/deploy_live.sh --apply", GS_SHARED),
+    ("docker ps", GS_SHARED),
+    ("git stash list", GS_SHARED),
+    ("git stash show -p", GS_SHARED),
+    ("git reset -- src/a.py", GS_SHARED),
+    ("git reset src/a.py", GS_SHARED),
+    ("git clean -n", GS_SHARED),
+    ("git add -A && git push && git pull && git fetch && git log -1 && git diff", GS_SHARED),
+    ("cd - && git switch x", GS_SHARED),  # tracked dir unknown -> matches nothing
+    ("cd && git switch x", GS_SHARED),
+    ("git switch x", ""),  # no cwd in the event
+]
+for cmd, cwd in GS_ALLOWED:
+    reason = guard.check_command(cmd, cwd, GS_CFG)
+    expect_true(f"allow: {cmd[:60]!r} (cwd {cwd or '-'})", reason is None, str(reason))
+
+reason = guard.check_command("git checkout -b x", GS_SHARED, GS_CFG)
+expect_true(
+    "the shared-checkout message names the target and the worktree command",
+    reason is not None
+    and "OBF_experiments" in reason
+    and "worktree add C:/repo/EU/OBF_experiments_wt_<name>" in reason,
+    str(reason),
+)
+reason = guard.check_edit("C:\\repo\\EU\\deploy\\OBF_ops\\src\\x.py", GS_ELSE, GS_CFG)
+expect_true(
+    "edit in the frozen tree -> blocked, naming frozen_by",
+    reason is not None and "deploy_live.sh" in reason,
+    str(reason),
+)
+expect_true(
+    "edit in the frozen tree via /c/ path -> blocked",
+    guard.check_edit("/c/repo/EU/deploy/EU_env/pyproject.toml", GS_ELSE, GS_CFG) is not None,
+)
+expect_true(
+    "relative edit path resolved against cwd -> blocked",
+    guard.check_edit("OBF_ops/x.py", "C:/repo/EU/deploy", GS_CFG) is not None,
+)
+expect_true(
+    "edit in a shared checkout -> allowed",
+    guard.check_edit("C:\\repo\\EU\\OBF_ops\\src\\x.py", GS_ELSE, GS_CFG) is None,
+)
+
+for bad, why in (
+    ([], "top level is a list"),
+    ({"shared": "C:/x"}, "shared is a string"),
+    ({"shared": [1]}, "shared holds a number"),
+    ({"frozen": ["relative/dir"]}, "frozen holds a relative path"),
+    ({"frozen_by": 3}, "frozen_by is a number"),
+):
+    expect_true(f"config rejected: {why}", isinstance(guard.parse_config(bad), str))
+expect_true("unknown keys are ignored", not isinstance(guard.parse_config({"_comment": "x", "shared": []}), str))
+
+
+def guard_event(tool: str, **tool_input: str) -> dict[str, object]:
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "cwd": GS_SHARED}
+
+
+rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), env=GS_ENV)
+expect("hook: checkout -b in a shared checkout -> exit 2", rc, BLOCK, err)
+expect_true("... with the reason on stderr", "blocked" in err and "worktree add" in err, err)
+rc, err = run_hook(GUARD, guard_event("Bash", command="git status"), env=GS_ENV)
+expect("hook: git status -> exit 0", rc, ALLOW, err)
+expect_true("... silently", err == "", err)
+rc, err = run_hook(
+    GUARD, guard_event("PowerShell", command="Set-Location C:\\repo\\EU\\OBF_ops; git switch main"), env=GS_ENV
+)
+expect("hook: PowerShell Set-Location + switch -> exit 2", rc, BLOCK, err)
+rc, err = run_hook(GUARD, guard_event("Write", file_path="C:/repo/EU/deploy/x.py"), env=GS_ENV)
+expect("hook: Write in the frozen tree -> exit 2", rc, BLOCK, err)
+rc, err = run_hook(GUARD, guard_event("NotebookEdit", notebook_path="C:/repo/EU/deploy/n.ipynb"), env=GS_ENV)
+expect("hook: NotebookEdit in the frozen tree -> exit 2", rc, BLOCK, err)
+rc, err = run_hook(GUARD, guard_event("Edit", file_path="C:/repo/EU/OBF_ops/x.py"), env=GS_ENV)
+expect("hook: Edit in a shared checkout -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), bom=True, env=GS_ENV)
+expect("hook: BOM-prefixed payload still blocks (exit 2)", rc, BLOCK, err)
+proc = subprocess.run([sys.executable, str(GUARD)], input=b"not json", capture_output=True, env=GS_ENV)
+expect("hook: garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode())
+expect_true("... with a notice", "guard-shared-checkouts:" in proc.stderr.decode(), proc.stderr.decode())
+
+no_config = {**GS_ENV, "LOST_MARY_SHARED_CHECKOUTS": str(GS / "missing.json")}
+rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), env=no_config)
+expect("hook: no config file -> exit 0", rc, ALLOW, err)
+expect_true("... with empty stderr", err == "", err)
+default_env = {k: v for k, v in GS_ENV.items() if k != "LOST_MARY_SHARED_CHECKOUTS"}
+rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), env=default_env)
+expect_true(
+    "hook: no env var and no ~/.claude/agent-library/shared-checkouts.json -> exit 0, silent",
+    rc == 0 and err == "",
+    err,
+)
+default_cfg = GS_HOME / ".claude" / "agent-library" / "shared-checkouts.json"
+default_cfg.parent.mkdir(parents=True)
+default_cfg.write_text(GS_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
+rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), env=default_env)
+expect("hook: config at the default location (sandboxed HOME) -> exit 2", rc, BLOCK, err)
+GS_BAD = GS / "bad.json"
+GS_BAD.write_text("{not json", encoding="utf-8")
+rc, err = run_hook(
+    GUARD, guard_event("Bash", command="git checkout -b x"), env={**GS_ENV, "LOST_MARY_SHARED_CHECKOUTS": str(GS_BAD)}
+)
+expect("hook: malformed config -> exit 0", rc, ALLOW, err)
+expect_true("... with one stderr line", len(err.strip().splitlines()) == 1 and "guard off" in err, err)
+GS_BAD.write_text('{"shared": "C:/repo/EU/OBF_ops"}', encoding="utf-8")
+rc, err = run_hook(
+    GUARD, guard_event("Bash", command="git checkout -b x"), env={**GS_ENV, "LOST_MARY_SHARED_CHECKOUTS": str(GS_BAD)}
+)
+expect("hook: wrong-typed config -> exit 0", rc, ALLOW, err)
+expect_true("... with one stderr line", len(err.strip().splitlines()) == 1 and "guard off" in err, err)
 
 # --------------------------------------------------------------------------- no-punt
 print()

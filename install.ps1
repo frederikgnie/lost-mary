@@ -24,13 +24,13 @@ $DriftCount = 0
 $IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
-$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'scripts/ledger.py', 'scripts/check-spawn.py', 'scripts/permit.py', 'scripts/witness.py', 'global-CLAUDE.md', 'capabilities.md')
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'scripts/ledger.py', 'scripts/check-spawn.py', 'scripts/permit.py', 'scripts/witness.py', 'scripts/guard-shared-checkouts.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
 $RetiredAgents = @('architect', 'researcher', 'implementer', 'debugger', 'tester', 'reviewer', 'security-reviewer')
 $V1AgentSignature = 'agent-library/orchestration/handoff.schema.json'
-$RetiredLib = @('orchestration', 'scripts/check-handoff-hook.py', 'scripts/guard-readonly-bash.py', 'scripts/validate-handoff.py', 'scripts/validate-handoff.sh', 'scripts/validate-handoff.ps1')
+$RetiredLib = @('orchestration', 'scripts/check-handoff-hook.py', 'scripts/guard-readonly-bash.py', 'scripts/validate-handoff.py', 'scripts/validate-handoff.sh', 'scripts/validate-handoff.ps1', 'scripts/test_guard_shared_checkouts.py')
 $V1HookPattern = 'check-handoff-hook\.py|guard-readonly-bash\.py'
 
 function Get-FileEncoding {
@@ -191,7 +191,7 @@ function Test-Settings {
     }
     $hooks = $null
     if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
-    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'), @('PostToolUse', 'witness.py'), @('PostToolUseFailure', 'witness.py'))
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'), @('PostToolUse', 'witness.py'), @('PostToolUseFailure', 'witness.py'), @('PreToolUse', 'guard-shared-checkouts.py'))
     foreach ($pair in $wanted) {
         $eventName = $pair[0]
         $scriptName = $pair[1]

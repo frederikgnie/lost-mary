@@ -1,0 +1,15 @@
+{
+  "_comment": "Config for scripts/guard-shared-checkouts.py. Copy to ~/.claude/agent-library/shared-checkouts.json (or point $LOST_MARY_SHARED_CHECKOUTS at a file) and edit; it is read on every call, no restart. shared: checkouts several sessions use at once - branch changes (switch, checkout <ref> / -b), stash, reset --hard, rebase and clean -f are blocked there; work on a branch in your own worktree instead. frozen: trees only a deploy script may change - every git command aimed there and every Edit/Write inside is blocked. frozen_by: that deploy script (optional), named in the block message. Other keys are ignored.",
+  "shared": [
+    "C:/repo/EU/EU_env",
+    "C:/repo/EU/entsoe-eic",
+    "C:/repo/EU/gsd",
+    "C:/repo/EU/OBF",
+    "C:/repo/EU/OBF_ops",
+    "C:/repo/EU/OBF_experiments",
+    "C:/repo/EU/OBF_orchestrator",
+    "C:/repo/EU/OBF_pnl"
+  ],
+  "frozen": ["C:/repo/EU/deploy"],
+  "frozen_by": "C:/repo/EU/OBF_experiments/scripts/deploy_live.sh"
+}
