@@ -1145,7 +1145,8 @@ SPAWN_ENV: dict[str, str] = {
     "LOST_MARY_PROJECTS_DIR": str(CS_PROJECTS),
     "LOST_MARY_STATE_DIR": str(CS_STATE),
 }
-SPAWN_ENV.pop("LOST_MARY_FABLE", None)
+for _var in ("LOST_MARY_FABLE", "CLAUDE_CODE_SUBAGENT_MODEL", "LOST_MARY_SCAN_SECONDS"):
+    SPAWN_ENV.pop(_var, None)
 
 
 def spawn(role: str, prompt: str, tool: str = "Agent") -> dict[str, object]:
@@ -1423,7 +1424,10 @@ hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
 upd_raw = hso_raw.get("updatedInput") if isinstance(hso_raw, dict) else None
 expect_true(
     "both rewrites in one spawn: name dropped and model moved to opus",
-    isinstance(upd_raw, dict) and "name" not in upd_raw and upd_raw.get("model") == "opus",
+    isinstance(upd_raw, dict)
+    and "name" not in upd_raw
+    and "team_name" not in upd_raw
+    and upd_raw.get("model") == "opus",
     str(out),
 )
 named_impl = {
@@ -1432,7 +1436,28 @@ named_impl = {
     "tool_input": {"subagent_type": "implement", "prompt": FULL, "name": "impl-1"},
 }
 rc, out, err = spawn_out(named_impl)
-expect_true("a named implement with its contract loses the name", rc == ALLOW and out is not None, f"{out} {err}")
+impl_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+impl_upd = impl_raw.get("updatedInput") if isinstance(impl_raw, dict) else None
+expect_true(
+    "a named implement with its contract loses the name and keeps its prompt",
+    rc == ALLOW and isinstance(impl_upd, dict) and "name" not in impl_upd and impl_upd.get("prompt") == FULL,
+    f"{out} {err}",
+)
+rc, out, err = spawn_out(
+    {
+        **spawn("implement", "OWNED: x"),
+        "cwd": str(CS),
+        "tool_input": {"subagent_type": "implement", "prompt": "OWNED: x", "name": "i"},
+    }
+)
+expect_true("a named implement missing fields is blocked before any rewrite", rc == BLOCK and out is None, err)
+rc, out, _ = spawn_out(review_event(team_name="t"))
+expect_true(
+    "a team_name-only review spawn is taken out of the team", out is not None and "team_name" in str(out), str(out)
+)
+mixed = {**spawn("Review", "x"), "cwd": str(CS), "tool_input": {"subagent_type": "Review", "prompt": "x", "name": "R"}}
+rc, out, _ = spawn_out(mixed)
+expect_true("a mixed-case role name still counts as a library role", out is not None, str(out))
 reset_fable_state()
 # A broken state file fails open to a fresh scan.
 reset_fable_state()

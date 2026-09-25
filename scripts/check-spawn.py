@@ -299,9 +299,9 @@ def unnamed(tool_input: dict[str, Any]) -> str | None:
 
     A named spawn becomes an agent-team teammate: it stays listed as running after its report (four reviewers
     sat there for up to 3 h on 2026-09-25, one on an exhausted model that could not even take a shutdown), and
-    its report reaches the lead as an idle notification truncated at about 3 KB. Unnamed, the role runs as a
-    background subagent that ends when it reports, hands back its whole report, and can still be resumed
-    with SendMessage to its agent id.
+    its report reaches the lead as an idle notification truncated at about 3 KB. Unnamed, the role runs as an
+    ordinary subagent (in this harness subagents already run in the background) that ends when it reports,
+    hands back its whole report, and can still be resumed with SendMessage to its agent id.
     """
     role = tool_input.get("subagent_type")
     if not (isinstance(role, str) and role.strip().lower() in LIBRARY_ROLES):
@@ -309,8 +309,9 @@ def unnamed(tool_input: dict[str, Any]) -> str | None:
     if not any(tool_input.get(key) for key in TEAM_KEYS):
         return None
     return (
-        f"the `name` was dropped: a named `{role}` becomes a teammate that stays running after its report. "
-        "It runs as a background subagent instead; resume it with SendMessage to the agent id in the result."
+        f"`name`/`team_name` were dropped (library roles never join a team): a named `{role}` becomes a "
+        "teammate that stays running after its report. It runs as an ordinary subagent that ends when it "
+        "reports; resume it with SendMessage to the agent id in the result."
     )
 
 
