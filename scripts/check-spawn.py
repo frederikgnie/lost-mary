@@ -37,14 +37,18 @@ applies without a permission decision). The model is told in
 "Fable is out" is read from the transcripts: a record with
 `"apiError":"model_requires_usage_credits"` (observed 2026-09-25, 2.1.281 - the
 429 a Fable spawn gets at the limit; only Fable bills to usage credits) seen
-within the last FABLE_RETRY_HOURS. After that one spawn tries Fable again: a
-quick 429 if it is still out, which re-arms the fallback. The first spawn after
-the limit hits still fails once - nothing can see the limit before it. State
-lives in `<agent-library>/state/fable-out.json` (last failure seen, and how far
-the transcripts were scanned, so each spawn reads only files changed since).
+within the last FABLE_RETRY_HOURS. While one is, no scan runs at all. After
+the window the first fable spawn takes a PROBE_SECONDS lease and tries Fable;
+spawns started meanwhile stay on opus; a fresh 429 re-arms the fallback. The
+spawns already in flight when the limit first hits fail - nothing can see the
+limit before it - and are respawned unchanged. The scan reads only bytes
+appended since the last one (per-file offsets, newest files first, a 64 KB
+overlap for a record split across reads, a SCAN_SECONDS budget checked between
+chunks). State lives in `<agent-library>/state/fable-out.json`, replaced
+atomically; a malformed or future-dated field is dropped.
 `LOST_MARY_FABLE=off` forces the fallback, `=on` disables it.
 `LOST_MARY_PROJECTS_DIR` / `LOST_MARY_STATE_DIR` relocate the two roots (tests).
-The scan is capped at SCAN_SECONDS; on any error the spawn goes unchanged.
+On any error the spawn goes unchanged.
 """
 
 from __future__ import annotations
@@ -68,7 +72,10 @@ FIELD_LINE = r"(?im)^[\s*#>-]*{field}\s*:"
 FALLBACK_MODEL = "opus"  # the family alias: the newest permitted Opus (sub-agents docs)
 FABLE_MARKER = b'"apiError":"model_requires_usage_credits"'
 FABLE_RETRY_HOURS = 6.0
-SCAN_SECONDS = 4.0
+SCAN_SECONDS = 4.0  # well inside the hook's 10 s timeout
+PROBE_SECONDS = 600.0  # after the window, one spawn tries fable; the others stay on opus this long
+CHUNK = 8 * 1024 * 1024
+OVERLAP = 64 * 1024  # a record cut by the previous read is re-read whole
 FRONTMATTER_MODEL = re.compile(r"(?m)^model\s*:\s*['\"]?([^'\"\s#]+)")
 TIMESTAMP = re.compile(rb'"timestamp"\s*:\s*"([^"]+)"')
 
@@ -120,9 +127,8 @@ def epoch(stamp: str) -> float | None:
         return None
 
 
-def latest_failure(path: Path) -> float | None:
-    """When the newest Fable usage-credit failure in a transcript happened, or None."""
-    data = path.read_bytes()
+def failures_in(data: bytes) -> float | None:
+    """The newest Fable usage-credit failure timestamp in a run of transcript lines, or None."""
     if FABLE_MARKER not in data:
         return None
     newest: float | None = None
@@ -134,8 +140,83 @@ def latest_failure(path: Path) -> float | None:
     return newest
 
 
+def read_state(path: Path, now: float) -> dict[str, Any]:
+    """The scan state, validated: a malformed or future-dated field is dropped, never trusted."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"last_seen": 0.0, "probe_until": 0.0, "offsets": {}}
+    raw = raw if isinstance(raw, dict) else {}
+
+    def stamp(name: str, limit: float) -> float:
+        value = raw.get(name)
+        return float(value) if isinstance(value, int | float) and 0 <= value <= limit else 0.0
+
+    offsets = raw.get("offsets")
+    clean = (
+        {k: int(v) for k, v in offsets.items() if isinstance(k, str) and isinstance(v, int) and v >= 0}
+        if isinstance(offsets, dict)
+        else {}
+    )
+    return {
+        "last_seen": stamp("last_seen", now + 60),
+        "probe_until": stamp("probe_until", now + PROBE_SECONDS + 60),
+        "offsets": clean,
+    }
+
+
+def scan(projects: Path, state: dict[str, Any], now: float) -> None:
+    """Read the bytes appended since the last scan to every transcript changed within the window, newest first.
+
+    Each file's offset is kept, so a spawn reads new bytes only; a read starts OVERLAP bytes early so a record
+    cut in half by the previous read is seen whole. A file that shrank is read from the start. The budget is
+    checked between chunks; whatever was read is kept, so a scan cut short resumes where it stopped. A file that
+    cannot be read keeps its old offset and is tried again next time.
+    """
+    window = FABLE_RETRY_HOURS * 3600
+    offsets: dict[str, int] = state["offsets"]
+    candidates: list[tuple[float, int, Path]] = []
+    for path in projects.glob("**/*.jsonl"):
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if info.st_mtime >= now - window:
+            candidates.append((info.st_mtime, info.st_size, path))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    live = {str(p) for _, _, p in candidates}
+    for name in [k for k in offsets if k not in live]:
+        del offsets[name]  # older than the window: never needed again
+    started = time.monotonic()
+    for _, size, path in candidates:
+        name = str(path)
+        done = offsets.get(name, 0)
+        if done > size:
+            done = 0  # rewritten or truncated
+        if done >= size:
+            continue
+        try:
+            with path.open("rb") as handle:
+                handle.seek(max(0, done - OVERLAP))
+                while done < size:
+                    if time.monotonic() - started > SCAN_SECONDS:
+                        return
+                    chunk = handle.read(min(CHUNK, size - handle.tell()))
+                    if not chunk:
+                        break
+                    when = failures_in(chunk)
+                    if when is not None and when > state["last_seen"]:
+                        state["last_seen"] = min(when, now)
+                    done = handle.tell()
+                    offsets[name] = done
+                    if done < size:
+                        handle.seek(max(0, done - OVERLAP))
+        except OSError:
+            continue
+
+
 def fable_out(now: float) -> bool:
-    """Whether Fable failed on usage credits within FABLE_RETRY_HOURS, scanning only transcripts changed since."""
+    """Whether spawns should leave fable now: a usage-credit failure within the window, or another spawn probing."""
     match os.environ.get("LOST_MARY_FABLE", "").strip().lower():
         case "off":
             return True
@@ -147,34 +228,25 @@ def fable_out(now: float) -> bool:
     projects = Path(os.environ.get("LOST_MARY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
     state_dir = Path(os.environ.get("LOST_MARY_STATE_DIR") or Path.home() / ".claude" / "agent-library" / "state")
     state_file = state_dir / "fable-out.json"
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-        state = state if isinstance(state, dict) else {}
-    except (OSError, ValueError):
-        state = {}
-    last_seen = float(state.get("last_seen") or 0.0)
-    since = max(float(state.get("scanned_until") or 0.0), now - window)
-    started = time.monotonic()
-    complete = True
-    for path in projects.glob("**/*.jsonl"):
-        if time.monotonic() - started > SCAN_SECONDS:
-            complete = False  # the rest on the next spawn; scanned_until stays put
-            break
-        try:
-            if path.stat().st_mtime < since:
-                continue
-            when = latest_failure(path)
-        except OSError:
-            continue
-        if when is not None and when > last_seen:
-            last_seen = when
-    new_state = {"last_seen": last_seen, "scanned_until": now if complete else since}
+    state = read_state(state_file, now)
+    if now - state["last_seen"] < window:
+        return True  # already known: no scan
+    scan(projects, state, now)
+    out = now - state["last_seen"] < window
+    if not out and state["last_seen"] > 0:
+        # Fable failed before and the window has passed: one spawn probes it; the rest stay on opus meanwhile.
+        if state["probe_until"] > now:
+            out = True
+        else:
+            state["probe_until"] = now + PROBE_SECONDS
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps(new_state), encoding="utf-8")
+        tmp = state_file.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, state_file)  # concurrent sessions: the last whole write wins, never a torn file
     except OSError as exc:
         notice(f"cannot write {state_file} ({exc})")
-    return now - last_seen < window
+    return out
 
 
 def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> dict[str, Any] | None:

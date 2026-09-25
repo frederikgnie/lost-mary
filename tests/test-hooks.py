@@ -1314,6 +1314,49 @@ failed.write_text(
 )
 rc, out, _ = spawn_out(REVIEW)
 expect_true("the marker quoted with a space after the colon is not a failure", out is None, str(out))
+# Review 2026-09-25: after the window one spawn probes fable; a parallel spawn in the same batch stays on opus.
+reset_fable_state()
+failed.write_text(credit_429(iso(7 * 3600)) + "\n", encoding="utf-8")
+rc, first, _ = spawn_out(REVIEW)
+rc, second, _ = spawn_out(REVIEW)
+expect_true(
+    "window passed: the first spawn probes fable, the next one (the same batch) stays on opus",
+    first is None and second is not None,
+    f"{first} / {second}",
+)
+# Only appended bytes are read, and a failure appended after a scan is still found.
+reset_fable_state()
+failed.write_text('{"type":"user"}\n' * 3, encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+offsets = json.loads((CS_STATE / "fable-out.json").read_text(encoding="utf-8")).get("offsets", {})
+expect_true(
+    "the scan records how far it read each file", list(offsets.values()) == [failed.stat().st_size], str(offsets)
+)
+with failed.open("a", encoding="utf-8") as handle:
+    handle.write(credit_429(iso(30)) + "\n")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a failure appended after the last scan is found -> opus", out is not None, str(out))
+# A record cut in half by the previous read is re-read whole (the overlap).
+reset_fable_state()
+line = credit_429(iso(30))
+failed.write_text('{"type":"user"}\n' + line[:40], encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("half a failure record is not a failure yet", out is None, str(out))
+with failed.open("a", encoding="utf-8") as handle:
+    handle.write(line[40:] + "\n")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("... and once its second half lands, the whole record is found -> opus", out is not None, str(out))
+# Malformed or future-dated state never pins or disables the fallback.
+reset_fable_state()
+(CS_STATE / "fable-out.json").write_text(
+    json.dumps({"last_seen": time.time() + 10**6, "offsets": "x"}), encoding="utf-8"
+)
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a far-future last_seen is dropped, not trusted -> fable", out is None, str(out))
+(CS_STATE / "fable-out.json").write_text(json.dumps({"last_seen": "soon"}), encoding="utf-8")
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a non-numeric last_seen is dropped and the scan still arms the fallback", out is not None, str(out))
 # A broken state file fails open to a fresh scan.
 reset_fable_state()
 (CS_STATE / "fable-out.json").write_text("not json", encoding="utf-8")
