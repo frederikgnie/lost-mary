@@ -3087,6 +3087,116 @@ for label, shell_line, transcript, want, tool in (
     rc, err = guard_merge(shell_line, transcript, tool=tool)
     expect(f"merge guard: {label} -> exit {want}", rc, want, err)
 
+# Seventh review, and the fail-safe: a call whose scan ends inside something is also read naively.
+DEEP = "X=" + "$(" * 40 + "git switch main" + ")" * 40
+for label, tool, shell_line, cwd, want in (
+    (
+        "a stash in a substitution nested in one with no command of its own",
+        "Bash",
+        'X=$(echo "$(git stash)")',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a switch nested two deep after a cd",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops && X=$(echo $(git switch main))",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a quoted arithmetic shift, then a switch", "Bash", 'echo "mask $((1<<4))"\ngit switch main', GS_SHARED, BLOCK),
+    (
+        "a PowerShell `((...))` expression, then a switch",
+        "PowerShell",
+        "$n = ((Get-Content x.log) -split '(').Count\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a stash inside arithmetic", "Bash", "echo $(( $(git stash) + 1 ))", GS_SHARED, BLOCK),
+    ("nested subshells bash reads as `((`", "Bash", "((true); git switch main)", GS_SHARED, BLOCK),
+    (
+        "a `#` glued to a closing substitution, then a switch",
+        "Bash",
+        "echo $(date)#x; git switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        'a switch inside a PowerShell `@"` here-string',
+        "PowerShell",
+        '$m = @"\n$(git switch main)\n"@',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a cd with a backslash only in its redirect, then a switch",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops 2>C:\\tmp\\cd.log && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a failing cd behind `then`, then a checkout",
+        "Bash",
+        "if [ -d X ]; then cd C:\\repo\\EU\\OBF_ops_wt_x; fi\ngit checkout -b x",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("pushd, popd, then a switch", "Bash", "pushd /c/other; popd; git switch main", GS_SHARED, BLOCK),
+    ("a cd in a pipeline, then a switch", "Bash", "cd /c/other | true; git switch main", GS_SHARED, BLOCK),
+    ("a cd sent to the background, then a switch", "Bash", "cd /c/other & git switch main", GS_SHARED, BLOCK),
+    (
+        'a `<<"EOF"` heredoc with an apostrophe, then a switch',
+        "Bash",
+        'cat <<"EOF"\nit\'s\nEOF\ngit switch main',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "an arithmetic command with a shift, then a switch",
+        "Bash",
+        "(( x = 1 << 2 ))\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a heredoc that never ends, holding a switch", "Bash", "cat <<EOF\ngit switch main", GS_SHARED, BLOCK),
+    ("a switch nested past MAX_NESTING", "Bash", DEEP, GS_SHARED, BLOCK),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+rc, err = run_hook(
+    GUARD, shell_event("Bash", "cd C:\\repo\\EU\\OBF_ops_wt_x; git checkout -b x", GS_SHARED), env=GS_ENV
+)
+expect_true("... a block after a failing cd says why", rc == BLOCK and "quote the path" in err, err)
+expect_true(
+    "a deliberate escape in a cd path is no mangled path",
+    guard.bash_cd_fails("cd /c/repo/My\\ Repo") is None and guard.bash_cd_fails("cd C:\\repo\\x") == "cd",
+    str((guard.bash_cd_fails("cd /c/repo/My\\ Repo"), guard.bash_cd_fails("cd C:\\repo\\x"))),
+)
+
+for label, shell_line, transcript, want in (
+    (
+        "a merge, then quoted arithmetic holding a substitution",
+        'gh pr merge 29 --squash && echo "took $(( $(date +%s) - t0 ))s"',
+        t_rev,
+        ALLOW,
+    ),
+    ("a quoted arithmetic PR number, then a merge", 'echo "PR $((29))" && gh pr merge 29 --squash', t_rev, ALLOW),
+    ("a merge in a heredoc that never ends", "cat <<EOF\ngh pr merge 29 --squash", t_rev, BLOCK),
+):
+    rc, err = guard_merge(shell_line, transcript)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("cat <<EOF\ngh pr merge 29 --squash", t_rev)
+expect_true("... held as a call that does not parse cleanly", "does not parse cleanly" in err, err)
+for label, shared_call, want in (
+    ("a nested substitution's `-d`", 'X=$(echo "$(gh pr merge 29 --squash -d)")', BLOCK),
+    ("`-d` with a glued `-Ro/r` (gh keeps local branches)", f"{MERGE} -d -Ro/r", ALLOW),
+):
+    rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
+    expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
+rc, err = run_hook(GUARD, merge_event(f"GH_REPO=o/r {MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
+expect_true("... the block message carries no GH_REPO marker", rc == BLOCK and "\x00" not in err, repr(err))
+
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
 expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)
