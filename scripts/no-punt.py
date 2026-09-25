@@ -233,7 +233,7 @@ GO_AHEAD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"|say-?so|reply|answer|nod|signal|okay|ok|green\s+light|sign-?off)\b"
         r"|(?:the|a)\s+(?:go-?ahead|green\s+light|nod|sign-?off|word\s+from\s+you)\b)",
         r"\b(?:your|the\s+user's)\s+(?:call|decision|choice|go-?ahead|confirmation|approval|sign-?off|nod|permission|blessing)\b"
-        r"(?!\s+(?:of|to|rules?|model|list|from|in|is|was|were|has|had|for|on|at|that|which)\b)",
+        r"(?!\s+(?:of|to|rules?|settings?|modes?|prompts?|model|list|from|in|is|was|were|has|had|for|on|at|that|which)\b)",
         r"\b(?:up|over|down)\s+to\s+you\b|\byours\s+to\s+(?:decide|release|make|call|run|delete|merge|trigger|start|approve|pull|push|choose)\b",
         r"\b(?:when|once|until|after)\s+you(?:'re|\s+are)?\s+(?:ready|back|happy|sure|confirm|say|approve|decide|okay|ok|agree)\b",
         r"\bhold(?:ing)?\s+off\b[^.\n]{0,60}\b(?:you|your|word|go-?ahead|confirm)\b"

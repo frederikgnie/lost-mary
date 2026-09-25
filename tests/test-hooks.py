@@ -1926,6 +1926,9 @@ NOT_HAND_BACKS = [
     "Kept your choice of Europe/Berlin for the index.",
     "The user's decision is recorded in the ADR.",
     "Your permission rules already allow `git push`.",
+    # 2026-09-25, a live false bounce on this session's own report
+    "Handing another session an action your own session was refused would get around your permission settings.",
+    "The classifier runs in your permission mode, auto.",
     "The trace shows your call to parse() passes a naive timestamp.",
     "If you want the long version, the doc is at docs/x.md.",
     "If you'd like to reproduce it: `pytest -k dst`.",
