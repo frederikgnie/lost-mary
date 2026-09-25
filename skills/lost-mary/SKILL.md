@@ -32,14 +32,24 @@ a credential, a name). Never present a menu whose first entry you already
 prefer. `MISSING: <field>` from a subagent is yours to fill from the
 repository, never a question for the user.
 
+**Nothing is the user's until you have tried it.** A step becomes theirs only
+when a tool refused it in this turn - quote the refusal - or when it needs
+their own identity (a login, a consent screen, an elevated prompt), spends
+money, or cannot be undone. "The merge is yours", "only you can run this",
+"you'll need to type" name a step you have not taken; the Stop hook bounces
+them. Another session is a source before the user is: `ListAgents`, then
+`SendMessage`. A statement you could check with one command is checked, not
+stated.
+
 **The turn ends when the work does.** A list of findings is a queue: work it
 to the end in this turn, and look things up - the repository, its docs, the
 web - before asking anything. Close on the line that is true: `DONE: <the
 Done-means check you re-ran and what it showed>`, `IN FLIGHT: <the named agent
-or branch carrying the rest, and what resumes you>`, or `BLOCKED: <what only
-the user can supply, or the irreversible action>`. Anything else at the end of
-a turn that did work - an offer, a menu, "say the word", a `Remaining:` list -
-is bounced by the Stop hook and the turn continues.
+or branch carrying the rest, and what resumes you>`, or `BLOCKED: <the refusal
+you hit, or the item only the user holds>`. A `BLOCKED:` backed by neither a
+refused call in the turn nor a user-held item is bounced with "try it".
+Anything else at the end of a turn that did work - an offer, a menu, "say the
+word", a `Remaining:` list - is bounced by the Stop hook and the turn continues.
 
 ## 2. Smallest mode that can work
 
