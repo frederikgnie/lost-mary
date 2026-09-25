@@ -209,7 +209,7 @@ flight; $2 here let $3.38 through and said so.
 **Which merges the guard holds.** `python scripts/replay-merges.py --detail`
 replays every `gh pr merge` in the local transcripts through
 `guard-shared-checkouts`' merge check, each against its transcript cut at the
-call, beside what really happened (refused, ok, ...). Like `usage.py` it is
+call, beside what really happened (refused, blocked, ran, no-result). Like `usage.py` it is
 not installed and reads nothing but transcripts. Re-run it after changing the
 merge check: every `refused` row should be held, few `ran` rows should be.
 
