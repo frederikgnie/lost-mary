@@ -102,6 +102,7 @@ More live checks, one minute each, for the hooks the suite can only simulate:
 - **guard-shared-checkouts** (only if you configured it, see section 6). From a
   shared checkout ask Claude to run `git switch -c probe`: the call should be
   refused with the `worktree add` hint, while `git status` runs as usual.
+  With or without a config, `gh pr merge 1 | cat` is refused with "lone call".
 
 Then take the baseline the rules will be judged against:
 

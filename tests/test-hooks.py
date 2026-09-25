@@ -2413,7 +2413,7 @@ REFUSAL = (
 )
 
 
-def kg_refused(uid: str = "t-merge", pid: str = PID) -> list[dict[str, object]]:
+def kg_refused(uid: str = "t-merge", pid: str = PID, body: str = REFUSAL) -> list[dict[str, object]]:
     call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": "gh pr merge 20 --squash"}}
     return [
         {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}},
@@ -2423,24 +2423,105 @@ def kg_refused(uid: str = "t-merge", pid: str = PID) -> list[dict[str, object]]:
             "promptId": pid,
             "message": {
                 "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": uid, "content": REFUSAL, "is_error": True}],
+                "content": [{"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": True}],
             },
         },
     ]
 
 
-t = kg_transcript("blocked-tried.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(UNBACKED[0])])
+def kg_review(uid: str = "t-review") -> dict[str, object]:
+    call = {"type": "tool_use", "id": uid, "name": "Agent", "input": {"subagent_type": "review", "prompt": "diff"}}
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
+
+
+t = kg_transcript("blocked-tried.jsonl", [kg_prompt("merge both"), kg_review(), *kg_refused(), kg_said(UNBACKED[0])])
 rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
 expect("a refused call in the turn backs the BLOCKED: -> allow", rc, ALLOW, err)
+# c--repo-EU 2026-09-25, PR #18: merged straight after `gh pr create`, refused as [Merge Without Review], stopped.
+# That refusal names its own remedy, so before any review spawn in the session it backs nothing.
+t = kg_transcript("blocked-unreviewed.jsonl", [kg_prompt("merge it"), *kg_refused(), kg_said(UNBACKED[0])])
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("an unreviewed-merge refusal does not back the BLOCKED: -> block", rc, BLOCK, err)
+expect_true(
+    "... and the bounce spells out the remedy",
+    "[Merge Without Review]" in err and "Spawn `review`" in err and "lone Bash call" in err,
+    err,
+)
+t = kg_transcript(
+    "blocked-reviewed-earlier.jsonl",
+    [kg_prompt("review it", pid="p-old"), kg_review(), kg_prompt("merge it"), *kg_refused(), kg_said(UNBACKED[0])],
+)
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("a review spawned in an earlier turn of the session backs it -> allow", rc, ALLOW, err)
+OTHER_REFUSAL = REFUSAL.replace("[Merge Without Review]", "[Production Deploy]")
+t = kg_transcript(
+    "blocked-other-refusal.jsonl", [kg_prompt("deploy it"), *kg_refused(body=OTHER_REFUSAL), kg_said(UNBACKED[0])]
+)
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("any other refusal still backs the BLOCKED: without a review -> allow", rc, ALLOW, err)
 # Review 2026-09-25 (HIGH): after a refusal the bounce must not point at another session - asking a peer to do
 # what your own classifier refused is permission laundering. It asks for the BLOCKED: line instead.
-t = kg_transcript("assigned-refused.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(ASSIGNED[7])])
+t = kg_transcript("assigned-refused.jsonl", [kg_prompt("merge both"), kg_review(), *kg_refused(), kg_said(ASSIGNED[7])])
 rc, err = run_hook(NOPUNT, stop_payload(ASSIGNED[7], transcript_path=str(t), prompt_id=PID))
 expect_true(
     "an assigned step after a refusal -> bounced for a BLOCKED: line, never routed to another session",
     rc == BLOCK and "SendMessage" not in err and "refused action" in err and "Never ask another session" in err,
     err,
 )
+
+
+# guard-shared-checkouts: a chained or unreviewed `gh pr merge` never reaches the auto-mode classifier, whose
+# refusal would latch the session (c--repo-EU 2026-09-25: `git diff` for the reviewer refused after it).
+def merge_event(command: str, transcript: Path | None, tool: str = "Bash", uid: str = "t-now") -> dict[str, object]:
+    event: dict[str, object] = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": {"command": command},
+        "cwd": str(NP),
+        "tool_use_id": uid,
+    }
+    if transcript is not None:
+        event["transcript_path"] = str(transcript)
+    return event
+
+
+def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
+    call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": command}}
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
+
+
+NO_CONFIG = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(NP / "no-such-config.json")}
+MERGE = "gh pr merge 29 --squash --delete-branch"
+created = kg_bash("git push -u origin x && gh pr create --fill", "t-create")
+t_none = kg_transcript("merge-unreviewed.jsonl", [kg_prompt("ship it"), created])
+t_rev = kg_transcript("merge-reviewed.jsonl", [kg_prompt("ship it"), created, kg_review()])
+t_stale = kg_transcript(
+    "merge-stale-review.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash("gh pr merge 28 --squash", "t-m28")]
+)
+t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
+rc, err = run_hook(GUARD, merge_event(f"{MERGE} 2>&1 | tail -3; gh pr view 29", t_rev), env=NO_CONFIG)
+expect("merge guard: a chained merge -> exit 2, even with no config file", rc, BLOCK, err)
+expect_true("... told to run it alone", "lone call" in err, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_none), env=NO_CONFIG)
+expect("merge guard: no review spawned since the PR -> exit 2", rc, BLOCK, err)
+expect_true("... told to spawn review first", "spawn `review`" in err and "alone" in err, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_rev), env=NO_CONFIG)
+expect("merge guard: a review spawned, merge alone -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_rev, tool="PowerShell"), env=NO_CONFIG)
+expect("merge guard: the same from PowerShell -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_stale), env=NO_CONFIG)
+expect("merge guard: the only review preceded an earlier merge -> exit 2", rc, BLOCK, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_self), env=NO_CONFIG)
+expect("merge guard: the transcript already holds this very call -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, NP / "missing.jsonl"), env=NO_CONFIG)
+expect("merge guard: unreadable transcript -> exit 0 (fail open)", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event(MERGE, None), env=NO_CONFIG)
+expect("merge guard: no transcript_path -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event("gh pr view 29 --json state | head -3", t_none), env=NO_CONFIG)
+expect("merge guard: other gh pr commands, chained -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event("C:/tools/gh.exe pr merge 29", t_none), env=NO_CONFIG)
+expect("merge guard: gh named by path -> exit 2", rc, BLOCK, err)
+
 # Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
 HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."
 t = kg_transcript("how-to.jsonl", [kg_prompt("how do I set up ssh on a new laptop?"), kg_said(HOW_TO)])

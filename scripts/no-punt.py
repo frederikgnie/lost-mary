@@ -349,7 +349,8 @@ MERGE_REMEDY = (
     "The refusal was `[Merge Without Review]` and no `review` agent has run in this session: that refusal names "
     "its own remedy. Spawn `review` with the `git diff`, fix what it finds, run the project's checks, then retry "
     "`gh pr merge` as a lone Bash call - never chained with a push, a create or anything else. Only a refusal of "
-    "that retry backs `BLOCKED:`."
+    "that retry backs `BLOCKED:`. If the classifier refuses preparing the review too, it has latched for this "
+    "session: give the reviewer the worktree path and the changed files to read instead of the diff."
 )
 OPEN_HEADER = "The turn is not over (no-punt)."
 GO_AHEAD_BODY = (
