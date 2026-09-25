@@ -1926,6 +1926,9 @@ NOT_HAND_BACKS = [
     "Kept your choice of Europe/Berlin for the index.",
     "The user's decision is recorded in the ADR.",
     "Your permission rules already allow `git push`.",
+    # 2026-09-25, a live false bounce on this session's own report
+    "Handing another session an action your own session was refused would get around your permission settings.",
+    "The classifier runs in your permission mode, auto.",
     "The trace shows your call to parse() passes a naive timestamp.",
     "If you want the long version, the doc is at docs/x.md.",
     "If you'd like to reproduce it: `pytest -k dst`.",
@@ -1978,16 +1981,18 @@ print()
 print("hooks/run.sh - the plugin's interpreter shim runs a hook with its payload")
 RUN_SH = ROOT / "hooks" / "run.sh"
 wiring = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-entries = [h for groups in wiring["hooks"].values() for g in groups for h in g["hooks"] if "run.sh" in h["command"]]
+run_sh_hooks = [
+    h for groups in wiring["hooks"].values() for g in groups for h in g["hooks"] if "run.sh" in h["command"]
+]
 expect_true(
     "every scripted hook runs through hooks/run.sh and names a script that exists",
-    entries
+    bool(run_sh_hooks)
     and all(
         h["command"].startswith('/bin/bash "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/')
         and (ROOT / h["command"].split('"')[3].replace("${CLAUDE_PLUGIN_ROOT}/", "")).is_file()
-        for h in entries
+        for h in run_sh_hooks
     ),
-    str([h["command"] for h in entries]),
+    str([h["command"] for h in run_sh_hooks]),
 )
 # Git's bash, the one Claude Code runs hook command strings in; on Windows a bare `bash` on PATH can be the
 # WSL stub in System32.
@@ -2019,6 +2024,236 @@ else:
         capture_output=True,
     )
     expect("... and a clean closing passes through as exit 0", proc.returncode, ALLOW, proc.stderr.decode())
+
+# 2026-09-25: the user - "lost mary does a lot of handing over things which it is perfectly capable of doing
+# itself, for instance 'The pull remains yours'". Measured since 09-18: 83 turns ended on BLOCKED: against 46
+# other hand-backs, 24 of the BLOCKED: stops still carrying one. Two changes: a step assigned to the user is
+# a hand-back wherever it sits in the message, and BLOCKED: has to be backed - a refused tool call in the
+# turn, or a user-held item in its paragraph. Every phrase below was read off those transcripts.
+print()
+print("no-punt.py - Stop: a step assigned to the user is bounced; BLOCKED: must be backed")
+ASSIGNED = [
+    "Two decisions remain yours and its user's: the rebuild go/no-go, and the restart.",
+    "The one step only you can do - close this VS Code window first, then run the installer.",
+    "One command left, and it is yours because this session cannot run it.",
+    "To merge, run this yourself:\n\n```bash\ngh pr merge 15 --repo Odigo-Energy/powercountant\n```",
+    "The site reports the old image. The retag is the user's step.",
+    "The PR is ready to merge. Two open items on your side: the gh account and the CI toggle.",
+    "You'll need to type /compact yourself; I can't invoke it.",
+    "PR #27 merged; the classifier held PR #20 back, so those two clicks are yours.",
+    "The decision for the sync task is yours.\n\nDONE: ran the Past-runs pipeline at every lookback -> 12 rows.",
+    "Everything else is merged. The remaining actions stay with you by design.",
+    "You are Contributor on the cluster, so the Viewer and Ingestor grants are yours to run with one command each.",
+    "Only you can authorise it. Everything else is merged as 3d4d1ae8 on feat/x.",
+    "Two things only you can do:\n\n1. Run switch_roles_to_deploy.ps1 elevated.\n2. Add timeout 10 to settings.json.",
+    "The pull remains yours: `git pull --ff-only` in OBF_ops once the images are rebuilt.",
+    "Done; the one privileged command each remains that only you can run.",
+    # review 2026-09-25: the complaint phrasings the first cut missed
+    "PR #21 is green. You can now merge PR #21.",
+    "To finish, you'd need to run the migration against the staging database.",
+    "The branch is pushed; you'll want to run the smoke test before merging.",
+    "The rest? Only you can.",
+    "Pushed.\n\nYour steps:\n1. Run `install.ps1`\n2. Restart Claude Code",
+    "Merged.\n\nOn your end:\n- pull main\n- rebuild the image",
+    "Please run `install.ps1 -Verify` to finish.",
+]
+for i, msg in enumerate(ASSIGNED):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"assigned step #{i + 1} -> block", rc, BLOCK, err)
+rc, err = run_hook(NOPUNT, stop_payload(ASSIGNED[14]))
+expect_true(
+    "the bounce says try it first, names the other-session route and the way out",
+    "until you have tried it" in err and "SendMessage" in err and "BLOCKED:" in err and "only you can run" in err,
+    err,
+)
+NOT_ASSIGNED = [
+    "Process check now shows only PID 25344, started 10:18, which is yours - the Remote Control bridge.",
+    "Kept your choice of Europe/Berlin.",
+    "Nothing else is yours yet, and I was wrong to list two.",
+    "No decision is yours here: both defaults are recorded as Assumption: lines.",
+    "If you want to reproduce it, you'll need to run the script with --browser. The check passes here.",
+    "The subagent must not touch auth.py; you should see 41 passed.",
+    "The guard blocks `git switch` there; work on your own worktree instead.",
+    "The rule says never `only you can run it` - both steps ran here.",
+    "The clocks are yours truly's problem no longer: the DST test is in.",
+    "Two commits are on the branch and both are pushed. DONE: `pytest -q` -> 41 passed.",
+    # review 2026-09-25: authorship in a shared checkout is not a step
+    "Two commits are mine; the other three are yours, from the session that ran at 09:00.",
+    "Your steps list from yesterday: none of them is still open.\n\nDONE: all three verified.",
+]
+for i, msg in enumerate(NOT_ASSIGNED):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"not an assignment #{i + 1} -> allow", rc, ALLOW, err)
+expect_true(
+    "hand_back() names the new kind",
+    np_mod.hand_back(ASSIGNED[0]).kind == "assigned" and np_mod.hand_back(ASSIGNED[13]).kind == "assigned",
+    str(np_mod.hand_back(ASSIGNED[0])),
+)
+
+# BLOCKED: judged on its own paragraph when no transcript backs it.
+UNBACKED = [
+    "BLOCKED: both PRs need a human reviewer - merging is denied to me by design.",
+    "Everything else is merged.\n\nBLOCKED: the retag of app-obf-pnl is the user's step.",
+    "BLOCKED: which first?",
+    "BLOCKED: the merge decision is yours.",
+    "**BLOCKED:** running the deploy script; you run it and I verify.",
+    # review 2026-09-25: a code span backs nothing, and a decision asked as a what-question is a menu
+    "BLOCKED: the merge; command: `gh pr merge 21 --squash --delete-branch`.",
+    "BLOCKED: what should I do with PR #21?",
+    "BLOCKED: what do you want first?",
+    # review 2026-09-25: "the classifier would deny it" is a claim; "production" alone no longer backs it
+    "BLOCKED: the retag is gated by the classifier.",
+    "BLOCKED: the prod-weu-kusto cluster name is in the config; the classifier holds the query.",
+]
+for i, msg in enumerate(UNBACKED):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"unbacked BLOCKED #{i + 1} -> block", rc, BLOCK, err)
+expect_true(
+    "the bounce names what would back it",
+    "not backed" in err and "refused" in err and "elevated" in err and "what/where/who" in err,
+    err,
+)
+BACKED = [
+    "BLOCKED: retagging app-obf-pnl redeploys the live production site; the command is above.",
+    "BLOCKED: the switch to the deploy tree needs your elevated command: `powershell -File switch.ps1`.",
+    "BLOCKED: the production DB password is not on this machine.",
+    "Item 5 came through empty.\n\n**BLOCKED:** what was item 5? Everything else is done.",
+    "BLOCKED: the Entra consent screen is behind your SSO; I cannot click it.",
+    "BLOCKED: deleting the 41 stale images is irreversible and the list is above.",
+    "BLOCKED: how many rungs does the desk want per hour? The code takes any integer.",
+]
+for i, msg in enumerate(BACKED):
+    rc, err = run_hook(NOPUNT, stop_payload(msg))
+    expect(f"backed BLOCKED #{i + 1} -> allow", rc, ALLOW, err)
+
+# With a transcript, a refused tool call in the turn backs any BLOCKED: - the model tried.
+REFUSAL = (
+    "Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Merge Without "
+    "Review]. If you have other tasks that don't depend on this action, continue working on those."
+)
+
+
+def kg_refused(uid: str = "t-merge", pid: str = PID) -> list[dict[str, object]]:
+    call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": "gh pr merge 20 --squash"}}
+    return [
+        {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}},
+        {
+            "type": "user",
+            "uuid": uuid.uuid4().hex,
+            "promptId": pid,
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": uid, "content": REFUSAL, "is_error": True}],
+            },
+        },
+    ]
+
+
+t = kg_transcript("blocked-tried.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(UNBACKED[0])])
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("a refused call in the turn backs the BLOCKED: -> allow", rc, ALLOW, err)
+# Review 2026-09-25 (HIGH): after a refusal the bounce must not point at another session - asking a peer to do
+# what your own classifier refused is permission laundering. It asks for the BLOCKED: line instead.
+t = kg_transcript("assigned-refused.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(ASSIGNED[7])])
+rc, err = run_hook(NOPUNT, stop_payload(ASSIGNED[7], transcript_path=str(t), prompt_id=PID))
+expect_true(
+    "an assigned step after a refusal -> bounced for a BLOCKED: line, never routed to another session",
+    rc == BLOCK and "SendMessage" not in err and "refused action" in err and "Never ask another session" in err,
+    err,
+)
+# Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
+HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."
+t = kg_transcript("how-to.jsonl", [kg_prompt("how do I set up ssh on a new laptop?"), kg_said(HOW_TO)])
+rc, err = run_hook(NOPUNT, stop_payload(HOW_TO, transcript_path=str(t), prompt_id=PID))
+expect("a how-to answer in a turn that did no work -> allow", rc, ALLOW, err)
+t = kg_transcript("how-to-worked.jsonl", [kg_prompt("set up ssh on this laptop"), kg_tool(), kg_said(HOW_TO)])
+rc, err = run_hook(NOPUNT, stop_payload(HOW_TO, transcript_path=str(t), prompt_id=PID))
+expect("the same sentence after the turn ran something -> block", rc, BLOCK, err)
+long_report = "You'll need to run the installer after a fresh clone.\n\n" + "\n\n".join(
+    f"Paragraph {n}: the loader and the tests are fixed." for n in range(4)
+)
+rc, err = run_hook(NOPUNT, stop_payload(long_report))
+expect("no transcript: only the closing paragraphs are judged for an assigned step -> allow", rc, ALLOW, err)
+t = kg_transcript(
+    "blocked-old-refusal.jsonl",
+    [
+        kg_prompt("merge both", "p-old"),
+        *kg_refused(pid="p-old"),
+        kg_said("BLOCKED: denied."),
+        kg_prompt("now"),
+        kg_said(UNBACKED[0]),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("a refusal in an earlier turn does not back this one -> block", rc, BLOCK, err)
+expect_true("... and the task is carried back", "The task for this turn: now" in err, err)
+read_mention: dict[str, object] = {
+    "type": "user",
+    "uuid": uuid.uuid4().hex,
+    "promptId": PID,
+    "message": {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "rd", "content": "x" * 400 + REFUSAL}],
+    },
+}
+t = kg_transcript("blocked-read.jsonl", [kg_prompt("merge both"), read_mention, kg_said(UNBACKED[0])])
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("a Read whose content merely mentions the marker is not a refusal -> block", rc, BLOCK, err)
+# Review 2026-09-25: a Grep hit inside the first 80 characters is still not a refusal - it is not an error result.
+grep_hit: dict[str, object] = {
+    "type": "user",
+    "uuid": uuid.uuid4().hex,
+    "promptId": PID,
+    "message": {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "gr", "content": "scripts/x.py:206: " + REFUSAL}],
+    },
+}
+t = kg_transcript("blocked-grep.jsonl", [kg_prompt("merge both"), grep_hit, kg_said(UNBACKED[0])])
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
+expect("a Grep result quoting the marker is not a refusal (no is_error) -> block", rc, BLOCK, err)
+# Review 2026-09-25: NEGATED is shared - "no time left" must not disarm a parked defect again.
+rc, err = run_hook(NOPUNT, stop_payload("No time left so I'll leave the rest for you."))
+expect("'no <noun>' before a parked defect does not negate it -> block", rc, BLOCK, err)
+# Review 2026-09-25: a subagent's BLOCKED: is a report the lead judges - never gated here.
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], agent_id="a1", agent_type="implement"))
+expect("a subagent's unbacked BLOCKED: -> allow", rc, ALLOW, err)
+# The assigned bounce carries the turn's task back, like every other kind.
+t = kg_transcript("assigned-task.jsonl", [kg_prompt("fix the loader"), kg_tool(), kg_said(ASSIGNED[13])])
+rc, err = run_hook(NOPUNT, stop_payload(ASSIGNED[13], transcript_path=str(t), prompt_id=PID))
+expect_true(
+    "the assigned bounce carries the task", rc == BLOCK and "The task for this turn: fix the loader" in err, err
+)
+fr_gate = load_module(FRICTION, "fr_mod_gate")
+expect_true(
+    "friction's BLOCKED_GATE is no-punt's BLOCKED_HEADER",
+    np_mod.BLOCKED_HEADER.startswith(fr_gate.BLOCKED_GATE),
+    f"{fr_gate.BLOCKED_GATE!r} vs {np_mod.BLOCKED_HEADER!r}",
+)
+# The loop guard still bounds it: two unbacked BLOCKED: stops with no work between them, and the third passes.
+t = kg_transcript(
+    "blocked-idle.jsonl",
+    [
+        kg_prompt("merge both"),
+        kg_said(UNBACKED[0]),
+        kg_feedback(),
+        kg_said(UNBACKED[0]),
+        kg_feedback(),
+        kg_said(UNBACKED[0]),
+    ],
+)
+rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID, stop_hook_active=True))
+expect("two idle bounces of an unbacked BLOCKED: -> the third stop is allowed", rc, ALLOW, err)
+# An assigned step next to a backed BLOCKED: is the legitimate case - the refusal is quoted, the step is named.
+both = "The merge was refused by the classifier, so the click is yours.\n\n" + BACKED[0]
+rc, err = run_hook(NOPUNT, stop_payload(both))
+expect("an assigned step beside a backed BLOCKED: -> allow", rc, ALLOW, err)
+fr_mod = load_module(FRICTION, "fr_mod_markers")
+expect_true(
+    "REFUSAL_MARKERS is one tuple in both scripts",
+    tuple(fr_mod.REFUSAL_MARKERS) == tuple(np_mod.REFUSAL_MARKERS),
+    f"{fr_mod.REFUSAL_MARKERS} != {np_mod.REFUSAL_MARKERS}",
+)
 
 # --------------------------------------------------------------------------- friction
 print()
@@ -2125,6 +2360,11 @@ def jsonl(records: list[dict[str, object]]) -> str:
                 },
             },
             said("Shipped; release notes written and pushed.", "2026-09-10T15:31:00.000Z"),
+            prose("now merge both"),  # a new turn: the refusal above no longer backs a BLOCKED: stop
+            said(
+                "BLOCKED: both PRs need a human reviewer - merging is denied to me by design.",
+                "2026-09-10T15:32:00.000Z",
+            ),
         ]
     ),
     encoding="utf-8",
@@ -2157,12 +2397,21 @@ expect_true(
 )
 expect_true("two hand-backs (one streamed twice); the FOUND: line is not one", data["hand_backs"] == 2, str(data))
 expect_true(
-    "both were bounced by no-punt (one behind a check-evidence block); the BLOCKED: stop is audited and flagged",
+    "both were bounced by no-punt (one behind a check-evidence block); the BLOCKED: stops are audited and flagged",
     data["hand_backs_bounced"] == 2
-    and data["blocked_stops"] == 1
+    and data["blocked_stops"] == 2
     and data["blocked_with_hand_back"] == 1
-    and any("BLOCKED: merging to main" in e and "parked" in e for e in data["blocked_examples"]),
+    and any(
+        "BLOCKED: merging to main" in e and "parked" in e and "unbacked" not in e for e in data["blocked_examples"]
+    ),
     str({k: data[k] for k in ("hand_backs_bounced", "blocked_stops", "blocked_with_hand_back", "blocked_examples")}),
+)
+expect_true(
+    "a BLOCKED: with no refused call in its turn and no user-held item is counted as unbacked",
+    data["blocked_unbacked"] == 1
+    and data["projects"]["c--repo-b"]["blocked_unbacked"] == 1
+    and any("human reviewer" in e and "unbacked" in e for e in data["blocked_examples"]),
+    str({k: data[k] for k in ("blocked_unbacked", "blocked_examples")}),
 )
 expect_true(
     "the example names the matched phrase",

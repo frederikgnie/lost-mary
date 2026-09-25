@@ -224,6 +224,17 @@ and how many turns closed on `BLOCKED:`. The 2026-09-17 baseline: 474 of
 fall; if it does not, the detector is missing the phrasing (add it to
 `GO_AHEAD_PATTERNS` with a test) or the bounce is not reaching the model.
 
+friction re-judges old transcripts with the current detector, so a new
+hand-back class moves every earlier reading; compare readings taken with the
+same detector only. **The 2026-09-25 baseline**, after the `assigned` class and
+the backed-`BLOCKED:` gate (`--since 2026-09-01`, the default last 50 sessions,
+09-02..09-25): 205 turn-ending hand-backs, 57 bounced; 103 turns ended on
+`BLOCKED:`, 53 of them still carrying a hand-back and 39 unbacked (no refused
+call in the turn, no user-held item named); 0 passed right after a `BLOCKED:`
+bounce. Watch "unbacked" and "passed right after a BLOCKED: bounce": the first
+should fall to zero, and a rising second means the gate is being reworded past
+rather than satisfied.
+
 The keep-going design rests on published mechanisms rather than on prose:
 Claude Code's Stop-hook contract and its eight-block cap
 (code.claude.com/docs/en/hooks, hooks-guide), the `ralph-wiggum` plugin's

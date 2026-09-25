@@ -16,8 +16,10 @@ evidence is already on disk: every session transcript under
                to ask for a go-ahead, judged with scripts/no-punt.py's own
                detector (only a message that ended a turn counts - the next
                record is a real user record, or the file ends); how many of
-               them no-punt bounced; and how many turns ended on a BLOCKED:
-               line, the declared, auditable way to stop early;
+               them no-punt bounced; how many turns ended on a BLOCKED: line,
+               the declared, auditable way to stop early; and how many of
+               those were unbacked - no refused tool call in the turn and no
+               user-held item named, judged with no-punt's blocked_backed();
   hooks        the firings a hook LEFT BEHIND, split into blocks (the hook
                doing its job), fail-open notices (exit 0 with stderr - a hook
                that could not do its job and said so on a stream nobody reads)
@@ -75,6 +77,7 @@ sys.dont_write_bytecode = True  # read-only means no __pycache__ either, not eve
 
 FRICTION_ROOT_ENV = "FRICTION_ROOT"
 DEFAULT_FRICTION_ROOT = Path.home() / ".claude" / "agent-library" / "friction"
+BLOCKED_GATE = "BLOCKED: is a claim, and this one is not backed"  # no-punt's BLOCKED_HEADER, pinned by the tests
 NOASK_BLOCK = "blocked while this session runs under /lost-mary"  # first sentence of no-punt's sibling, no-ask
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # transcript text goes to a terminal; strip escapes
 REFUSAL_MARKERS = (
@@ -104,6 +107,8 @@ class ProjectStats:
     hand_backs_bounced: int = 0  # of those, followed by a no-punt bounce
     blocked_stops: int = 0  # turns that ended on a BLOCKED: line
     blocked_with_hand_back: int = 0  # of those, still carrying a hand-back - the hatch used as a bypass
+    blocked_unbacked: int = 0  # of those, with no refused call in the turn and no user-held item named
+    blocked_after_gate: int = 0  # of the backed ones, those right after no-punt bounced an unbacked BLOCKED:
 
 
 @dataclass
@@ -176,6 +181,14 @@ class Report:
     @property
     def blocked_with_hand_back(self) -> int:
         return sum(p.blocked_with_hand_back for p in self.projects.values())
+
+    @property
+    def blocked_unbacked(self) -> int:
+        return sum(p.blocked_unbacked for p in self.projects.values())
+
+    @property
+    def blocked_after_gate(self) -> int:
+        return sum(p.blocked_after_gate for p in self.projects.values())
 
     @property
     def blocked_examples(self) -> list[str]:
@@ -388,6 +401,8 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
     said_at = ""
     final: tuple[str, str] | None = None
     unbounced = False  # the last judged hand-back has not (yet) been followed by a no-punt bounce
+    turn_refused = False  # a tool call in the current turn was refused - what backs a BLOCKED: stop
+    after_gate = False  # the last user record was no-punt bouncing an unbacked BLOCKED: stop
 
     def close_message() -> None:
         nonlocal final, parts, called_tool
@@ -399,7 +414,7 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
         parts, called_tool = [], False
 
     def judge(follow: dict[str, Any] | None) -> None:
-        nonlocal final, unbounced
+        nonlocal final, unbounced, after_gate
         if final is None or no_punt is None:
             return
         text, when = final
@@ -413,6 +428,12 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
             if found is not None:
                 stats.blocked_with_hand_back += 1
                 shown += f"  (also {found.kind}: {CONTROL.sub('', found.phrase)!r})"
+            if not no_punt.blocked_backed(text, turn_refused):
+                stats.blocked_unbacked += 1
+                shown += "  (unbacked: no refused call in the turn, no user-held item named)"
+            elif after_gate:  # the gate bounced the last stop and this one passed: tried, or only reworded
+                stats.blocked_after_gate += 1
+                shown += "  (passed right after a BLOCKED: bounce - tried, or reworded? read it)"
             report.blocked_seen.append((when, f"{day}  [{project}] {shown}"))
             if len(report.blocked_seen) > 200:
                 report.blocked_seen = sorted(report.blocked_seen, reverse=True)[:8]
@@ -476,6 +497,9 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
                     unbounced = False
                 else:
                     judge(record)
+                after_gate = is_no_punt_feedback(record) and BLOCKED_GATE in str(content)[:600]
+                if no_punt is not None and no_punt.is_prompt(record):
+                    turn_refused = False  # a real prompt starts a turn; hook feedback and meta records do not
             if not isinstance(content, list):
                 continue
             for item in content:
@@ -501,17 +525,19 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
                     uid = str(item.get("tool_use_id"))
                     raw = item.get("content")
                     body = raw if isinstance(raw, str) else text_of(raw)
+                    denied = refused(body, item.get("is_error"))
                     if uid in asked:
                         count, recommended = asked.pop(uid)
                         if NOASK_BLOCK in body:
                             stats.blocked += count
                             continue
-                        if not refused(body):
+                        if not denied:
                             stats.questions += count
                             stats.recommended += recommended
                             continue
-                    if refused(body):
+                    if denied:
                         stats.refusals += 1
+                        turn_refused = True
                         name, command = pending.get(uid, ("?", ""))
                         report.refused_tools[name] += 1
                         if command:
@@ -525,10 +551,10 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
     return (min(dates), max(dates)) if dates else None
 
 
-def refused(body: str) -> bool:
-    """A refusal is the result itself, so its marker sits at the start; a Read of a file that merely mentions
-    one does not count."""
-    return any(marker in body[:300] for marker in REFUSAL_MARKERS)
+def refused(body: str, is_error: object) -> bool:
+    """A refusal is the result itself: an error result with its marker in the opening words. A Read or Grep of a
+    file that merely mentions one does not count (the same test as no-punt's refused_body)."""
+    return is_error is True and any(0 <= body.find(marker) < 80 for marker in REFUSAL_MARKERS)
 
 
 def scan_settings(path: Path, report: Report) -> None:
@@ -624,6 +650,8 @@ def as_json(report: Report) -> dict[str, Any]:
         "hand_backs_bounced": report.hand_backs_bounced,
         "blocked_stops": report.blocked_stops,
         "blocked_with_hand_back": report.blocked_with_hand_back,
+        "blocked_unbacked": report.blocked_unbacked,
+        "blocked_after_gate": report.blocked_after_gate,
         "blocked_examples": report.blocked_examples,
         "hook_fires": dict(report.hook_fires.most_common()),
         "hook_blocks": dict(report.hook_blocks.most_common()),
@@ -654,6 +682,8 @@ def as_json(report: Report) -> dict[str, Any]:
                 "hand_backs_bounced": p.hand_backs_bounced,
                 "blocked_stops": p.blocked_stops,
                 "blocked_with_hand_back": p.blocked_with_hand_back,
+                "blocked_unbacked": p.blocked_unbacked,
+                "blocked_after_gate": p.blocked_after_gate,
             }
             for name, p in sorted(report.projects.items())
         },
@@ -733,7 +763,9 @@ def as_text(report: Report) -> str:
     lines.append(
         f"hand-backs    {report.hand_backs} message(s) ended a turn on a hand-back or a go-ahead request "
         f"(a bounced message and its rewrite both count), {report.hand_backs_bounced} bounced by no-punt; "
-        f"{report.blocked_stops} turn(s) ended on BLOCKED:, {report.blocked_with_hand_back} still carrying a hand-back"
+        f"{report.blocked_stops} turn(s) ended on BLOCKED:, {report.blocked_with_hand_back} still carrying a "
+        f"hand-back, {report.blocked_unbacked} unbacked (no refused call in the turn, no user-held item named), "
+        f"{report.blocked_after_gate} passed right after a BLOCKED: bounce"
     )
     fires, blocks, notices = (
         sum(report.hook_fires.values()),

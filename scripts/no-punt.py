@@ -23,6 +23,14 @@ Reads the final message of the turn and blocks the stop when the message
   go-ahead   stops for the user's word in its closing paragraphs - "say the
              word", "want me to", "if you'd like", "standing by", "your call",
              "let me know", "not going to ... unprompted";
+  assigned   names the user as the one who will do a step - "the merge is
+             yours", "only you can run", "you'll need to run", "run this
+             yourself", "the retag is the user's step" - anywhere in the
+             message, DONE: line or not. Measured 2026-09-25 over the
+             transcripts since 09-18: 83 turns ended on BLOCKED: against 46
+             other hand-backs, and the phrasing above carried steps the
+             session could have taken (a command it never ran, a merge the
+             allow rule covers, a probe another session could run);
   remaining  closes on a label that lists work as still open - "Remaining:",
              "Next steps:", "Pending:" - a queue presented as a report;
   question   ends on a question, which at the end of a turn is asked of the
@@ -37,9 +45,16 @@ Reads the final message of the turn and blocks the stop when the message
              not phrase matching): a message that merely lists leftovers cannot
              pass by rewording.
 
-`BLOCKED:` always ends the turn - it is the lead's twin of a subagent's
-`MISSING: <field>` - and friction.py counts such stops, and what else they
-carried, so they can be audited. The bounce quotes the phrase, restates the
+`BLOCKED:` ends the turn when it is backed - it is the lead's twin of a
+subagent's `MISSING: <field>`, and a claim like any other. Backed means the
+turn's transcript holds a refused tool call (the result of a call the
+auto-mode classifier or the user denied - the model tried), or the BLOCKED
+paragraph names something only the user holds: their identity (a login, a
+consent screen, an elevated prompt), a credential, money, an irreversible
+action, or a value asked for as a what/where/who question. A `BLOCKED:` with
+neither is bounced: try it, and the refusal - if one comes - is the evidence.
+friction.py counts BLOCKED stops, what else they carried and how many were
+unbacked, so they can be audited. The bounce quotes the phrase, restates the
 rule, names the way out and carries back the turn's own task and its `Done
 means` line, so the model re-reads the whole ask rather than the last item.
 
@@ -73,8 +88,12 @@ the fallback message and for the turn's records - `promptId` on user records
 (a Stop block's feedback record carries the same one as its prompt, observed
 2026-09-17), a Stop block recorded as a `user` record whose string content
 starts `Stop hook feedback:\\n[<hook command>]: ` and carries this hook's own
-header, and a slash command recorded as a `user` record whose string content
-starts with the command tags.
+header, a slash command recorded as a `user` record whose string content
+starts with the command tags, and a refused tool call recorded as a
+`tool_result` whose body starts with one of REFUSAL_MARKERS (observed
+2026-09-25, 2.1.281: "Permission for this action was denied by the Claude Code
+auto mode classifier. Reason: [...]", "The user doesn't want to proceed with
+this tool use."; the tuple is kept equal to friction.py's by the tests).
 """
 
 from __future__ import annotations
@@ -109,6 +128,90 @@ PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
+# --- steps assigned to the user ---------------------------------------------------------------
+# Judged on the whole message, like a parked defect: "the merge is yours" in the middle of a report
+# with a DONE: line at the end is still a step the session did not take. Every shape was read off
+# the transcripts since 2026-09-18. The subject has to be step-like so that "PID 25344 is yours"
+# (a process the user owns) and "your choice of Europe/Berlin" do not match.
+STEP = (
+    r"(?:steps?|commands?|clicks?|keystrokes?|decisions?|choices?|calls?|rulings?|runs?|merges?|deploys?"
+    r"|retags?|rebuilds?|restarts?|switch(?:es)?|pulls?|pushes|consent|sign-?ins?|logins?|actions?|items?"
+    r"|things?|remainder|bumps?|grants?|fix(?:es)?|tasks?|jobs?|moves?)"
+)  # no bare numbers, "others" or "rest": "two commits are mine; the other three are yours" is authorship
+USER_VERB = (
+    r"(?:do|run|type|click|open|register|execute|invoke|switch|fill|approve|merge|deploy|pull|push|restart"
+    r"|start|stop|kill|log\s+in|sign\s+in|authori[sz]e|grant|accept|confirm|paste|add|edit|set|change|rebuild"
+    r"|retag|bump|apply|install|enable|disable|trigger|revoke|rotate|create|delete|remove|update|specify"
+    r"|provide|supply|copy|decide|answer|settle|lift|check|make|choose|perform|complete|finish"
+    r"|handle|resolve|fix|test|verify|release|call|sign)"
+)
+# "only you can see / read / eyeball it" hands over a check; "you should see 41 passed" explains an outcome,
+# so the observational verbs belong to the "only you can" shape alone.
+ONLY_YOU_VERB = USER_VERB[:-1] + r"|see|read|eyeball|review|judge|tell|say|give)"
+ASSIGNED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b" + STEP + r"\b[^.\n]{0,60}\b(?:is|are|remains?|stays?|falls?|rests?)\s+"
+        r"(?:yours|with\s+you|on\s+your\s+(?:side|end|plate))\b",
+        r"\bonly\s+(?:you|the\s+user)\s+can\s+(?:\w+\s+){0,2}?" + ONLY_YOU_VERB + r"\b",
+        r"\byours\s+(?:because|to\s+" + USER_VERB + r"\b)",
+        r"\byou(?:'ll|'d|\s+will|\s+would|\s+need\s+to|\s+have\s+to|\s+must|\s+should|\s+can\s+now)\s+"
+        r"(?:need\s+to\s+|have\s+to\s+|want\s+to\s+)?" + USER_VERB + r"\b",
+        r"\bonly\s+(?:you|the\s+user)\s+can\s*[.!:;]",
+        r"\bplease\s+(?:run|type|click|execute|merge|approve|paste|restart|deploy|apply|open)\b",
+        r"\brun\s+(?:this|that|these|those|it|them)\s+yourself\b(?!\s+(?:later|any\s*time|whenever|with|to\s+see|if)\b)",
+        r"\b(?:items?|steps?|actions?|things?|open|pending|remaining|left|waiting)\b[^.\n]{0,30}"
+        r"\bon\s+your\s+(?:side|end|plate)\b",
+        r"\b(?:is|are|remains?|stays?|becomes?)\s+the\s+user's\s+(?:step|call|decision|job|task|action|click|move)\b",
+        r"\b(?:for|to)\s+you\s+to\s+(?:run|type|click|merge|deploy|approve|execute|apply|trigger|register|invoke"
+        r"|switch|paste|install)\b",
+        r"\b(?:stays?|rests?|remains?)\s+with\s+you\b",
+    )
+)
+# A conditional or an aside before the phrase makes it an explanation, not an assignment: "if you want to
+# reproduce it, you'll need to run", "should you ever need to, you can" - checked like NEGATED, on the 48
+# characters before the match.
+EXPLAINING = re.compile(
+    r"\b(?:if|unless|whenever|in\s+case|next\s+time|to\s+reproduce|for\s+reference|should\s+you)\b[^.\n]*$",
+    re.IGNORECASE,
+)
+
+# --- what backs a BLOCKED: line ---------------------------------------------------------------
+# A refused tool call, as its result reaches the transcript. The marker sits at the start of the body:
+# a Read of a file that merely mentions one is not a refusal. Kept equal to friction.py's tuple.
+REFUSAL_MARKERS = (
+    "denied by the Claude Code auto mode classifier",
+    "requested permissions",
+    "haven't granted it yet",
+    "user doesn't want to proceed",
+    "user doesn't want to take this action",
+)
+# What only the user holds: their identity, a credential, money, an irreversible action - or a value, when
+# the BLOCKED paragraph asks for it as a what/where/who question. Not here on purpose: decision, choice,
+# approval, review, merge, classifier, denied, permission - a decision is the lead's to take, and "the
+# classifier would deny it" is a claim until the transcript holds the denial. "production" backs a stop only
+# beside a write to it (a deploy, a retag, a restart, a migration): the bare word is how a classifier claim
+# ("gated as a production deploy" aside) gets reworded past the gate.
+PROD_WRITE = r"(?:deploy\w*|releas\w*|retag\w*|restart\w*|migrat\w*|writ\w*|push\w*|rebuild\w*|rollout\w*)"
+USER_HELD = re.compile(
+    r"\b(?:credentials?|passwords?|passphrases?|secrets?|tokens?|api[ -]?keys?|ssh[ -]?keys?|log(?:ged)?[ -]?in"
+    r"|login|sign(?:ed)?[ -]?in|sso|mfa|2fa|consent|elevat\w*|uac|administrator|admin\s+(?:rights|prompt|shell|console)"
+    r"|run\s+as\s+admin\w*|interactive\s+(?:session|prompt|login|shell)|browser\s+(?:prompt|consent|login)|captcha"
+    r"|money|spend\w*|budget|paid|payment|invoice|billing|irreversible|data\s+loss|delet\w+"
+    r"|drop(?:s|ping)?\s+(?:the\s+)?(?:table|database|schema)|history\s+rewrite|rewrit\w+\s+history|force[- ]push\w*"
+    r"|" + PROD_WRITE + r"\b[^.\n]{0,40}\b(?:production|prod|live)"
+    r"|(?:production|prod|live)\b[^.\n]{0,40}\b(?:" + PROD_WRITE[3:-1] + r"|roles?|sites?|databases?|db|trading)"
+    r"|customer[- ]facing)\b",
+    re.IGNORECASE,
+)
+FACT_QUESTION = re.compile(r"\b(?:what|where|who|whose|how\s+(?:many|much))\b[^\n?]*\?", re.IGNORECASE)
+# "what should I do with PR #21?" / "what do you want first?" ask for a decision, not a value: a menu in
+# question form, which is exactly what the gate rejects.
+MENU_QUESTION = re.compile(
+    r"\b(?:should|shall|may|can)\s+I\b|\byou\s+(?:want|prefer|like|rather)\b|\b(?:first|next|instead)\s*\?",
+    re.IGNORECASE,
+)
+
 # --- go-ahead requests ------------------------------------------------------------------------
 # Judged on the closing paragraphs only: an offer in the middle of a report is narrative, one at
 # the end is where the turn stops. Every shape here was read off real transcripts; every exclusion
@@ -136,7 +239,7 @@ GO_AHEAD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"|say-?so|reply|answer|nod|signal|okay|ok|green\s+light|sign-?off)\b"
         r"|(?:the|a)\s+(?:go-?ahead|green\s+light|nod|sign-?off|word\s+from\s+you)\b)",
         r"\b(?:your|the\s+user's)\s+(?:call|decision|choice|go-?ahead|confirmation|approval|sign-?off|nod|permission|blessing)\b"
-        r"(?!\s+(?:of|to|rules?|model|list|from|in|is|was|were|has|had|for|on|at|that|which)\b)",
+        r"(?!\s+(?:of|to|rules?|settings?|modes?|prompts?|model|list|from|in|is|was|were|has|had|for|on|at|that|which)\b)",
         r"\b(?:up|over|down)\s+to\s+you\b|\byours\s+to\s+(?:decide|release|make|call|run|delete|merge|trigger|start|approve|pull|push|choose)\b",
         r"\b(?:when|once|until|after)\s+you(?:'re|\s+are)?\s+(?:ready|back|happy|sure|confirm|say|approve|decide|okay|ok|agree)\b",
         r"\bhold(?:ing)?\s+off\b[^.\n]{0,60}\b(?:you|your|word|go-?ahead|confirm)\b"
@@ -157,6 +260,10 @@ REMAINING_LABEL = re.compile(
     r"(?!\s+(?:risks?|budget|balance|time|effort|cost|capacity|questions?|context|tokens|allowance|credit|debt)\b)"
     r"[^\n:]{0,20}:[ \t]*(.*)$"
 )
+USER_LABEL = re.compile(
+    r"(?im)^[ \t*#>_-]*(?:your\s+(?:steps?|part|side|turn|actions?|to-?dos?|move)|for\s+you|on\s+your\s+(?:side|end))"
+    r"[^\n:]{0,20}:[ \t]*(.*)$"
+)
 NOTHING = re.compile(r"^\W*(?:none|nothing|no\b|n/a|nil|empty|0\b|-\s*$)", re.IGNORECASE)
 
 QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
@@ -171,7 +278,9 @@ CLOSING_PARAGRAPHS = 3
 # waiting for your go-ahead", "will not wait for your call" are allowed; "the fix is not small so
 # I'll leave that for you" is still a hand-back.
 NEGATED = re.compile(
-    r"(?:\b(?:nothing|none|no\s+one|nobody|without|rather\s+than|instead\s+of)\s+(?:[\w'-]+\s+){0,3}"
+    r"(?:\b(?:nothing|none|no\s+one|nobody|without|rather\s+than|instead\s+of"
+    r"|no\s+(?:decisions?|steps?|actions?|items?|commands?|clicks?))\s+(?:[\w'-]+\s+){0,3}"
+    r"|\bno\s+"  # right before the match: "No decision is yours" - but "No time left so I'll leave ..." stays
     r"|\b(?:is|are|was|were|will|would|do|did|does|need)\s+not\s+(?:[\w'-]+\s+)?"
     r"|\b(?:isn't|aren't|wasn't|weren't|won't|don't|didn't|doesn't|needn't)\s+(?:[\w'-]+\s+)?)$",
     re.IGNORECASE,
@@ -204,6 +313,30 @@ PARKED_BODY = (
     "commit a failing test on a branch. Then report it as fixed or in flight - never as left for you. "
     "If it genuinely cannot be yours (an irreversible action, or data only the user holds), end with one "
     "line `BLOCKED: <what and why>`; that stop is allowed."
+)
+ASSIGNED_HEADER = "Nothing is the user's until you have tried it (no-punt)."
+ASSIGNED_BODY = (
+    "Your final message assigns a step to the user: {phrase!r}. Take it now: run the command, make the edit, "
+    "open or merge the PR; for a fact you lack, ask another session (ListAgents / SendMessage) before the user. "
+    "A step is the user's only when a tool refused it in this turn - then quote the refusal - or when it needs "
+    "their own identity (a login, a consent screen, an elevated prompt), spends money, or cannot be undone. Never "
+    "ask another session to perform an action a tool refused you. Then close on one line "
+    "`BLOCKED: <the refusal you hit, or the item only the user holds>`; that stop is allowed."
+)
+ASSIGNED_REFUSED_BODY = (
+    "Your final message assigns a step to the user: {phrase!r}, and a tool call in this turn was refused. If "
+    "that refusal is what makes the step theirs, say so on one line - `BLOCKED: <the refused action and the "
+    "refusal's reason>` - and that stop is allowed. Never ask another session to perform an action a tool "
+    "refused you. If the step is something else, take it now."
+)
+BLOCKED_HEADER = "BLOCKED: is a claim, and this one is not backed (no-punt)."
+BLOCKED_BODY = (
+    "Your `BLOCKED:` line - {phrase!r} - names nothing this turn tried and was refused, and nothing only the user "
+    "holds: a login, consent or elevated prompt, a credential, money, an irreversible action, or a value only "
+    "they know (ask for it as a what/where/who question). Try it now: run the command, make the edit, merge the "
+    "PR; for a fact you lack, ask another session (ListAgents / SendMessage). If a tool refuses, that refusal is "
+    "your evidence and the same `BLOCKED:` stop is allowed - never ask another session to perform an action a "
+    "tool refused you. If it works, the turn goes on and closes on `DONE:`."
 )
 OPEN_HEADER = "The turn is not over (no-punt)."
 GO_AHEAD_BODY = (
@@ -238,7 +371,7 @@ SUBAGENT_BODY = (
 
 @dataclass(frozen=True)
 class HandBack:
-    kind: str  # "parked" | "go-ahead" | "remaining" | "question" | "unclosed"
+    kind: str  # "parked" | "assigned" | "go-ahead" | "remaining" | "question" | "unclosed" | "blocked"
     phrase: str
 
 
@@ -250,6 +383,7 @@ class Turn:
     bounces: int = 0  # feedback records this hook wrote in the turn
     idle: int = 0  # of those, the trailing run with no tool call after them
     worked: bool = False  # the turn edited, ran or delegated something (WORK_TOOLS)
+    refused: bool = False  # a tool call in the turn was refused (classifier or user) - the model tried
     lost_mary: bool = False  # /lost-mary invoked since the last /clear
     task: str = ""  # the user's own words that started the turn
     done_means: str = ""  # the `Done means` line the lead wrote in this turn, if any
@@ -427,6 +561,12 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
             elif prompt:  # without an id every real prompt starts the count afresh
                 turn = Turn(found=True, lost_mary=turn.lost_mary, task=prompt_text(record))
                 continue
+            if (
+                kind == "user"
+                and not turn.refused
+                and any(refused_result(r) for r in blocks_of(content, "tool_result"))
+            ):
+                turn.refused = True
             if kind == "user" and own_feedback(content):
                 uid = record.get("uuid")
                 if isinstance(uid, str) and uid:
@@ -448,6 +588,20 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
     return turn
 
 
+def refused_body(body: str, is_error: object) -> bool:
+    """A refusal as Claude Code writes it: an error result whose marker sits in its opening words.
+
+    Measured 2026-09-25 over every transcript on this machine: all 182 real refusals carry `is_error: true`
+    with the marker before character 80; the two hits past it were log output quoting a refusal.
+    """
+    return is_error is True and any(0 <= body.find(marker) < 80 for marker in REFUSAL_MARKERS)
+
+
+def refused_result(block: dict[str, Any]) -> bool:
+    raw = block.get("content")
+    return refused_body(raw if isinstance(raw, str) else text_of(raw), block.get("is_error"))
+
+
 def strip_quoted(text: str) -> str:
     """Quoted spans become the word QUOTED - still an object for "leave ... for you", never a match themselves."""
     return QUOTED.sub(" QUOTED ", QUOTE_LINE.sub(" ", FENCED.sub(" QUOTED ", text)))
@@ -461,13 +615,27 @@ def closing(clean: str) -> str:
     return "\n\n".join(paragraphs_of(clean)[-CLOSING_PARAGRAPHS:])
 
 
-def first_match(patterns: tuple[re.Pattern[str], ...], clean: str) -> str | None:
-    """The first non-negated match of any pattern, whitespace collapsed."""
+def first_match(patterns: tuple[re.Pattern[str], ...], clean: str, *context: re.Pattern[str]) -> str | None:
+    """The first match of any pattern that neither NEGATED nor a context pattern disarms; whitespace collapsed."""
     for pattern in patterns:
         for match in pattern.finditer(clean):
-            if NEGATED.search(clean[max(0, match.start() - 48) : match.start()]):
+            before = clean[max(0, match.start() - 48) : match.start()]
+            if NEGATED.search(before) or any(c.search(before) for c in context):
                 continue
             return " ".join(match.group(0).split())
+    return None
+
+
+def user_label(clean: str) -> str | None:
+    """A closing 'Your steps:' / 'On your end:' label with something after it - a list of steps for the user."""
+    tail = closing(clean)
+    for match in USER_LABEL.finditer(tail):
+        rest = match.group(1).strip()
+        if not rest:
+            following = [ln.strip() for ln in tail[match.end() :].splitlines() if ln.strip()]
+            rest = following[0] if following else ""
+        if rest and not NOTHING.match(rest):
+            return " ".join(match.group(0).split())[:120]
     return None
 
 
@@ -497,12 +665,23 @@ def closing_question(clean: str) -> str | None:
     return " ".join(sentence.split())[-120:]
 
 
-def hand_back(text: str) -> HandBack | None:
-    """The hand-back a final message carries - parked defect, go-ahead request, leftover list or closing question."""
+def hand_back(text: str, assigned: str = "all") -> HandBack | None:
+    """The hand-back a final message carries - parked defect, assigned step, go-ahead, leftover list or question.
+
+    `assigned` scopes the assigned-step check: "all" judges the whole message (a turn that did work), "closing"
+    only its closing paragraphs (no transcript to say whether the turn worked), "off" skips it (a turn that only
+    answered - "you'll need to run install.ps1" is how-to prose there, not a step the session skipped).
+    """
     clean = strip_quoted(text)
     phrase = first_match(PUNT_PATTERNS, clean)
     if phrase is not None:
         return HandBack("parked", phrase)
+    scope = {"all": clean, "closing": closing(clean)}.get(assigned)
+    phrase = first_match(ASSIGNED_PATTERNS, scope, EXPLAINING) if scope is not None else None
+    if phrase is None and scope is not None:
+        phrase = user_label(clean)
+    if phrase is not None:
+        return HandBack("assigned", phrase)
     phrase = first_match(GO_AHEAD_PATTERNS, closing(clean))
     if phrase is not None:
         return HandBack("go-ahead", phrase)
@@ -525,14 +704,43 @@ def declares_blocked(text: str) -> bool:
     return "BLOCKED" in closing_states(text)
 
 
+def blocked_paragraph(text: str) -> str:
+    """The BLOCKED: line and the rest of its paragraph - what the declaration says it is blocked on."""
+    for match in CLOSING_LINE.finditer(text):
+        if match.group(1) == "BLOCKED":
+            rest = text[match.start() :]
+            return PARAGRAPH_BREAK.split(rest, maxsplit=1)[0].strip()
+    return ""
+
+
+def blocked_backed(text: str, refused: bool) -> bool:
+    """Whether a BLOCKED: stop has what it claims: a refused call in the turn, or a user-held item in its paragraph.
+
+    `refused` is the turn's - from the transcript here, from the scan in friction.py. Without a transcript the
+    paragraph alone decides, so a message judged on its own can still pass by naming what only the user holds.
+    """
+    if refused:
+        return True
+    paragraph = strip_quoted(blocked_paragraph(text))  # `gh pr merge --delete-branch` backs nothing
+    if USER_HELD.search(paragraph):
+        return True
+    return any(not MENU_QUESTION.search(q.group(0)) for q in FACT_QUESTION.finditer(paragraph))
+
+
 def bounce_text(found: HandBack, subagent: bool, turn: Turn) -> str:
     if subagent:
         return f"{SUBAGENT_HEADER}\n{SUBAGENT_BODY.format(phrase=found.phrase)}"
     if found.kind == "parked":
         return f"{PARKED_HEADER}\n{PARKED_BODY.format(phrase=found.phrase)}"
-    body = {"remaining": REMAINING_BODY, "unclosed": UNCLOSED_BODY}.get(found.kind, GO_AHEAD_BODY)
-    lines = [OPEN_HEADER, body.format(phrase=found.phrase)]
-    if turn.lost_mary and found.kind != "unclosed":
+    if found.kind == "assigned":
+        body = ASSIGNED_REFUSED_BODY if turn.refused else ASSIGNED_BODY
+        lines = [ASSIGNED_HEADER, body.format(phrase=found.phrase)]
+    elif found.kind == "blocked":
+        lines = [BLOCKED_HEADER, BLOCKED_BODY.format(phrase=found.phrase)]
+    else:
+        body = {"remaining": REMAINING_BODY, "unclosed": UNCLOSED_BODY}.get(found.kind, GO_AHEAD_BODY)
+        lines = [OPEN_HEADER, body.format(phrase=found.phrase)]
+    if turn.lost_mary and found.kind not in ("unclosed", "assigned", "blocked"):
         lines.append(LOST_MARY_CLOSE)
     if turn.done_means:
         lines.append(f"Done means, as you framed it: {turn.done_means}")
@@ -552,8 +760,6 @@ def main() -> int:
         notice("no final message in payload or transcript - allowing")
         return 0
     states = closing_states(message)
-    if "BLOCKED" in states:
-        return 0
     turn = Turn()
     if transcript is not None:
         prompt_id = payload.get("prompt_id")
@@ -565,9 +771,15 @@ def main() -> int:
         except OSError as exc:
             notice(f"cannot read {transcript} ({exc})")
     subagent = isinstance(payload.get("agent_id"), str)
-    found = hand_back(message)
-    if found is None and turn.lost_mary and turn.worked and not subagent and not states:
-        found = HandBack("unclosed", "no DONE:, IN FLIGHT: or BLOCKED: line")
+    if "BLOCKED" in states:
+        if subagent or blocked_backed(message, turn.refused):
+            return 0  # a subagent's BLOCKED: is a report to the lead, who judges it; its own form is MISSING:
+        found: HandBack | None = HandBack("blocked", " ".join(blocked_paragraph(message).split())[:160])
+    else:
+        scope = ("all" if turn.worked else "off") if turn.found else "closing"
+        found = hand_back(message, scope)
+        if found is None and turn.lost_mary and turn.worked and not subagent and not states:
+            found = HandBack("unclosed", "no DONE:, IN FLIGHT: or BLOCKED: line")
     if found is None:
         return 0
     if payload.get("stop_hook_active") is True and not turn.found:

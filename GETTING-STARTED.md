@@ -70,7 +70,11 @@ More live checks, one minute each, for the hooks the suite can only simulate:
   rest?" You should see it bounce - the phrase quoted, the rule restated, the
   task carried back - and continue instead of re-asking. It cannot wedge: two
   bounces with no work between them, or six in one turn, and the stop goes
-  through; a `BLOCKED: <what only you can supply>` line always does.
+  through; a `BLOCKED: <what only you can supply>` line does when the turn
+  holds a refused tool call or the line names something only you hold (a
+  login, consent or elevated prompt, a credential, money, an irreversible
+  action, a value asked as a what/where/who question). "The merge is yours"
+  or "only you can run this" in the body is bounced with "try it first".
 
 - **check-evidence --lead.** Ask Claude, in a turn where it ran nothing, to tell
   you "all tests pass". The stop should bounce once with "Evidence check failed
