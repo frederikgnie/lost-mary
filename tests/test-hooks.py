@@ -2479,8 +2479,10 @@ def kg_result(uid: str, body: str, error: bool) -> dict[str, object]:
 
 
 def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
+    """A Bash call as Claude Code records it: the record carries the session's cwd, as the hook payload does."""
     call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": command}}
-    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
+    message = {"id": uuid.uuid4().hex, "content": [call]}
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "cwd": str(NP), "message": message}
 
 
 def merge_event(
@@ -2549,7 +2551,12 @@ t_done = kg_transcript(
 rc, err = guard_merge("gh pr merge 30 --squash", t_done)
 expect("merge guard: the review was spent on a silent merge that went through -> exit 2", rc, BLOCK, err)
 NOT_SPENT = [
-    ("held by this hook", f"git push && {MERGE}", "guard-shared-checkouts: run it in its own call", True),
+    (
+        "held by this hook",
+        f"git push && {MERGE}",
+        'PreToolUse:Bash hook error: ["python" "guard-shared-checkouts.py"]: guard-shared-checkouts: run it alone',
+        True,
+    ),
     ("refused by the classifier", MERGE, REFUSAL, True),
     ("rejected by GitHub behind a pipe", f"{MERGE} 2>&1 | tail -3", "X Pull request #29 is not mergeable", False),
     ("rejected by the API behind a pipe", f"{MERGE} 2>&1 | tail -1", "GraphQL: Base branch was modified", False),
@@ -2606,6 +2613,93 @@ expect("merge guard: ... unreviewed -> exit 2 as unreviewed, not as chained", rc
 expect_true("... told to spawn review", "spawn `review`" in err, err)
 rc, err = guard_merge('printf \'%s\' "{\\"command\\":\\"gh pr merge 1\\"}" > ev.json', t_none)
 expect("merge guard: a printf of JSON naming a merge, with escaped quotes -> exit 0", rc, ALLOW, err)
+
+# The review counts for the PR it precedes (third review, 2026-09-25): a retry of the same PR never spends it,
+# a merge of another PR that may have run always does - whatever that merge printed.
+HOOK_HELD = 'PreToolUse:Bash hook error: ["python" "guard-shared-checkouts.py"]: guard-shared-checkouts: run it alone'
+IDENTITY = [
+    (
+        "the same PR after its merge ran with a failed cleanup",
+        [(f"{MERGE} --delete-branch", "failed to run git: fatal: 'main' is already checked out at 'C:/x'", True)],
+        MERGE,
+        ALLOW,
+    ),
+    (
+        "another PR after a merge whose output names a failure",
+        [(f"{MERGE}; git log --oneline -1", "a1b2c3d guard: a not mergeable result keeps the review (#31)", False)],
+        "gh pr merge 30 --squash",
+        BLOCK,
+    ),
+    (
+        "the same number in another directory",
+        [("cd /c/repo/x && gh pr merge 29 --squash", "", False)],
+        "cd /c/repo/y && gh pr merge 29 --squash",
+        BLOCK,
+    ),
+    (
+        "the same number in the same directory",
+        [("cd /c/repo/x && gh pr merge 29 --squash", "", False)],
+        "cd /c/repo/x && gh pr merge 29 --squash",
+        ALLOW,
+    ),
+    (
+        "the same PR as a URL, then as -R and a number",
+        [("gh pr merge https://github.com/o/r/pull/29 --squash", "", False)],
+        "gh pr merge 29 -R o/r --squash",
+        ALLOW,
+    ),
+    (
+        "one PR of a two-merge call this hook held",
+        [("gh pr merge 29 --squash && gh pr merge 30 --squash", HOOK_HELD, True)],
+        MERGE,
+        ALLOW,
+    ),
+    ("another PR while an earlier merge has no result yet", [("gh pr merge 30 --squash", None, False)], MERGE, BLOCK),
+]
+for label, earlier, now, want in IDENTITY:
+    records: list[dict[str, object]] = [kg_prompt("ship it"), kg_review()]
+    for i, (first, body, error) in enumerate(earlier):
+        records.append(kg_bash(first, f"t-e{i}"))
+        if body is not None:
+            records.append(kg_result(f"t-e{i}", body, error))
+    rc, err = guard_merge(now, kg_transcript("merge-identity.jsonl", records))
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+
+# The tokenizer (third review): a command substitution is a command of its own, a lone `&` ends a command, an
+# unquoted `#` starts a comment, and `--help` / `--disable-auto` merge nothing.
+for label, shell_line, transcript, want in (
+    (
+        "a PR created and merged in one call (`url=$(gh pr create)`)",
+        'url=$(gh pr create --fill); gh pr merge "$url"',
+        t_rev,
+        BLOCK,
+    ),
+    ("`OUT=$( gh pr merge 29 )`, unreviewed", "OUT=$( gh pr merge 29 --squash 2>&1 )", t_none, BLOCK),
+    ("two merges joined by a lone `&`", "gh pr merge 27 --squash & gh pr merge 28 --squash", t_rev, BLOCK),
+    ("a merge beside a background push", "gh pr merge 29 --squash & git push", t_rev, BLOCK),
+    ("a PUT to the merge endpoint with a variable PR", "gh api -X PUT repos/o/r/pulls/$PR/merge", t_rev, BLOCK),
+    ("a merge followed by a comment naming another", "gh pr merge 29 --squash\n# next: gh pr merge 30", t_rev, ALLOW),
+    ("`gh pr merge --help`, unreviewed", "gh pr merge --help", t_none, ALLOW),
+    ("`gh pr merge 29 --disable-auto`, unreviewed", "gh pr merge 29 --disable-auto", t_none, ALLOW),
+):
+    rc, err = guard_merge(shell_line, transcript)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+expect_true(
+    "guard-shared-checkouts' DID_NOT_RUN holds no-punt's REFUSAL_MARKERS",
+    set(np_mod.REFUSAL_MARKERS) <= set(guard.DID_NOT_RUN),
+    f"{np_mod.REFUSAL_MARKERS} vs {guard.DID_NOT_RUN}",
+)
+
+# PowerShell has no backslash escapes: a quoted path ending in `\` still names the checkout.
+PS_CONFIG = NP / "ps-shared.json"
+PS_CONFIG.write_text(json.dumps({"shared": ["C:\\Users\\A B\\repo"], "frozen": []}), encoding="utf-8")
+PS_ENV = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(PS_CONFIG)}
+rc, err = run_hook(
+    GUARD,
+    guard_event("PowerShell", command='Set-Location "C:\\Users\\A B\\repo\\"; git switch main'),
+    env=PS_ENV,
+)
+expect("PowerShell: Set-Location to a quoted path ending in \\ with a space, then switch -> exit 2", rc, BLOCK, err)
 
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
@@ -4460,13 +4554,13 @@ expect_true("... counts the three merge calls", out.startswith("3 merge calls in
 expect_true(
     "... the unreviewed merge was refused, the reviewed one went through, the chained one would be held",
     bool(re.search(r"refused\s+unreviewed\s+1", out))
-    and bool(re.search(r"ok\s+allow\s+1", out))
-    and bool(re.search(r"ok\s+chained\s+1", out)),
+    and bool(re.search(r"ran\s+allow\s+1", out))
+    and bool(re.search(r"ran\s+chained\s+1", out)),
     out,
 )
 expect_true(
-    "... and --detail lists the chained merge that went through",
-    "went through but held" in out and "git push && gh pr merge 8" in out.split("went through but held", 1)[-1],
+    "... and --detail lists the chained merge that ran",
+    "ran but held" in out and "git push && gh pr merge 8" in out.split("ran but held", 1)[-1],
     out,
 )
 

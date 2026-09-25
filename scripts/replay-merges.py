@@ -3,9 +3,11 @@
 
 Reads Claude Code transcripts (read-only), finds every Bash / PowerShell call the guard counts as a merge, and
 runs the guard's check_merge against the transcript cut at that call - the view the hook would have had then.
-Each call gets its real outcome (refused by the auto-mode classifier, blocked by a hook, failed, ok) and the
+Each call gets its real outcome (refused by the auto-mode classifier, blocked by a hook or a prompt, ran,
+no-result) - read with the guard's own did_not_run(), since a pipe hides the exit code and gh exits 1 when only
+a merge's cleanup fails - and the
 guard's verdict (allow, chained, api, unreviewed; `checkout` when the merge check allows it but the configured
-shared-checkout rules would block it). A good guard holds every refusal and few of the merges that went through.
+shared-checkout rules would block it). A good guard holds every refusal and few of the merges that ran.
 
 Not installed: a development tool for this repository, like usage.py. It reads nothing but transcripts, the
 guard script beside it and the guard's shared-checkouts config.
@@ -14,7 +16,7 @@ guard script beside it and the guard's shared-checkouts config.
 
 `--projects` defaults to $LOST_MARY_PROJECTS_DIR, else ~/.claude/projects. `--since` also prints the table for
 the calls from that time on (default: when the user's autoMode.allow merge rule went live); `--detail` lists,
-from then on, the merges that went through but would be held, and the refusals the guard would allow.
+from then on, the merges that ran but would be held, and the refusals the guard would allow.
 """
 
 from __future__ import annotations
@@ -56,15 +58,13 @@ def load_guard() -> ModuleType:
     return module
 
 
-def outcome_of(result: tuple[bool, str] | None) -> str:
+def outcome_of(guard: ModuleType, result: dict[str, Any] | None) -> str:
+    """refused (auto mode), blocked (a hook or a prompt), ran (anything else), or no-result (cut off)."""
     if result is None:
-        return "failed"  # no result recorded: the session was cut off, or the call never ran
-    error, body = result
-    if REFUSED in body[:120]:
-        return "refused"
-    if "hook error" in body[:200] or "guard-shared-checkouts:" in body[:300]:
-        return "hook-blocked"
-    return "failed" if error else "ok"
+        return "no-result"
+    if guard.did_not_run(result):
+        return "refused" if REFUSED in body_of(result)[:120] else "blocked"
+    return "ran"
 
 
 def body_of(block: dict[str, Any]) -> str:
@@ -81,8 +81,8 @@ def replay(guard: ModuleType, path: Path, scratch: Path, config: Any, slowest: l
     except OSError as exc:
         print(f"replay-merges: skipped {path} ({exc})", file=sys.stderr)
         return []
-    calls: dict[str, tuple[int, str, str, str]] = {}  # tool_use id -> line, command, time, cwd
-    results: dict[str, tuple[bool, str]] = {}
+    calls: dict[str, tuple[int, str, str, str, bool]] = {}  # tool_use id -> line, command, time, cwd, powershell
+    results: dict[str, dict[str, Any]] = {}
     for i, line in enumerate(lines):
         if "merg" not in line.lower() and '"tool_result"' not in line:
             continue
@@ -100,24 +100,25 @@ def replay(guard: ModuleType, path: Path, scratch: Path, config: Any, slowest: l
             if block.get("type") == "tool_use" and block.get("name") in guard.SHELL_TOOLS:
                 tool_input = block.get("input")
                 command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
-                if any(guard.is_merge(t) for t in guard.segments(command)):
+                powershell = block.get("name") == "PowerShell"
+                if any(guard.is_merge(t) for t in guard.segments(command, powershell)):
                     when = str(record.get("timestamp", ""))[:16]
-                    calls[str(block.get("id"))] = (i, command, when, str(record.get("cwd") or ""))
+                    calls[str(block.get("id"))] = (i, command, when, str(record.get("cwd") or ""), powershell)
             elif block.get("type") == "tool_result" and str(block.get("tool_use_id")) in calls:
-                results[str(block.get("tool_use_id"))] = (block.get("is_error") is True, body_of(block))
+                results[str(block.get("tool_use_id"))] = block
     names = {guard.MERGE_CHAINED: "chained", guard.MERGE_API: "api", guard.MERGE_UNREVIEWED: "unreviewed"}
     rows = []
-    for uid, (i, command, when, cwd) in calls.items():
+    for uid, (i, command, when, cwd, powershell) in calls.items():
         cut = scratch / "cut.jsonl"
         cut.write_text("".join(lines[: i + 1]), encoding="utf-8")
         started = time.perf_counter()
-        held = guard.check_merge(command, str(cut), uid)
+        held = guard.check_merge(command, str(cut), uid, cwd, powershell)
         slowest[0] = max(slowest[0], time.perf_counter() - started)
         verdict = names.get(held, "other") if held else "allow"
-        if verdict == "allow" and config is not None and guard.check_command(command, cwd, config):
+        if verdict == "allow" and config is not None and guard.check_command(command, cwd, config, powershell):
             verdict = "checkout"
         flat = " ".join(command.split())
-        rows.append(Row(path.parent.name, path.stem[:8], when, outcome_of(results.get(uid)), verdict, flat))
+        rows.append(Row(path.parent.name, path.stem[:8], when, outcome_of(guard, results.get(uid)), verdict, flat))
     return rows
 
 
@@ -148,9 +149,9 @@ def main() -> int:
     print(f"\nsince {args.since}:")
     print("\n".join(table(recent)))
     if args.detail:
-        print(f"\nsince {args.since}: went through but held, or refused but allowed:")
+        print(f"\nsince {args.since}: ran but held, or refused but allowed:")
         for r in sorted(recent, key=lambda r: r.when):
-            if (r.outcome == "ok" and r.verdict != "allow") or (r.outcome == "refused" and r.verdict == "allow"):
+            if (r.outcome == "ran" and r.verdict != "allow") or (r.outcome == "refused" and r.verdict == "allow"):
                 print(f"  {r.when} {r.project[:22]:22} {r.session} {r.outcome:8} {r.verdict:10} {r.command[:100]}")
     return 0
 

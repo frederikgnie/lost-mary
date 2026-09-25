@@ -50,15 +50,15 @@ With or without a config, a merge is held back when:
     loop, xargs, ForEach-Object), or shares the call with anything off a
     short list (CHAIN_OK*: a cd, output trimming such as tail or grep,
     `gh pr view|checks|comment`, and git fetch|log|status|diff|show|pull|
-    switch|checkout|branch - the last four without a force, discard or
-    delete flag);
-  * no `review` agent was spawned in the session since the last merge that
-    may have gone through (or the session start). Only a merge whose result
-    shows it did not run - held here, refused by the classifier, declined at
-    a prompt, or turned down by GitHub (`X Pull request ... is not
-    mergeable`, `GraphQL: ...`) - leaves the review standing; an error exit
-    alone does not, since gh exits 1 when only the cleanup after a merge
-    fails;
+    switch|checkout|branch - the last four without a force or discard flag
+    such as -f, -D, --, .);
+  * no `review` agent was spawned in the session since the last merge of
+    another PR that may have run (or the session start). A review counts for
+    the PR it precedes: a retry of the same PR - same number or URL, same
+    repository or directory - never spends it, and another PR's merge spends
+    it unless its result shows it never ran (refused, declined, held by a
+    hook). An error exit alone is no such sign: gh exits 1 when only the
+    cleanup after a merge fails;
   * it goes through the REST endpoint (`gh api -X PUT .../pulls/<n>/merge`):
     the user's allow rule names `gh pr merge` only. The same path without
     PUT only asks whether the PR is merged and passes.
@@ -71,12 +71,15 @@ permissions page), and permission rules are step 1 of auto mode's decision
 order, the classifier step 3. The session spawns `review`, then merges in its
 own call - the shape the user's autoMode.allow rule lets through.
 
-Not covered: the allow rule covers only a PR the session opened, so a merge
-of any other PR can still be refused once; the session then stops on a
+Not covered: the allow rule covers only a PR the session opened, merged
+into main or master after the project's checks ran - the guard checks none of
+that, so such a merge can still be refused once; the session then stops on a
 BLOCKED: backed by that refusal, and a user message naming the merge lets it
-through. A review of a different PR counts as a review - a transcript cannot
-tell which change a review covered. `bash -c` / eval hide a merge. An
-unreadable transcript lets the merge through, with a notice.
+through. A review of a different PR counts as a review, and so does a review
+spawn that failed - a transcript cannot tell which change a review covered.
+`bash -c`, eval and backticks hide a merge; a merge run by a subagent is
+judged against whatever transcript its hook is given. An unreadable
+transcript lets the merge through, with a notice.
 
 `python scripts/replay-merges.py` replays every merge call in the local
 transcripts through this check, each against its transcript cut at the call;
@@ -93,7 +96,7 @@ Runtime dependencies (see capabilities.md): PreToolUse stdin fields
 `tool_input.notebook_path`, `cwd`; for the merge check `transcript_path`,
 `tool_use_id`, and the transcript's assistant `tool_use` blocks (`name`, `id`,
 `input.command`, `input.subagent_type`) and user `tool_result` blocks
-(`tool_use_id`, `is_error`, `content`).
+(`tool_use_id`, `is_error`, `content`), and the assistant record's `cwd`.
 """
 
 from __future__ import annotations
@@ -121,7 +124,7 @@ REVIEW_ROLE = "review"
 MERGE_CHAINED = (
     "guard-shared-checkouts: run `gh pr merge` in its own call - one merge, not inside a loop or another "
     "command, with nothing beside it but a `cd`, output trimming (`2>&1 | tail -3`), `gh pr view|checks|comment`, "
-    "or git fetch|log|status|diff|show|pull|switch|checkout|branch without a force, discard or delete flag. "
+    "or git fetch|log|status|diff|show|pull|switch|checkout|branch without a force or discard flag. "
     "Auto mode judges a chained command as a whole (it refused `push && pr create && pr merge` that way on "
     "2026-09-23), and after a refusal it refuses the follow-ups too."
 )
@@ -130,7 +133,8 @@ MERGE_API = (
     "rule names `gh pr merge` only, so auto mode would refuse this and then refuse the follow-ups too."
 )
 MERGE_UNREVIEWED = (
-    "guard-shared-checkouts: no `review` agent has run since the last merge in this session. Auto mode refuses "
+    "guard-shared-checkouts: no `review` agent has run in this session since the last merge of another PR. "
+    "Auto mode refuses "
     "this merge as [Merge Without Review], and after that refusal it refuses the follow-ups as well - even "
     "`git diff` for the reviewer. So first: spawn `review` with the PR's `git diff`, fix what it finds, run the "
     "project's checks. Then run the same `gh pr merge` again, in its own call."
@@ -155,6 +159,12 @@ CHAIN_OK = {
     "test-path",
     "tail",
     "head",
+    "tee",
+    "tee-object",
+    "cut",
+    "awk",
+    "tr",
+    "uniq",
     "cat",
     "echo",
     "printf",
@@ -187,15 +197,15 @@ CHAIN_OK_GH = {
     ("repo", "view"),
     ("auth", "switch"),
     ("auth", "status"),
+    ("auth", "token"),
     ("run", "list"),
     ("run", "view"),
 }
 CHAIN_OK_GIT = {"fetch", "log", "status", "diff", "show", "rev-parse", "remote", "pull", "checkout", "switch", "branch"}
 GIT_MOVES = ("pull", "checkout", "switch", "branch")  # allowed beside a merge only without GIT_RISKY
-GIT_RISKY = {"-f", "--force", "-D", "-B", "-C", "--discard-changes", "--hard", "--", "."}  # force, discard, delete
-# A merge call that did not run: refused by auto mode, held by a hook, declined at a prompt (no-punt's
-# REFUSAL_MARKERS plus the hook forms), or turned down by GitHub - gh's failure line for the merge and the
-# GraphQL errors of its merge mutation. Case-insensitive except gh's plain-output failure icon `X`.
+GIT_RISKY = {"-f", "--force", "-D", "-B", "-C", "--discard-changes", "--hard", "--", "."}  # force, discard
+# A call that never ran: refused by auto mode or declined at a prompt (no-punt's REFUSAL_MARKERS - a test keeps
+# them in step), or held by a hook. The marker opens an error result; see did_not_run().
 DID_NOT_RUN = (
     "denied by the Claude Code auto mode classifier",
     "requested permissions",
@@ -203,13 +213,20 @@ DID_NOT_RUN = (
     "user doesn't want to proceed",
     "user doesn't want to take this action",
     "hook error",
-    "guard-shared-checkouts:",
 )
-MERGE_FAILED = re.compile(
-    r"(?m)^\s*(?-i:X) Pull request\b|\bnot mergeable\b|GraphQL:|could not resolve to a PullRequest"
-    r"|\bno pull requests? found\b|merge commit cannot be cleanly created",
-    re.IGNORECASE,
+MERGE_ENDPOINT = re.compile(r"repos/([^/\s]+/[^/\s]+)/pulls/([^/\s]+)/merge/?$")
+MERGE_VALUE_FLAGS = (
+    "-b",
+    "--body",
+    "-F",
+    "--body-file",
+    "-t",
+    "--subject",
+    "-A",
+    "--author-email",
+    "--match-head-commit",
 )
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class Dir(NamedTuple):
@@ -371,6 +388,9 @@ def split_commands(command: str) -> list[str]:
         elif text.startswith(("&&", "||"), i):
             flush()
             i += 2
+        elif ch == "&" and text[i - 1 : i] not in (">", "<") and text[i + 1 : i + 2] != ">":
+            flush()  # a lone `&` ends a command too (bash background, PowerShell's call operator); not `2>&1`
+            i += 1
         elif ch in ";|\n":
             flush()
             i += 1
@@ -396,14 +416,8 @@ def strip_wrappers(tokens: list[str]) -> list[str]:
                 out.pop(0)
         elif first in PREFIX_WORDS:
             out.pop(0)
-        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
-            out.pop(0)
-            depth = first.count("(") - first.count(")")  # `GH_TOKEN=$(gh auth token -u x) gh pr merge 19`
-            while depth > 0 and out:
-                token = out.pop(0)
-                depth += token.count("(") - token.count(")")
         else:
-            break
+            break  # a leading `VAR=value` is segments()' to split off, with its command substitution
     while out and out[-1] in (")", "}", "))"):
         out.pop()
     if opened and out and out[-1].endswith(")"):
@@ -413,20 +427,57 @@ def strip_wrappers(tokens: list[str]) -> list[str]:
     return out
 
 
-def segments(command: str) -> list[list[str]]:
-    """Split a shell command into simple-command token lists, wrappers stripped."""
+def unwrap_assignments(tokens: list[str]) -> list[list[str]]:
+    """Leading `VAR=value` words split off; the command substitution of a value is a command of its own.
+
+    `url=$(gh pr create --fill)` yields `gh pr create --fill`; `GH_TOKEN=$(gh auth token) gh pr merge 19` yields
+    `gh auth token`, then `gh pr merge 19`. A plain value is dropped. The substitution runs to the word that
+    balances its parentheses; a `(` without `$(` opens nothing (`FACE=":(" gh pr merge 19`).
+    """
+    parts: list[list[str]] = []
+    rest = list(tokens)
+    while rest and ASSIGNMENT.match(rest[0]):
+        value = rest.pop(0).split("=", 1)[1]
+        if "$(" not in value:
+            continue
+        depth = value.count("(") - value.count(")")
+        inner = [value.split("$(", 1)[1]]
+        while depth > 0 and rest:
+            token = rest.pop(0)
+            depth += token.count("(") - token.count(")")
+            inner.append(token)
+        if inner[-1].endswith(")"):
+            inner[-1] = inner[-1][:-1]  # the parenthesis that closes the substitution
+        parts.append([t for t in inner if t])
+    parts.append(rest)
+    return parts
+
+
+def segments(command: str, powershell: bool = False) -> list[list[str]]:
+    r"""Split a shell command into simple-command token lists, wrappers stripped.
+
+    Backslashes are Windows path separators here, not escapes - posix shlex would eat them - except one before a
+    quote in bash, which escapes it (`printf "{\"command\": ...}"`). PowerShell escapes with a backtick, so there
+    every backslash is a separator (`Set-Location "C:\Users\A B\repo\"`). An unquoted `#` starts a comment.
+    """
     out: list[list[str]] = []
     for chunk in split_commands(command):
-        # Backslashes are Windows path separators here, not escapes; posix shlex would eat them. One before a
-        # quote is an escape (`printf "{\"command\": ...}"`) and stays, so the quoting holds.
-        chunk = re.sub(r"\\(?![\"'])", "/", chunk)
+        chunk = chunk.replace("\\", "/") if powershell else re.sub(r"\\(?![\"'])", "/", chunk)
         try:
-            tokens = shlex.split(chunk, posix=True)
+            tokens = shlex.split(chunk, comments=True, posix=True)
         except ValueError:
             tokens = chunk.split()
-        tokens = strip_wrappers(tokens)
-        if tokens:
-            out.append(tokens)
+            for i, token in enumerate(tokens):
+                if token.startswith("#"):
+                    tokens = tokens[:i]
+                    break
+        pending = [tokens]
+        while pending:  # wrappers and leading assignments peel off in any order: `then X=$(gh pr merge 29)`
+            part = strip_wrappers(pending.pop(0))
+            if part and ASSIGNMENT.match(part[0]):
+                pending[:0] = unwrap_assignments(part)  # each pass consumes one assignment at least
+            elif part:
+                out.append(part)
     return out
 
 
@@ -458,8 +509,10 @@ def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None
     name = PureWindowsPath(tokens[0]).name.lower()
     if name in ("gh", "gh.exe"):
         label = " ".join(["gh", *tokens[1:]])
-        deletes = any(re.match(r"^-[a-zA-Z]*d[a-zA-Z]*$|^--delete-branch$", a) for a in tokens[3:])
-        if tokens[1:3] == ["pr", "merge"] and deletes:
+        args = tokens[3:]
+        deletes = any(re.match(r"^-[a-zA-Z]*d[a-zA-Z]*$|^--delete-branch(?:=true)?$", a) for a in args)
+        remote = any(a in ("-R", "--repo") or a.startswith("--repo=") for a in args)  # gh keeps local branches
+        if tokens[1:3] == ["pr", "merge"] and deletes and not remote:
             hint = (
                 " Or merge without `-d` / `--delete-branch`: it deletes the local branch, switching this checkout"
                 " off it first."
@@ -519,10 +572,10 @@ def frozen_reason(what: str, where: Dir, config: Config) -> str:
     return f"guard-shared-checkouts: blocked {what} - {where.shown} is a frozen tree the live jobs run;{via}."
 
 
-def check_command(command: str, cwd: str, config: Config) -> str | None:
+def check_command(command: str, cwd: str, config: Config, powershell: bool = False) -> str | None:
     """A block reason for a Bash/PowerShell command, or None to allow it."""
     current = norm(cwd) if cwd else None
-    for tokens in segments(command):
+    for tokens in segments(command, powershell):
         head = tokens[0].lower()
         if head in CD_COMMANDS:
             current = cd_target(tokens[1:], current)
@@ -564,7 +617,7 @@ def gh_args(tokens: list[str]) -> list[str] | None:
 
 def api_put_merge(args: list[str]) -> bool:
     """`gh api` with method PUT on a pull request's merge endpoint. Without PUT the same path only asks."""
-    if args[:1] != ["api"] or not any(re.search(r"/pulls/\d+/merge/?$", a) for a in args[1:]):
+    if args[:1] != ["api"] or not any(MERGE_ENDPOINT.search(a) for a in args[1:]):
         return False
     method = "GET"
     for i, arg in enumerate(args):
@@ -578,12 +631,15 @@ def api_put_merge(args: list[str]) -> bool:
 
 
 def merge_kind(tokens: list[str]) -> str | None:
-    """ "cli" for `gh pr merge ...`, "api" for a PUT to the REST merge endpoint, else None."""
+    """ "cli" for `gh pr merge ...`, "api" for a PUT to the REST merge endpoint, else None.
+
+    `--help` and `--disable-auto` merge nothing.
+    """
     args = gh_args(tokens)
     if args is None:
         return None
     if args[:2] == ["pr", "merge"]:
-        return "cli"
+        return None if any(a in ("-h", "--help", "--disable-auto") for a in args[2:]) else "cli"
     return "api" if api_put_merge(args) else None
 
 
@@ -604,34 +660,83 @@ def is_review_role(role: object) -> bool:
     return isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE
 
 
-def went_through(block: dict[str, Any]) -> bool:
-    """Whether a merge call may have merged: its result shows no sign that the merge did not run.
+def did_not_run(block: dict[str, Any]) -> bool:
+    """Whether a call's result shows it never ran: refused by auto mode, declined at a prompt, or held by a hook.
 
-    Unsure counts as merged, which spends the review: one spent by mistake costs a review round, one kept by
-    mistake lets the next merge meet a refusal and the latch. So an error result alone is not a failed merge -
-    gh exits 1 when only the cleanup after a merge fails (c--repo-EU 2026-09-25: "failed to delete local
-    branch ...: used by worktree", then "MERGED 0cc157ce"). gh prints nothing on a successful merge when stdout
-    is not a terminal.
+    The marker must open an error result, as no-punt's refused_body() requires (182 of 182 real refusals): a
+    merge that ran and printed one of these words further on still ran.
     """
+    if block.get("is_error") is not True:
+        return False
     raw = block.get("content")
     if isinstance(raw, list):
         raw = "\n".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
     body = str(raw or "")
-    if any(marker in body[:400] for marker in DID_NOT_RUN):
-        return False
-    return not MERGE_FAILED.search(body)
+    return any(0 <= body.find(marker) < 120 for marker in DID_NOT_RUN)
 
 
-def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
-    """Whether a `review` spawn follows the last earlier merge that went through; None if unreadable.
+def pr_key(tokens: list[str], where: str) -> tuple[str, str]:
+    """Which pull request a merge names: (repository, number or branch).
 
-    A merge held here, refused by the classifier or rejected by GitHub never ran (went_through), so the review
-    before it still stands. `gh pr create` does not spend a review: the usual flow reviews the branch, then opens
-    the PR. `current` is this call's tool_use_id, skipped in case the transcript already holds it (it has no
-    result yet either way).
+    A URL or `-R owner/repo` names the repository; a bare number or branch is scoped to the directory the merge
+    runs in (`where`); no argument means the PR of the current branch there. Two spellings of one PR in
+    different forms (`29` in its checkout and `-R o/r 29`) read as two PRs - the strict side.
     """
-    reviewed = False
-    pending: set[str] = set()  # tool_use ids of earlier merge calls, awaiting their results
+    args = gh_args(tokens) or []
+    repo = ref = ""
+    if merge_kind(tokens) == "api":
+        for arg in args[1:]:
+            if found := MERGE_ENDPOINT.search(arg):
+                repo, ref = found.group(1), found.group(2)
+    else:
+        rest = args[2:]
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg in ("-R", "--repo") and i + 1 < len(rest):
+                repo = rest[i + 1]
+                i += 1
+            elif arg.startswith("--repo="):
+                repo = arg.split("=", 1)[1]
+            elif arg in MERGE_VALUE_FLAGS:
+                i += 1  # the flag's value is not the PR
+            elif not arg.startswith("-") and not ref:
+                ref = arg
+            i += 1
+        if found := re.search(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)", ref):
+            repo, ref = found.group(1), found.group(2)
+    return (repo.lower() or f"@{where}", ref.lstrip("#") or "@head")
+
+
+def merges_in(command: str, cwd: str, powershell: bool = False) -> list[tuple[list[str], str]]:
+    """Each merge in a command, with the directory it runs in - cd / Set-Location / pushd tracked from `cwd`."""
+    current = norm(cwd) if cwd else None
+    found: list[tuple[list[str], str]] = []
+    for tokens in segments(command, powershell):
+        head = tokens[0].lower()
+        if head in CD_COMMANDS:
+            current = cd_target(tokens[1:], current)
+        elif head in POP_COMMANDS:
+            current = None
+        elif is_merge(tokens):
+            found.append((tokens, str(current).lower() if current else "?"))
+    return found
+
+
+def reviewed_for(transcript: Path, current: str, keys: set[tuple[str, str]]) -> bool | None:
+    """Whether a `review` was spawned in the session after the last merge of another PR that may have run.
+
+    The review counts for the PR it precedes. A retry of the same PR (`keys` are this merge's) never spends it -
+    held here, refused, turned down by GitHub or merged with a failed cleanup alike. A merge of another PR spends
+    it unless its result shows it never ran (did_not_run); an error result alone is not that, since gh exits 1
+    when only the cleanup after a merge fails (c--repo-EU 2026-09-25: "failed to delete local branch ...", then
+    "MERGED 0cc157ce" - and the next PR's merge was refused). A merge with no result yet counts as run. `gh pr
+    create` does not spend a review: the usual flow reviews the branch, then opens the PR. `current` is this
+    call's tool_use_id; the transcript may already hold the call. None if the transcript cannot be read.
+    """
+    events: list[tuple[str, set[tuple[str, str]] | None]] = []  # (tool_use id, its merges' keys; None = review)
+    never_ran: set[str] = set()
+    merge_ids: set[str] = set()
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -640,7 +745,7 @@ def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
                 if not (
                     "subagent_type" in line
                     or "merg" in line.lower()
-                    or (pending and '"tool_result"' in line and any(uid in line for uid in pending))
+                    or (merge_ids and '"tool_result"' in line and any(uid in line for uid in merge_ids))
                 ):
                     continue
                 try:
@@ -655,35 +760,38 @@ def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_result":
-                        uid = str(block.get("tool_use_id"))
-                        if uid in pending:
-                            pending.discard(uid)
-                            if went_through(block):
-                                reviewed = False  # the next merge needs a review of its own
+                        if str(block.get("tool_use_id")) in merge_ids and did_not_run(block):
+                            never_ran.add(str(block.get("tool_use_id")))
                         continue
                     if block.get("type") != "tool_use" or (current and block.get("id") == current):
                         continue
                     tool_input = block.get("input")
                     if not isinstance(tool_input, dict):
                         continue
+                    uid = str(block.get("id"))
                     if block.get("name") in ("Agent", "Task") and is_review_role(tool_input.get("subagent_type")):
-                        reviewed = True
-                    elif block.get("name") in SHELL_TOOLS and any(
-                        is_merge(t) for t in segments(str(tool_input.get("command") or ""))
-                    ):
-                        pending.add(str(block.get("id")))
+                        events.append((uid, None))
+                    elif block.get("name") in SHELL_TOOLS:
+                        command = str(tool_input.get("command") or "")
+                        found = merges_in(command, str(record.get("cwd") or ""), block.get("name") == "PowerShell")
+                        if found:
+                            events.append((uid, {pr_key(tokens, where) for tokens, where in found}))
+                            merge_ids.add(uid)
     except OSError as exc:
         notice(f"cannot read the transcript {transcript} ({exc}) - the merge goes unchecked")
         return None
+    reviewed = False
+    for uid, merged in events:
+        if merged is None:
+            reviewed = True
+        elif uid not in never_ran and merged - keys:
+            reviewed = False  # another PR's merge may have run: this one needs a review of its own
     return reviewed
 
 
 def harmless(tokens: list[str]) -> bool:
     """Whether a command may share a call with a merge: CHAIN_OK, CHAIN_OK_GH, or CHAIN_OK_GIT without GIT_RISKY."""
-    first = tokens[0]
-    if first.startswith("#"):
-        return True  # a comment
-    exe = first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if exe in CHAIN_OK:
         return True
     if exe == "gh":
@@ -698,20 +806,26 @@ def harmless(tokens: list[str]) -> bool:
     return args[0] not in GIT_MOVES or not any(a in GIT_RISKY or a.startswith("--force") for a in args[1:])
 
 
-def check_merge(command: str, transcript: str, current: str = "") -> str | None:
+def check_merge(
+    command: str, transcript: str, current: str = "", cwd: str = "", powershell: bool = False
+) -> str | None:
     """The block message for a merge auto mode would refuse - chained, through the API, or unreviewed - else None."""
-    parts = segments(command)
+    parts = segments(command, powershell)
     merges = [t for t in parts if is_merge(t)]
     if not merges:
         return None
     if any(merge_kind(t) == "api" for t in merges):
         return MERGE_API
-    if len(merges) > 1 or merge_kind(merges[0]) is None or not all(t in merges or harmless(t) for t in parts):
+    only = merges[0]
+    if len(merges) > 1 or merge_kind(only) is None or buried_merge(only):
+        return MERGE_CHAINED
+    if not all(t is only or harmless(t) for t in parts):
         return MERGE_CHAINED
     if not transcript:
         notice("no transcript_path in the payload - the merge goes unchecked")
         return None
-    if reviewed_since_merge(Path(transcript), current) is False:
+    keys = {pr_key(tokens, where) for tokens, where in merges_in(command, cwd, powershell)}
+    if reviewed_for(Path(transcript), current, keys) is False:
         return MERGE_UNREVIEWED
     return None
 
@@ -741,6 +855,8 @@ def main() -> int:
                 str(tool_input.get("command") or ""),
                 str(event.get("transcript_path") or ""),
                 str(event.get("tool_use_id") or ""),
+                str(event.get("cwd") or ""),
+                tool == "PowerShell",
             )
         except Exception as exc:  # the merge check is a convenience: never let it cost the call
             notice(f"merge check skipped ({exc!r})")
@@ -754,7 +870,7 @@ def main() -> int:
     cwd = str(event.get("cwd") or "")
     reason: str | None = None
     if tool in SHELL_TOOLS:
-        reason = check_command(str(tool_input.get("command") or ""), cwd, config)
+        reason = check_command(str(tool_input.get("command") or ""), cwd, config, tool == "PowerShell")
     elif tool in EDIT_TOOLS:
         reason = check_edit(str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""), cwd, config)
     if reason:

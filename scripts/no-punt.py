@@ -178,7 +178,8 @@ EXPLAINING = re.compile(
 
 # --- what backs a BLOCKED: line ---------------------------------------------------------------
 # A refused tool call, as its result reaches the transcript. The marker sits at the start of the body:
-# a Read of a file that merely mentions one is not a refusal. Kept equal to friction.py's tuple.
+# a Read of a file that merely mentions one is not a refusal. Kept equal to friction.py's tuple, and inside
+# guard-shared-checkouts' DID_NOT_RUN (a test checks both).
 REFUSAL_MARKERS = (
     "denied by the Claude Code auto mode classifier",
     "requested permissions",

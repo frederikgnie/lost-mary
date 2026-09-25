@@ -211,7 +211,7 @@ replays every `gh pr merge` in the local transcripts through
 `guard-shared-checkouts`' merge check, each against its transcript cut at the
 call, beside what really happened (refused, ok, ...). Like `usage.py` it is
 not installed and reads nothing but transcripts. Re-run it after changing the
-merge check: every `refused` row should be held, few `ok` rows should be.
+merge check: every `refused` row should be held, few `ran` rows should be.
 
 **Where the tokens go.** `python scripts/usage.py --since 2026-09-15` sums the
 per-message `usage` every transcript under `~/.claude/projects` carries, by
