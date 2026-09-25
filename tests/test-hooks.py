@@ -25,6 +25,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2444,7 +2445,7 @@ rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), pro
 expect("an unreviewed-merge refusal does not back the BLOCKED: -> block", rc, BLOCK, err)
 expect_true(
     "... and the bounce spells out the remedy",
-    "[Merge Without Review]" in err and "Spawn `review`" in err and "lone Bash call" in err,
+    "[Merge Without Review]" in err and "Spawn `review`" in err and "its own Bash call" in err,
     err,
 )
 t = kg_transcript(
@@ -2470,24 +2471,11 @@ expect_true(
 )
 
 
-# guard-shared-checkouts: a chained or unreviewed `gh pr merge` never reaches the auto-mode classifier, whose
-# refusal would latch the session (c--repo-EU 2026-09-25: `git diff` for the reviewer refused after it).
+# guard-shared-checkouts: a merge auto mode would refuse never reaches the classifier, whose refusal would latch
+# the session (c--repo-EU 2026-09-25: `git diff` for the reviewer refused after an unreviewed merge).
 def kg_result(uid: str, body: str, error: bool) -> dict[str, object]:
     block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
     return {"type": "user", "uuid": uuid.uuid4().hex, "message": {"role": "user", "content": [block]}}
-
-
-def merge_event(command: str, transcript: Path | None, tool: str = "Bash", uid: str = "t-now") -> dict[str, object]:
-    event: dict[str, object] = {
-        "hook_event_name": "PreToolUse",
-        "tool_name": tool,
-        "tool_input": {"command": command},
-        "cwd": str(NP),
-        "tool_use_id": uid,
-    }
-    if transcript is not None:
-        event["transcript_path"] = str(transcript)
-    return event
 
 
 def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
@@ -2495,85 +2483,172 @@ def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
     return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
 
 
+def merge_event(
+    command: str, transcript: Path | None, tool: str = "Bash", uid: str = "t-now", cwd: str | None = None
+) -> dict[str, object]:
+    event: dict[str, object] = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": {"command": command},
+        "cwd": cwd or str(NP),
+        "tool_use_id": uid,
+    }
+    if transcript is not None:
+        event["transcript_path"] = str(transcript)
+    return event
+
+
 NO_CONFIG = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(NP / "no-such-config.json")}
-MERGE = "gh pr merge 29 --squash --delete-branch"
+
+
+def guard_merge(command: str, transcript: Path | None, **kw: str) -> tuple[int, str]:
+    return run_hook(GUARD, merge_event(command, transcript, **kw), env=NO_CONFIG)
+
+
+MERGE = "gh pr merge 29 --squash"
 created = kg_bash("git push -u origin x && gh pr create --fill", "t-create")
-t_none = kg_transcript("merge-unreviewed.jsonl", [kg_prompt("ship it, then merge"), created])
-t_rev = kg_transcript("merge-reviewed.jsonl", [kg_prompt("ship it, then merge"), created, kg_review()])
-t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it, then merge"), kg_review(), kg_bash(MERGE, "t-now")])
-rc, err = run_hook(GUARD, merge_event(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev), env=NO_CONFIG)
-expect("merge guard: a merge chained with a push and a create -> exit 2, even with no config file", rc, BLOCK, err)
+t_none = kg_transcript("merge-unreviewed.jsonl", [kg_prompt("ship it"), created])
+t_rev = kg_transcript("merge-reviewed.jsonl", [kg_prompt("ship it"), created, kg_review()])
+
+# The review gate - with no config file at all.
+rc, err = guard_merge(MERGE, t_none)
+expect("merge guard: no review spawned in the session -> exit 2, even with no config file", rc, BLOCK, err)
+expect_true("... told to spawn review first", "spawn `review`" in err and "its own call" in err, err)
+rc, err = guard_merge(MERGE, t_rev)
+expect("merge guard: reviewed, merge in its own call -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(MERGE, t_rev, tool="PowerShell")
+expect("merge guard: the same from PowerShell -> exit 0", rc, ALLOW, err)
+t_before = kg_transcript(
+    "merge-review-before-create.jsonl",
+    [kg_prompt("ship it"), kg_review(), created, kg_result("t-create", "https://github.com/o/r/pull/9", False)],
+)
+rc, err = guard_merge(MERGE, t_before)
+expect("merge guard: review, then `gh pr create`, then the merge -> exit 0", rc, ALLOW, err)
+t_ns = kg_transcript("merge-ns-review.jsonl", [kg_prompt("ship it"), kg_review(role="lost-mary:review")])
+rc, err = guard_merge(MERGE, t_ns)
+expect("merge guard: a plugin-namespaced review counts -> exit 0", rc, ALLOW, err)
+t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
+rc, err = guard_merge(MERGE, t_self)
+expect("merge guard: the transcript already holds this very call -> exit 0", rc, ALLOW, err)
+event = merge_event(MERGE, t_self)
+event.pop("tool_use_id")
+rc, err = run_hook(GUARD, event, env=NO_CONFIG)
+expect("merge guard: no tool_use_id and the call already in the transcript -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(MERGE, NP / "missing.jsonl")
+expect("merge guard: unreadable transcript -> exit 0 (fail open) ...", rc, ALLOW, err)
+expect_true("... with a notice", "cannot read the transcript" in err, err)
+rc, err = guard_merge(MERGE, None)
+expect("merge guard: no transcript_path -> exit 0 ...", rc, ALLOW, err)
+expect_true("... with a notice", "no transcript_path" in err, err)
+
+# Only a merge that went through spends the review. gh prints nothing on success when stdout is not a terminal.
+t_done = kg_transcript(
+    "merge-went-through.jsonl",
+    [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-m29"), kg_result("t-m29", "", False)],
+)
+rc, err = guard_merge("gh pr merge 30 --squash", t_done)
+expect("merge guard: the review was spent on a silent merge that went through -> exit 2", rc, BLOCK, err)
+NOT_SPENT = [
+    ("held by this hook", f"git push && {MERGE}", "guard-shared-checkouts: run it in its own call", True),
+    ("refused by the classifier", MERGE, REFUSAL, True),
+    ("rejected by GitHub behind a pipe", f"{MERGE} 2>&1 | tail -3", "X Pull request #29 is not mergeable", False),
+    ("rejected by the API behind a pipe", f"{MERGE} 2>&1 | tail -1", "GraphQL: Base branch was modified", False),
+]
+for label, first, body, error in NOT_SPENT:
+    t = kg_transcript(
+        "merge-not-spent.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(first, "t-first"), kg_result("t-first", body, error)],
+    )
+    rc, err = guard_merge(MERGE, t)
+    expect(f"merge guard: review, a merge {label}, then the retry -> exit 0", rc, ALLOW, err)
+
+SPENT = [
+    # c--repo-EU 2026-09-25 12:37, then PR #29 refused at 13:37: only the cleanup after the merge failed.
+    (
+        "whose cleanup failed behind a pipe",
+        f"{MERGE} --delete-branch 2>&1 | tail -2",
+        "failed to delete local branch x: failed to run git: error: cannot delete branch 'x' used by worktree\n\n"
+        "MERGED 0cc157ce18ca5b29a0af004fb8624a4c2faf77b9",
+        False,
+    ),
+    (
+        "whose cleanup failed with exit 1",
+        f"{MERGE} --delete-branch",
+        "Exit code 1\nfailed to run git: fatal: 'main' is already checked out at 'C:/repo/x'",
+        True,
+    ),
+]
+for label, first, body, error in SPENT:
+    t = kg_transcript(
+        "merge-spent.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(first, "t-first"), kg_result("t-first", body, error)],
+    )
+    rc, err = guard_merge("gh pr merge 30 --squash", t)
+    expect(f"merge guard: review, a merge {label}, then the next merge -> exit 2 (the review is spent)", rc, BLOCK, err)
+t = kg_transcript(
+    "merge-declined.jsonl",
+    [
+        kg_prompt("ship it"),
+        kg_review(),
+        kg_bash(MERGE, "t-first"),
+        kg_result("t-first", "The user doesn't want to proceed with this tool use.", True),
+    ],
+)
+rc, err = guard_merge(MERGE, t)
+expect("merge guard: review, a merge declined at the prompt, then the retry -> exit 0", rc, ALLOW, err)
+
+# The tokenizer: a command substitution in an assignment prefix is one word, and \" stays an escaped quote.
+TOKEN_MERGE = "GH_TOKEN=$(gh auth token -u fgn-odigo) gh pr merge 19 -R o/r --squash"
+rc, err = guard_merge(TOKEN_MERGE, t_rev)
+expect("merge guard: `GH_TOKEN=$(gh auth token ...) gh pr merge`, reviewed -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(TOKEN_MERGE, t_none)
+expect("merge guard: ... unreviewed -> exit 2 as unreviewed, not as chained", rc, BLOCK, err)
+expect_true("... told to spawn review", "spawn `review`" in err, err)
+rc, err = guard_merge('printf \'%s\' "{\\"command\\":\\"gh pr merge 1\\"}" > ev.json', t_none)
+expect("merge guard: a printf of JSON naming a merge, with escaped quotes -> exit 0", rc, ALLOW, err)
+
+# Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
+rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
+expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)
 expect_true("... told to run it in its own call", "its own call" in err, err)
 HARMLESS_CHAINS = [
     f"{MERGE} 2>&1 | tail -3; gh pr view 29 --json state",
     f"cd /c/repo/EU/OBF_x && {MERGE}",
     f"gh auth switch --user frederikgnie && {MERGE} && git checkout -q main && git pull -q",
     f"Set-Location C:/repo/x; {MERGE} | Select-Object -Last 3",
-    f"{MERGE}; git -C /c/repo/x fetch -q origin; git log --oneline -1",
+    f"{MERGE}; git -C /c/repo/x fetch -q origin; git --no-pager log --oneline -1",
+    f"gh pr comment 29 --body reviewed && {MERGE}",
+    f"# merge the reviewed PR\n{MERGE}",
+    f"if [ -n x ]; then {MERGE}; fi",
+    f"git diff --stat origin/main; {MERGE}; git branch -d feat/x",
 ]
 for i, chain in enumerate(HARMLESS_CHAINS):
-    rc, err = run_hook(GUARD, merge_event(chain, t_rev), env=NO_CONFIG)
+    rc, err = guard_merge(chain, t_rev)
     expect(f"merge guard: a reviewed merge in a harmless chain #{i + 1} -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(f"for i in 1 2; do {MERGE}; done", t_rev), env=NO_CONFIG)
-expect("merge guard: a merge in a loop -> exit 2", rc, BLOCK, err)
-rc, err = run_hook(GUARD, merge_event(f"git commit -qm x && {MERGE}", t_rev), env=NO_CONFIG)
-expect("merge guard: a merge after a commit in the same call -> exit 2", rc, BLOCK, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_none), env=NO_CONFIG)
-expect("merge guard: no review spawned since the PR -> exit 2", rc, BLOCK, err)
-expect_true("... told to spawn review first", "spawn `review`" in err and "alone" in err, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_rev), env=NO_CONFIG)
-expect("merge guard: a review spawned, merge alone -> exit 0", rc, ALLOW, err)
-# The usual flow reviews the branch, then opens the PR: `gh pr create` does not spend the review.
-t_before = kg_transcript(
-    "merge-review-before-create.jsonl",
-    [
-        kg_prompt("ship it, then merge"),
-        kg_review(),
-        created,
-        kg_result("t-create", "https://github.com/o/r/pull/9", False),
-    ],
-)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_before), env=NO_CONFIG)
-expect("merge guard: review, then `gh pr create`, then the merge -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(f"gh pr comment 29 --body reviewed && {MERGE}", t_rev), env=NO_CONFIG)
-expect("merge guard: `gh pr comment` beside a reviewed merge -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_rev, tool="PowerShell"), env=NO_CONFIG)
-expect("merge guard: the same from PowerShell -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_self), env=NO_CONFIG)
-expect("merge guard: the transcript already holds this very call -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, NP / "missing.jsonl"), env=NO_CONFIG)
-expect("merge guard: unreadable transcript -> exit 0 (fail open)", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, None), env=NO_CONFIG)
-expect("merge guard: no transcript_path -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("gh pr view 29 --json state | head -3", t_none), env=NO_CONFIG)
-expect("merge guard: other gh pr commands, chained -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("C:/tools/gh.exe pr merge 29", t_none), env=NO_CONFIG)
-expect("merge guard: gh named by path -> exit 2", rc, BLOCK, err)
+HELD_CHAINS = [
+    "gh pr merge 27 --squash && gh pr merge 28 --squash",  # review 2026-09-25: two merges on one review
+    f"for i in 1 2; do {MERGE}; done",
+    f"git commit -qm x && {MERGE}",
+    f"git checkout -- . && {MERGE}",
+    f"{MERGE} && git branch -D feat/x",
+    f"{MERGE} && git pull --force",
+    "29,30 | ForEach-Object { gh pr merge $_ --squash }",
+    "xargs -n1 gh pr merge --squash < prs.txt",
+]
+for i, chain in enumerate(HELD_CHAINS):
+    rc, err = guard_merge(chain, t_rev)
+    expect(f"merge guard: a reviewed merge in a chain auto mode may refuse #{i + 1} -> exit 2", rc, BLOCK, err)
 
+# The REST endpoint: a PUT merges and is always held (the allow rule names `gh pr merge`); a GET only asks.
+for api_call in ("gh api -X PUT repos/o/r/pulls/29/merge", "gh api --method=PUT repos/o/r/pulls/29/merge"):
+    rc, err = guard_merge(api_call, t_rev)
+    expect(f"merge guard: `{api_call}`, reviewed -> exit 2", rc, BLOCK, err)
+    expect_true("... told to use gh pr merge", "`gh pr merge <number>`" in err, err)
+for api_call in ("gh api repos/o/r/pulls/29/merge", "gh api repos/o/r/pulls/29/files"):
+    rc, err = guard_merge(api_call, t_none)
+    expect(f"merge guard: `{api_call}` (a read), unreviewed -> exit 0", rc, ALLOW, err)
 
-# Review 2026-09-25 (HIGH): only a merge that went through spends the review. One this hook held back, the
-# classifier refused or GitHub rejected never ran - the obedient lone retry must pass.
-held = kg_bash(f"git push && {MERGE}", "t-held")
-t_held = kg_transcript(
-    "merge-held-then-lone.jsonl",
-    [kg_prompt("merge it"), kg_review(), held, kg_result("t-held", "guard-shared-checkouts: run it alone", True)],
-)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_held), env=NO_CONFIG)
-expect("merge guard: review -> chained merge held -> lone retry -> exit 0", rc, ALLOW, err)
-t_done = kg_transcript(
-    "merge-went-through.jsonl",
-    [kg_prompt("ship it, then merge"), kg_review(), kg_bash(MERGE, "t-m29"), kg_result("t-m29", "Merged", False)],
-)
-rc, err = run_hook(GUARD, merge_event("gh pr merge 30 --squash", t_done), env=NO_CONFIG)
-expect("merge guard: the review was spent on a merge that went through -> exit 2", rc, BLOCK, err)
-t_bare = kg_transcript("merge-no-id.jsonl", [kg_prompt("ship it, then merge"), kg_review(), kg_bash(MERGE, "t-now")])
-event = merge_event(MERGE, t_bare)
-event.pop("tool_use_id")
-rc, err = run_hook(GUARD, event, env=NO_CONFIG)
-expect("merge guard: no tool_use_id and the call already in the transcript -> exit 0", rc, ALLOW, err)
-t_ns = kg_transcript("merge-ns-review.jsonl", [kg_prompt("ship it, then merge"), kg_review(role="lost-mary:review")])
-rc, err = run_hook(GUARD, merge_event(MERGE, t_ns), env=NO_CONFIG)
-expect("merge guard: a plugin-namespaced review counts -> exit 0", rc, ALLOW, err)
+# A merge only mentioned is not a merge; gh named by path, or behind PowerShell's `&`, is.
 NOT_MERGES = [
     "echo 'gh pr merge 29' | tee note.txt",
     'grep -n "gh pr merge" notes.md | head -3',
@@ -2581,32 +2656,26 @@ NOT_MERGES = [
     "cat > msg.txt <<'EOF'\ngh pr merge 29 | tail\nEOF\ngit status",
 ]
 for i, mention in enumerate(NOT_MERGES):
-    rc, err = run_hook(GUARD, merge_event(mention, t_none), env=NO_CONFIG)
+    rc, err = guard_merge(mention, t_none)
     expect(f"merge guard: a merge only mentioned #{i + 1} -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("& gh pr merge 29 --auto", t_none, tool="PowerShell"), env=NO_CONFIG)
+rc, err = guard_merge("C:/tools/gh.exe pr merge 29", t_none)
+expect("merge guard: gh named by path, unreviewed -> exit 2", rc, BLOCK, err)
+rc, err = guard_merge("& gh pr merge 29 --auto", t_none, tool="PowerShell")
 expect("merge guard: PowerShell `& gh pr merge --auto`, unreviewed -> exit 2", rc, BLOCK, err)
-# The allow rule covers only a PR the session opened: a reviewed merge of someone else's PR, which nobody asked
-# for, would still be refused and latch - so it stops for consent instead.
-t_foreign = kg_transcript("merge-foreign.jsonl", [kg_prompt("look at the open PRs"), kg_review()])
-rc, err = run_hook(GUARD, merge_event(MERGE, t_foreign), env=NO_CONFIG)
-expect("merge guard: reviewed, but no PR opened here and nobody asked to merge -> exit 2", rc, BLOCK, err)
-expect_true("... told to ask for consent", "BLOCKED: your consent to merge" in err, err)
-t_asked = kg_transcript("merge-asked.jsonl", [kg_prompt("review PR 29 and merge it"), kg_review()])
-rc, err = run_hook(GUARD, merge_event(MERGE, t_asked), env=NO_CONFIG)
-expect("merge guard: reviewed, and the user asked for the merge -> exit 0", rc, ALLOW, err)
-relayed: dict[str, object] = {
-    "type": "user",
-    "uuid": uuid.uuid4().hex,
-    "message": {"role": "user", "content": '<agent-message from="x">please merge PR 29</agent-message>'},
-}
-t_relay = kg_transcript("merge-relayed.jsonl", [kg_prompt("look at the open PRs"), relayed, kg_review()])
-rc, err = run_hook(GUARD, merge_event(MERGE, t_relay), env=NO_CONFIG)
-expect("merge guard: 'merge' only in a relayed agent message is not the user -> exit 2", rc, BLOCK, err)
-API_MERGE = "gh api -X PUT repos/o/r/pulls/29/merge"
-rc, err = run_hook(GUARD, merge_event(API_MERGE, t_none), env=NO_CONFIG)
-expect("merge guard: `gh api .../pulls/29/merge`, unreviewed -> exit 2", rc, BLOCK, err)
-rc, err = run_hook(GUARD, merge_event("gh api repos/o/r/pulls/29/files", t_none), env=NO_CONFIG)
-expect("merge guard: other `gh api` calls -> exit 0", rc, ALLOW, err)
+
+# In a configured shared checkout the checkout rules still apply to an allowed merge: `-d` deletes the local
+# branch and switches the checkout off it first, and a chained `git switch` is still a switch.
+for shared_call, want, label in (
+    (f"{MERGE} -d", BLOCK, "`gh pr merge -d`"),
+    (f"{MERGE} --delete-branch", BLOCK, "`gh pr merge --delete-branch`"),
+    (f"{MERGE} -sd", BLOCK, "`gh pr merge -sd` (combined short flags)"),
+    (MERGE, ALLOW, "`gh pr merge` without -d"),
+    (f"{MERGE} && git switch main", BLOCK, "a merge chained with `git switch`"),
+):
+    rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
+    expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
+rc, err = run_hook(GUARD, merge_event(f"{MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
+expect_true("... the -d block says to merge without it", "without `-d`" in err, err)
 
 # Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
 HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."
@@ -4347,6 +4416,59 @@ if linked is not None:
     )
 else:
     print("  skip linked sibling: neither symlink nor junction can be created here")
+
+print("replay-merges.py - historical merges replayed through the guard's merge check")
+REPLAY = ROOT / "scripts" / "replay-merges.py"
+RP = SCRATCH / "replay" / "projects" / "c--repo-r"
+RP.mkdir(parents=True)
+
+
+def rp_call(uid: str, when: str, name: str, tool_input: dict[str, object]) -> dict[str, object]:
+    call = {"type": "tool_use", "id": uid, "name": name, "input": tool_input}
+    return {"type": "assistant", "timestamp": when, "cwd": "C:/repo/r", "message": {"content": [call]}}
+
+
+def rp_result(uid: str, when: str, body: str, error: bool) -> dict[str, object]:
+    block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
+    return {"type": "user", "timestamp": when, "message": {"role": "user", "content": [block]}}
+
+
+(RP / "s1.jsonl").write_text(
+    jsonl(
+        [
+            {"type": "user", "timestamp": "2026-09-25T10:00:00Z", "message": {"role": "user", "content": "ship it"}},
+            rp_call("m1", "2026-09-25T10:01:00Z", "Bash", {"command": "gh pr merge 7 --squash"}),
+            rp_result("m1", "2026-09-25T10:01:05Z", REFUSAL, True),
+            rp_call("r1", "2026-09-25T10:02:00Z", "Agent", {"subagent_type": "review", "prompt": "the diff"}),
+            rp_call("m2", "2026-09-25T10:10:00Z", "Bash", {"command": "gh pr merge 7 --squash"}),
+            rp_result("m2", "2026-09-25T10:10:05Z", "", False),
+            rp_call("m3", "2026-09-25T10:20:00Z", "Bash", {"command": "git push && gh pr merge 8 --squash"}),
+            rp_result("m3", "2026-09-25T10:20:05Z", "", False),
+        ]
+    ),
+    encoding="utf-8",
+)
+replay_env = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(RP / "no-such-config.json")}
+proc = subprocess.run(
+    [sys.executable, str(REPLAY), "--projects", str(RP.parent), "--since", "2026-09-25T10:15", "--detail"],
+    capture_output=True,
+    env=replay_env,
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect("replay-merges.py exits 0", proc.returncode, ALLOW, out + proc.stderr.decode("utf-8", "replace"))
+expect_true("... counts the three merge calls", out.startswith("3 merge calls in 1 transcripts"), out)
+expect_true(
+    "... the unreviewed merge was refused, the reviewed one went through, the chained one would be held",
+    bool(re.search(r"refused\s+unreviewed\s+1", out))
+    and bool(re.search(r"ok\s+allow\s+1", out))
+    and bool(re.search(r"ok\s+chained\s+1", out)),
+    out,
+)
+expect_true(
+    "... and --detail lists the chained merge that went through",
+    "went through but held" in out and "git push && gh pr merge 8" in out.split("went through but held", 1)[-1],
+    out,
+)
 
 nuke(SCRATCH)
 

@@ -188,7 +188,7 @@ REFUSAL_MARKERS = (
 )
 # A refusal that names its own remedy backs nothing until the remedy was tried. Auto mode's
 # `[Merge Without Review]` is a soft_deny: the user's autoMode.allow rule lifts it for a merge this session
-# prepared - `review` spawned on the diff, the checks run, the merge retried as a lone call (verified live
+# prepared - `review` spawned on the diff, the checks run, the merge retried in its own call (verified live
 # 2026-09-24). A session that merged straight after `gh pr create` and stopped on the refusal (c--repo-EU,
 # 2026-09-25, PR #18) handed the user a step it could still take.
 MERGE_UNREVIEWED = "[Merge Without Review]"
@@ -348,7 +348,7 @@ BLOCKED_BODY = (
 MERGE_REMEDY = (
     "The refusal was `[Merge Without Review]` and no `review` agent has run in this session: that refusal names "
     "its own remedy. Spawn `review` with the `git diff`, fix what it finds, run the project's checks, then retry "
-    "`gh pr merge` as a lone Bash call - never chained with a push, a create or anything else. Only a refusal of "
+    "`gh pr merge` in its own Bash call - never chained with a push, a create or a loop. Only a refusal of "
     "that retry backs `BLOCKED:`. If the classifier refuses preparing the review too, it has latched for this "
     "session: give the reviewer the worktree path and the changed files to read instead of the diff."
 )

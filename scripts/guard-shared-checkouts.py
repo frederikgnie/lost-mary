@@ -21,8 +21,10 @@ shared-checkouts.example.json in the library repository):
   shared  - checkouts several sessions use at once. Blocked there: `switch`,
             a branch-changing `checkout` (file restores are fine), `stash`
             other than list/show, `reset --hard|--merge|--keep`, `rebase`,
-            `pull --rebase|--autostash`, `clean` with a force flag, and
-            `gh pr checkout`. Work on a branch in your own worktree.
+            `pull --rebase|--autostash`, `clean` with a force flag,
+            `gh pr checkout`, and `gh pr merge -d|--delete-branch` (it
+            deletes the local branch, switching the checkout off it first).
+            Work on a branch in your own worktree.
   frozen  - trees only a deploy script may change. Blocked: every git command
             aimed there and every Edit/Write/MultiEdit/NotebookEdit inside.
             Running the deploy script is fine - only `git` invocations are
@@ -41,32 +43,44 @@ Still passes by design (known gaps, not a sandbox): `git reset <commit>`
 commands of eval / $(...) / bash -c, `--git-dir` / `--work-tree` / `GIT_DIR=`,
 symlinks and junctions, and a worktree nested inside a shared checkout.
 
-Unreviewed merges
------------------
-A `gh pr merge` is held back, with or without a config, when it is chained
-with anything but navigation, output trimming and reads (CHAIN_OK), or when
-no `review` agent was spawned in the session since the last merge that went
-through (or the session start). Auto mode refuses
-such a merge as [Merge Without Review] - and once it has refused, it refuses
-the follow-ups too: on 2026-09-25 two c--repo-EU sessions had `git diff` for
-the reviewer refused for the same reason and stopped on BLOCKED:. Stopped
-here, the merge never reaches the classifier, so nothing latches: the session
-spawns `review`, then merges in its own call - the shape the user's autoMode.allow rule
-lets through. That rule covers only a PR the session opened, so a reviewed
-merge is also held back when the session ran no `gh pr create` and no user
-prompt in it mentions merging: the model asks for consent instead of being
-refused. `gh api .../pulls/<n>/merge` counts as a merge. An unreadable
-transcript lets the merge through (fail open). A PreToolUse exit 2 "stops the
-tool call before permission rules are evaluated" (docs, permissions page), and
-permission rules are step 1 of auto mode's decision order, the classifier
-step 3 - so the classifier never judges a merge held back here.
+Merges the auto-mode classifier would refuse
+--------------------------------------------
+With or without a config, a merge is held back when:
+  * it is not the only merge in the call, sits inside another command (a
+    loop, xargs, ForEach-Object), or shares the call with anything off a
+    short list (CHAIN_OK*: a cd, output trimming such as tail or grep,
+    `gh pr view|checks|comment`, and git fetch|log|status|diff|show|pull|
+    switch|checkout|branch - the last four without a force, discard or
+    delete flag);
+  * no `review` agent was spawned in the session since the last merge that
+    may have gone through (or the session start). Only a merge whose result
+    shows it did not run - held here, refused by the classifier, declined at
+    a prompt, or turned down by GitHub (`X Pull request ... is not
+    mergeable`, `GraphQL: ...`) - leaves the review standing; an error exit
+    alone does not, since gh exits 1 when only the cleanup after a merge
+    fails;
+  * it goes through the REST endpoint (`gh api -X PUT .../pulls/<n>/merge`):
+    the user's allow rule names `gh pr merge` only. The same path without
+    PUT only asks whether the PR is merged and passes.
+Auto mode refuses such a merge as [Merge Without Review] - and once it has
+refused, it refuses the follow-ups too: on 2026-09-25 two c--repo-EU sessions
+had `git diff` for the reviewer refused for the same reason and stopped on
+BLOCKED:. Held here, the merge never reaches the classifier: a PreToolUse
+exit 2 "stops the tool call before permission rules are evaluated" (docs,
+permissions page), and permission rules are step 1 of auto mode's decision
+order, the classifier step 3. The session spawns `review`, then merges in its
+own call - the shape the user's autoMode.allow rule lets through.
 
-Measured 2026-09-25 by replaying all 127 historical merge calls on this
-machine, each against its transcript cut at the call. Since the allow rule
-(2026-09-24 11:40): of 7 merges the classifier refused, 6 are held back here
-(the miss reviewed a different PR); of 30 that went through, 19 pass and 11
-are held - 9 had no review agent at all, 2 were chained with a commit or a
-loop - so the cost is one review round, never a refusal.
+Not covered: the allow rule covers only a PR the session opened, so a merge
+of any other PR can still be refused once; the session then stops on a
+BLOCKED: backed by that refusal, and a user message naming the merge lets it
+through. A review of a different PR counts as a review - a transcript cannot
+tell which change a review covered. `bash -c` / eval hide a merge. An
+unreadable transcript lets the merge through, with a notice.
+
+`python scripts/replay-merges.py` replays every merge call in the local
+transcripts through this check, each against its transcript cut at the call;
+the reading of 2026-09-25 is in capabilities.md.
 
 Wiring: PreToolUse, matcher "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit".
 Exit 2 blocks the call and returns stderr to the model; exit 0 allows. Fails
@@ -76,7 +90,10 @@ not a sandbox.
 
 Runtime dependencies (see capabilities.md): PreToolUse stdin fields
 `tool_name`, `tool_input.command`, `tool_input.file_path` /
-`tool_input.notebook_path`, `cwd`, `transcript_path` (the merge check).
+`tool_input.notebook_path`, `cwd`; for the merge check `transcript_path`,
+`tool_use_id`, and the transcript's assistant `tool_use` blocks (`name`, `id`,
+`input.command`, `input.subagent_type`) and user `tool_result` blocks
+(`tool_use_id`, `is_error`, `content`).
 """
 
 from __future__ import annotations
@@ -102,15 +119,26 @@ VALUE_FLAGS = ("-erroraction", "-warningaction", "-informationaction")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 REVIEW_ROLE = "review"
 MERGE_CHAINED = (
-    "guard-shared-checkouts: run `gh pr merge` in its own call, not chained with a push, a commit, `gh pr create` "
-    "or a loop. Auto mode judges a chained command as a whole and refused `push && pr create && pr merge` that "
-    "way (2026-09-23); after a refusal it refuses the follow-ups too. A `cd` before it, a `| tail` after it and "
-    "read-only checks around it are fine."
+    "guard-shared-checkouts: run `gh pr merge` in its own call - one merge, not inside a loop or another "
+    "command, with nothing beside it but a `cd`, output trimming (`2>&1 | tail -3`), `gh pr view|checks|comment`, "
+    "or git fetch|log|status|diff|show|pull|switch|checkout|branch without a force, discard or delete flag. "
+    "Auto mode judges a chained command as a whole (it refused `push && pr create && pr merge` that way on "
+    "2026-09-23), and after a refusal it refuses the follow-ups too."
 )
-# What may share a command with a merge: moving into the checkout, trimming output, reading state, syncing
+MERGE_API = (
+    "guard-shared-checkouts: merge with `gh pr merge <number>`, not the REST endpoint - the user's auto-mode allow "
+    "rule names `gh pr merge` only, so auto mode would refuse this and then refuse the follow-ups too."
+)
+MERGE_UNREVIEWED = (
+    "guard-shared-checkouts: no `review` agent has run since the last merge in this session. Auto mode refuses "
+    "this merge as [Merge Without Review], and after that refusal it refuses the follow-ups as well - even "
+    "`git diff` for the reviewer. So first: spawn `review` with the PR's `git diff`, fix what it finds, run the "
+    "project's checks. Then run the same `gh pr merge` again, in its own call."
+)
+# What may share a call with a merge: moving into the checkout, trimming output, reading state, syncing
 # afterwards. Anything else - a push, a commit, `gh pr create`, a loop, an unknown program - holds it back.
-# The 2026-09-25 replay of 127 historical merges: harmless chains like these went through dozens of times,
-# and every refusal traced to the missing review, not to the chain.
+# `python scripts/replay-merges.py`: chains like these went through dozens of times, and every refusal but
+# one traced to a missing review, not to the chain (2026-09-25).
 CHAIN_OK = {
     "cd",
     "chdir",
@@ -120,20 +148,32 @@ CHAIN_OK = {
     "sl",
     "push-location",
     "pop-location",
+    "get-location",
+    "pwd",
+    "ls",
+    "dir",
+    "test-path",
     "tail",
     "head",
     "cat",
     "echo",
     "printf",
     "sleep",
+    "start-sleep",
     "wc",
     "grep",
     "sort",
     "jq",
     "true",
+    "set",
+    "[",
+    "test",
+    "fi",
     "write-output",
     "write-host",
     "select-object",
+    "select-string",
+    "where-object",
     "out-null",
     "out-string",
 }
@@ -142,30 +182,34 @@ CHAIN_OK_GH = {
     ("pr", "checks"),
     ("pr", "status"),
     ("pr", "list"),
+    ("pr", "diff"),
     ("pr", "comment"),
+    ("repo", "view"),
     ("auth", "switch"),
     ("auth", "status"),
     ("run", "list"),
     ("run", "view"),
 }
-CHAIN_OK_GIT = {"fetch", "log", "status", "pull", "checkout", "switch", "show", "rev-parse", "branch"}
-MERGE_UNREVIEWED = (
-    "guard-shared-checkouts: no `review` agent has run since the last merge in this session. Auto mode refuses "
-    "this merge as [Merge Without Review], and after that refusal it refuses the follow-ups as well - even "
-    "`git diff` for the reviewer. So first: spawn `review` with the PR's `git diff`, fix what it finds, run the "
-    "project's checks. Then run the same `gh pr merge` again, alone."
+CHAIN_OK_GIT = {"fetch", "log", "status", "diff", "show", "rev-parse", "remote", "pull", "checkout", "switch", "branch"}
+GIT_MOVES = ("pull", "checkout", "switch", "branch")  # allowed beside a merge only without GIT_RISKY
+GIT_RISKY = {"-f", "--force", "-D", "-B", "-C", "--discard-changes", "--hard", "--", "."}  # force, discard, delete
+# A merge call that did not run: refused by auto mode, held by a hook, declined at a prompt (no-punt's
+# REFUSAL_MARKERS plus the hook forms), or turned down by GitHub - gh's failure line for the merge and the
+# GraphQL errors of its merge mutation. Case-insensitive except gh's plain-output failure icon `X`.
+DID_NOT_RUN = (
+    "denied by the Claude Code auto mode classifier",
+    "requested permissions",
+    "haven't granted it yet",
+    "user doesn't want to proceed",
+    "user doesn't want to take this action",
+    "hook error",
+    "guard-shared-checkouts:",
 )
-MERGE_NOT_OURS = (
-    "guard-shared-checkouts: this session opened no pull request, and no message from the user in it mentions "
-    "merging. The user's auto-mode allow rule covers only a PR the session opened itself, so auto mode would "
-    "refuse this merge as [Merge Without Review] and then refuse the follow-ups too. Do not try it: finish the "
-    "review, then stop on one line - `BLOCKED: your consent to merge <repo>#<number> (reviewed: <verdict>)` - "
-    "and the user's reply naming the merge lets it through."
+MERGE_FAILED = re.compile(
+    r"(?m)^\s*(?-i:X) Pull request\b|\bnot mergeable\b|GraphQL:|could not resolve to a PullRequest"
+    r"|\bno pull requests? found\b|merge commit cannot be cleanly created",
+    re.IGNORECASE,
 )
-# A user prompt that asks for a merge. Hook feedback, relayed agent messages and task notifications are not
-# the user; nor is a skill body, whose own text may say "merge".
-MERGE_WORD = re.compile(r"\bmerg(?:e|es|ed|ing)\b", re.IGNORECASE)
-NOT_THE_USER = ("Stop hook feedback", "<agent-message", "<task-notification", "Base directory for this skill")
 
 
 class Dir(NamedTuple):
@@ -350,8 +394,14 @@ def strip_wrappers(tokens: list[str]) -> list[str]:
                 out[0] = rest
             else:
                 out.pop(0)
-        elif first in PREFIX_WORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
+        elif first in PREFIX_WORDS:
             out.pop(0)
+        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
+            out.pop(0)
+            depth = first.count("(") - first.count(")")  # `GH_TOKEN=$(gh auth token -u x) gh pr merge 19`
+            while depth > 0 and out:
+                token = out.pop(0)
+                depth += token.count("(") - token.count(")")
         else:
             break
     while out and out[-1] in (")", "}", "))"):
@@ -367,8 +417,9 @@ def segments(command: str) -> list[list[str]]:
     """Split a shell command into simple-command token lists, wrappers stripped."""
     out: list[list[str]] = []
     for chunk in split_commands(command):
-        # Backslashes are Windows path separators here, not escapes; posix shlex would eat them.
-        chunk = chunk.replace("\\", "/")
+        # Backslashes are Windows path separators here, not escapes; posix shlex would eat them. One before a
+        # quote is an escape (`printf "{\"command\": ...}"`) and stays, so the quoting holds.
+        chunk = re.sub(r"\\(?![\"'])", "/", chunk)
         try:
             tokens = shlex.split(chunk, posix=True)
         except ValueError:
@@ -403,12 +454,20 @@ class Call(NamedTuple):
 
 
 def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None:
-    """What a git or `gh pr checkout` invocation does, or None when `tokens` is neither."""
+    """What a git, `gh pr checkout` or `gh pr merge -d` invocation does, or None when `tokens` is none of them."""
     name = PureWindowsPath(tokens[0]).name.lower()
     if name in ("gh", "gh.exe"):
+        label = " ".join(["gh", *tokens[1:]])
+        deletes = any(re.match(r"^-[a-zA-Z]*d[a-zA-Z]*$|^--delete-branch$", a) for a in tokens[3:])
+        if tokens[1:3] == ["pr", "merge"] and deletes:
+            hint = (
+                " Or merge without `-d` / `--delete-branch`: it deletes the local branch, switching this checkout"
+                " off it first."
+            )
+            return Call(current, label, True, hint)
         if tokens[1:3] != ["pr", "checkout"]:
             return None
-        return Call(current, " ".join(["gh", *tokens[1:]]), True, "")
+        return Call(current, label, True, "")
     if name not in ("git", "git.exe"):
         return None
     target = current
@@ -495,41 +554,49 @@ def check_edit(file_path: str, cwd: str, config: Config) -> str | None:
     return None
 
 
-def is_gh(tokens: list[str], *sub_command: str) -> bool:
-    """`gh <sub_command...> ...`, gh named bare or by path."""
-    if len(tokens) <= len(sub_command):
-        return False
+def gh_args(tokens: list[str]) -> list[str] | None:
+    """The arguments after `gh` when `tokens` run gh (named bare or by path), else None."""
+    if not tokens:
+        return None
     exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return exe in ("gh", "gh.exe") and tuple(tokens[1 : 1 + len(sub_command)]) == sub_command
+    return tokens[1:] if exe in ("gh", "gh.exe") else None
+
+
+def api_put_merge(args: list[str]) -> bool:
+    """`gh api` with method PUT on a pull request's merge endpoint. Without PUT the same path only asks."""
+    if args[:1] != ["api"] or not any(re.search(r"/pulls/\d+/merge/?$", a) for a in args[1:]):
+        return False
+    method = "GET"
+    for i, arg in enumerate(args):
+        if arg in ("-X", "--method") and i + 1 < len(args):
+            method = args[i + 1]
+        elif arg.startswith("--method="):
+            method = arg.split("=", 1)[1]
+        elif arg.startswith("-X") and len(arg) > 2:
+            method = arg[2:]
+    return method.upper() == "PUT"
+
+
+def merge_kind(tokens: list[str]) -> str | None:
+    """ "cli" for `gh pr merge ...`, "api" for a PUT to the REST merge endpoint, else None."""
+    args = gh_args(tokens)
+    if args is None:
+        return None
+    if args[:2] == ["pr", "merge"]:
+        return "cli"
+    return "api" if api_put_merge(args) else None
+
+
+def buried_merge(tokens: list[str]) -> bool:
+    """A `gh pr merge` inside another command: `xargs gh pr merge`, `ForEach-Object { gh pr merge $_ }`."""
+    return any(
+        gh_args([tokens[i].lstrip("({")]) is not None and tokens[i + 1 : i + 3] == ["pr", "merge"]
+        for i in range(1, len(tokens) - 2)
+    )
 
 
 def is_merge(tokens: list[str]) -> bool:
-    """`gh pr merge ...`, or the REST merge endpoint through `gh api .../pulls/<n>/merge`."""
-    if is_gh(tokens, "pr", "merge"):
-        return True
-    return is_gh(tokens, "api") and any(re.search(r"/pulls/\d+/merge/?$", t) for t in tokens[2:])
-
-
-class Session(NamedTuple):
-    reviewed: bool  # a `review` spawn since the last merge that went through
-    opened: bool  # the session ran `gh pr create`
-    asked: bool  # a real user prompt in the session mentions merging
-
-
-def user_text(record: dict[str, Any]) -> str:
-    """The text of a real user prompt; empty for tool results, meta records and relayed messages."""
-    if record.get("type") != "user" or record.get("isMeta"):
-        return ""
-    message = record.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        parts = [b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-        text = "\n".join(p for p in parts if isinstance(p, str))
-    else:
-        return ""
-    return "" if any(marker in text[:400] for marker in NOT_THE_USER) else text
+    return merge_kind(tokens) is not None or buried_merge(tokens)
 
 
 def is_review_role(role: object) -> bool:
@@ -537,41 +604,50 @@ def is_review_role(role: object) -> bool:
     return isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE
 
 
-def scan_session(transcript: Path, current: str) -> Session | None:
-    """What the session did before this call; None if the transcript cannot be read.
+def went_through(block: dict[str, Any]) -> bool:
+    """Whether a merge call may have merged: its result shows no sign that the merge did not run.
 
-    A merge resets `reviewed` when its result is not an error; one this hook held back, the classifier refused
-    or GitHub rejected never ran, so the review before it still stands. `gh pr create` does not reset it: the
-    usual flow reviews the branch, then opens the PR (the 2026-09-25 replay: nine such merges, all accepted).
-    Known miss: a review of a different PR counts too (c--repo-EU PR #9, 2026-09-25) - the transcript cannot
-    tell which change a review covered. `current` is this call's tool_use_id, skipped in case the transcript
-    already holds it (it has no result yet either way).
+    Unsure counts as merged, which spends the review: one spent by mistake costs a review round, one kept by
+    mistake lets the next merge meet a refusal and the latch. So an error result alone is not a failed merge -
+    gh exits 1 when only the cleanup after a merge fails (c--repo-EU 2026-09-25: "failed to delete local
+    branch ...: used by worktree", then "MERGED 0cc157ce"). gh prints nothing on a successful merge when stdout
+    is not a terminal.
     """
-    reviewed = opened = asked = False
-    resets: set[str] = set()  # tool_use ids of earlier merge calls, awaiting their results
+    raw = block.get("content")
+    if isinstance(raw, list):
+        raw = "\n".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
+    body = str(raw or "")
+    if any(marker in body[:400] for marker in DID_NOT_RUN):
+        return False
+    return not MERGE_FAILED.search(body)
+
+
+def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
+    """Whether a `review` spawn follows the last earlier merge that went through; None if unreadable.
+
+    A merge held here, refused by the classifier or rejected by GitHub never ran (went_through), so the review
+    before it still stands. `gh pr create` does not spend a review: the usual flow reviews the branch, then opens
+    the PR. `current` is this call's tool_use_id, skipped in case the transcript already holds it (it has no
+    result yet either way).
+    """
+    reviewed = False
+    pending: set[str] = set()  # tool_use ids of earlier merge calls, awaiting their results
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                # Parse only what can matter: a review spawn, anything mentioning a merge (calls, prompts,
-                # most results), `gh pr create`, or the result of an earlier merge call. A 60 MB transcript
-                # holds a few hundred such lines.
-                low = line.lower()
+                # Parse only what can matter - a review spawn, anything mentioning a merge, the result of an
+                # earlier merge call: a 76 MB transcript is read in well under a second.
                 if not (
                     "subagent_type" in line
-                    or "merg" in low
-                    or "pr create" in line
-                    or (resets and '"tool_result"' in line and any(uid in line for uid in resets))
+                    or "merg" in line.lower()
+                    or (pending and '"tool_result"' in line and any(uid in line for uid in pending))
                 ):
                     continue
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(record, dict):
-                    continue
-                if not asked and MERGE_WORD.search(user_text(record)):
-                    asked = True
-                message = record.get("message")
+                message = record.get("message") if isinstance(record, dict) else None
                 content = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(content, list):
                     continue
@@ -579,8 +655,11 @@ def scan_session(transcript: Path, current: str) -> Session | None:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_result":
-                        if block.get("tool_use_id") in resets and block.get("is_error") is not True:
-                            reviewed = False  # a merge went through: the next one needs a review of its own
+                        uid = str(block.get("tool_use_id"))
+                        if uid in pending:
+                            pending.discard(uid)
+                            if went_through(block):
+                                reviewed = False  # the next merge needs a review of its own
                         continue
                     if block.get("type") != "tool_use" or (current and block.get("id") == current):
                         continue
@@ -589,48 +668,51 @@ def scan_session(transcript: Path, current: str) -> Session | None:
                         continue
                     if block.get("name") in ("Agent", "Task") and is_review_role(tool_input.get("subagent_type")):
                         reviewed = True
-                    elif block.get("name") in SHELL_TOOLS:
-                        parts = segments(str(tool_input.get("command") or ""))
-                        if any(is_merge(t) for t in parts):
-                            resets.add(str(block.get("id")))
-                        if any(is_gh(t, "pr", "create") for t in parts):
-                            opened = True
-    except OSError:
+                    elif block.get("name") in SHELL_TOOLS and any(
+                        is_merge(t) for t in segments(str(tool_input.get("command") or ""))
+                    ):
+                        pending.add(str(block.get("id")))
+    except OSError as exc:
+        notice(f"cannot read the transcript {transcript} ({exc}) - the merge goes unchecked")
         return None
-    return Session(reviewed, opened, asked)
+    return reviewed
 
 
 def harmless(tokens: list[str]) -> bool:
-    """Whether a command beside a merge is one of CHAIN_OK*: navigation, output trimming, reads, a sync."""
-    exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    """Whether a command may share a call with a merge: CHAIN_OK, CHAIN_OK_GH, or CHAIN_OK_GIT without GIT_RISKY."""
+    first = tokens[0]
+    if first.startswith("#"):
+        return True  # a comment
+    exe = first.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if exe in CHAIN_OK:
         return True
     if exe == "gh":
         return tuple(tokens[1:3]) in CHAIN_OK_GH
-    if exe == "git":
-        args = tokens[1:]
-        while len(args) >= 2 and args[0] in ("-C", "-c"):
-            args = args[2:]
-        return bool(args) and args[0] in CHAIN_OK_GIT
-    return False
+    if exe != "git":
+        return False
+    args = tokens[1:]
+    while args and args[0].startswith("-"):  # global options: -C <dir>, -c <key=value>, --no-pager ...
+        args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+    if not args or args[0] not in CHAIN_OK_GIT:
+        return False
+    return args[0] not in GIT_MOVES or not any(a in GIT_RISKY or a.startswith("--force") for a in args[1:])
 
 
 def check_merge(command: str, transcript: str, current: str = "") -> str | None:
-    """The block message for a merge auto mode would refuse - chained, unreviewed, or not this session's PR."""
+    """The block message for a merge auto mode would refuse - chained, through the API, or unreviewed - else None."""
     parts = segments(command)
-    if not any(is_merge(t) for t in parts):
+    merges = [t for t in parts if is_merge(t)]
+    if not merges:
         return None
-    if not all(is_merge(t) or harmless(t) for t in parts):
+    if any(merge_kind(t) == "api" for t in merges):
+        return MERGE_API
+    if len(merges) > 1 or merge_kind(merges[0]) is None or not all(t in merges or harmless(t) for t in parts):
         return MERGE_CHAINED
     if not transcript:
+        notice("no transcript_path in the payload - the merge goes unchecked")
         return None
-    session = scan_session(Path(transcript), current)
-    if session is None:
-        return None
-    if not session.reviewed:
+    if reviewed_since_merge(Path(transcript), current) is False:
         return MERGE_UNREVIEWED
-    if not (session.opened or session.asked):
-        return MERGE_NOT_OURS
     return None
 
 

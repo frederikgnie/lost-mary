@@ -206,6 +206,13 @@ well past $9. Keep `--max-cost-usd` on, and read it for what it is - the ceiling
 is checked before each run launches, so it bounds the next run, not the ones in
 flight; $2 here let $3.38 through and said so.
 
+**Which merges the guard holds.** `python scripts/replay-merges.py --detail`
+replays every `gh pr merge` in the local transcripts through
+`guard-shared-checkouts`' merge check, each against its transcript cut at the
+call, beside what really happened (refused, ok, ...). Like `usage.py` it is
+not installed and reads nothing but transcripts. Re-run it after changing the
+merge check: every `refused` row should be held, few `ok` rows should be.
+
 **Where the tokens go.** `python scripts/usage.py --since 2026-09-15` sums the
 per-message `usage` every transcript under `~/.claude/projects` carries, by
 model and by role (lead vs subagent), deduplicated on `message.id` because one
