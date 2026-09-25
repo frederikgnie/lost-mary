@@ -110,7 +110,10 @@ A failed or partial second attempt means re-plan - smaller scope, `explore`
 first - never respawn the same prompt.
 
 Hand `review` the diff when the change is more than trivial or touches a
-boundary. Findings at HIGH or above are resolved before "done".
+boundary. Findings at HIGH or above are resolved before "done". A PR is
+reviewed before its first `gh pr merge`, and the merge runs alone: the
+guard hook holds back any other merge, because an auto-mode refusal
+latches the session.
 
 ## 5. Close
 

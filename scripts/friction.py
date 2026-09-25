@@ -402,6 +402,7 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
     final: tuple[str, str] | None = None
     unbounced = False  # the last judged hand-back has not (yet) been followed by a no-punt bounce
     turn_refused = False  # a tool call in the current turn was refused - what backs a BLOCKED: stop
+    reviewed = False  # a `review` agent was spawned earlier in this session: an unreviewed-merge refusal backs
     after_gate = False  # the last user record was no-punt bouncing an unbacked BLOCKED: stop
 
     def close_message() -> None:
@@ -511,6 +512,8 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
                     command = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
                     uid = str(item.get("id"))
                     pending[uid] = (name, command)
+                    if no_punt is not None and no_punt.review_spawn(item):
+                        reviewed = True
                     if name == "AskUserQuestion":
                         questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
                         if not isinstance(questions, list):
@@ -537,7 +540,8 @@ def scan_transcript(path: Path, stats: ProjectStats, report: Report, no_punt: An
                             continue
                     if denied:
                         stats.refusals += 1
-                        turn_refused = True
+                        if no_punt is None or no_punt.backs_blocked(body, reviewed):
+                            turn_refused = True
                         name, command = pending.get(uid, ("?", ""))
                         report.refused_tools[name] += 1
                         if command:

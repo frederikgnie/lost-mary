@@ -41,6 +41,18 @@ Still passes by design (known gaps, not a sandbox): `git reset <commit>`
 commands of eval / $(...) / bash -c, `--git-dir` / `--work-tree` / `GIT_DIR=`,
 symlinks and junctions, and a worktree nested inside a shared checkout.
 
+Unreviewed merges
+-----------------
+A `gh pr merge` is held back, with or without a config, when it is chained
+with anything else, or when no `review` agent was spawned in the session
+since the last `gh pr merge` call (or the session start). Auto mode refuses
+such a merge as [Merge Without Review] - and once it has refused, it refuses
+the follow-ups too: on 2026-09-25 two c--repo-EU sessions had `git diff` for
+the reviewer refused for the same reason and stopped on BLOCKED:. Stopped
+here, the merge never reaches the classifier, so nothing latches: the session
+spawns `review`, then merges alone - the shape the user's autoMode.allow rule
+lets through. An unreadable transcript lets the merge through (fail open).
+
 Wiring: PreToolUse, matcher "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit".
 Exit 2 blocks the call and returns stderr to the model; exit 0 allows. Fails
 OPEN: no config file -> silent no-op; an unreadable or malformed config or
@@ -49,7 +61,7 @@ not a sandbox.
 
 Runtime dependencies (see capabilities.md): PreToolUse stdin fields
 `tool_name`, `tool_input.command`, `tool_input.file_path` /
-`tool_input.notebook_path`, `cwd`.
+`tool_input.notebook_path`, `cwd`, `transcript_path` (the merge check).
 """
 
 from __future__ import annotations
@@ -73,6 +85,18 @@ PREFIX_WORDS = ("&", "!", "command", "time", "exec", "nohup", "env")
 PREFIX_WORDS += ("then", "do", "if", "elif", "else", "while", "until")
 VALUE_FLAGS = ("-erroraction", "-warningaction", "-informationaction")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+REVIEW_ROLE = "review"
+MERGE_CHAINED = (
+    "guard-shared-checkouts: run `gh pr merge` as a lone call - nothing piped, nothing before or after it. "
+    "Auto mode judges a chained command as a whole and refuses a merge inside one; after that refusal it "
+    "refuses the follow-ups too."
+)
+MERGE_UNREVIEWED = (
+    "guard-shared-checkouts: no `review` agent has run since the last merge in this session. Auto mode refuses "
+    "this merge as [Merge Without Review], and after that refusal it refuses the follow-ups as well - even "
+    "`git diff` for the reviewer. So first: spawn `review` with the PR's `git diff`, fix what it finds, run the "
+    "project's checks. Then run the same `gh pr merge` again, alone."
+)
 
 
 class Dir(NamedTuple):
@@ -402,6 +426,78 @@ def check_edit(file_path: str, cwd: str, config: Config) -> str | None:
     return None
 
 
+def is_merge(tokens: list[str]) -> bool:
+    """`gh pr merge ...`, gh named bare or by path."""
+    if len(tokens) < 3:
+        return False
+    exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return exe in ("gh", "gh.exe") and tokens[1] == "pr" and tokens[2] == "merge"
+
+
+def is_review_role(role: object) -> bool:
+    """`review`, or a plugin-namespaced `<plugin>:review`."""
+    return isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE
+
+
+def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
+    """Whether a `review` spawn follows the last earlier merge that went through; None if unreadable.
+
+    Only a merge whose result is not an error resets it: one this hook held back, the classifier refused or
+    GitHub rejected never ran, so the review before it still stands. `current` is this call's tool_use_id,
+    skipped in case the transcript already holds it (it has no result yet either way).
+    """
+    reviewed = False
+    merges: set[str] = set()  # tool_use ids of earlier merge calls, awaiting their results
+    try:
+        with transcript.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"tool_' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = record.get("message") if isinstance(record, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_result":
+                        if block.get("tool_use_id") in merges and block.get("is_error") is not True:
+                            reviewed = False  # a merge went through: the next one needs a review of its own
+                        continue
+                    if block.get("type") != "tool_use" or (current and block.get("id") == current):
+                        continue
+                    tool_input = block.get("input")
+                    if not isinstance(tool_input, dict):
+                        continue
+                    if block.get("name") in ("Agent", "Task") and is_review_role(tool_input.get("subagent_type")):
+                        reviewed = True
+                    elif block.get("name") in SHELL_TOOLS and any(
+                        is_merge(t) for t in segments(str(tool_input.get("command") or ""))
+                    ):
+                        merges.add(str(block.get("id")))
+    except OSError:
+        return None
+    return reviewed
+
+
+def check_merge(command: str, transcript: str, current: str = "") -> str | None:
+    """The block message for a chained or unreviewed `gh pr merge`, else None."""
+    parts = segments(command)
+    if not any(is_merge(t) for t in parts):
+        return None
+    if len(parts) > 1:
+        return MERGE_CHAINED
+    if not transcript:
+        return None
+    if reviewed_since_merge(Path(transcript), current) is False:
+        return MERGE_UNREVIEWED
+    return None
+
+
 def read_payload() -> dict[str, Any] | None:
     buffer = getattr(sys.stdin, "buffer", None)
     raw = buffer.read() if buffer is not None else sys.stdin.read().encode("utf-8")
@@ -413,9 +509,6 @@ def read_payload() -> dict[str, Any] | None:
 
 
 def main() -> int:
-    config = load_config()
-    if config is None or not (config.shared or config.frozen):
-        return 0
     event = read_payload()
     if event is None:
         notice("could not read the hook payload - allowing")
@@ -423,6 +516,22 @@ def main() -> int:
     tool = event.get("tool_name", "")
     tool_input = event.get("tool_input")
     if not isinstance(tool_input, dict):
+        return 0
+    if tool in SHELL_TOOLS:
+        try:
+            held = check_merge(
+                str(tool_input.get("command") or ""),
+                str(event.get("transcript_path") or ""),
+                str(event.get("tool_use_id") or ""),
+            )
+        except Exception as exc:  # the merge check is a convenience: never let it cost the call
+            notice(f"merge check skipped ({exc!r})")
+            held = None
+        if held:
+            print(held, file=sys.stderr)
+            return 2
+    config = load_config()
+    if config is None or not (config.shared or config.frozen):
         return 0
     cwd = str(event.get("cwd") or "")
     reason: str | None = None

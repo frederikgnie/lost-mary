@@ -186,6 +186,13 @@ REFUSAL_MARKERS = (
     "user doesn't want to proceed",
     "user doesn't want to take this action",
 )
+# A refusal that names its own remedy backs nothing until the remedy was tried. Auto mode's
+# `[Merge Without Review]` is a soft_deny: the user's autoMode.allow rule lifts it for a merge this session
+# prepared - `review` spawned on the diff, the checks run, the merge retried as a lone call (verified live
+# 2026-09-24). A session that merged straight after `gh pr create` and stopped on the refusal (c--repo-EU,
+# 2026-09-25, PR #18) handed the user a step it could still take.
+MERGE_UNREVIEWED = "[Merge Without Review]"
+REVIEW_ROLE = "review"
 # What only the user holds: their identity, a credential, money, an irreversible action - or a value, when
 # the BLOCKED paragraph asks for it as a what/where/who question. Not here on purpose: decision, choice,
 # approval, review, merge, classifier, denied, permission - a decision is the lead's to take, and "the
@@ -338,6 +345,13 @@ BLOCKED_BODY = (
     "your evidence and the same `BLOCKED:` stop is allowed - never ask another session to perform an action a "
     "tool refused you. If it works, the turn goes on and closes on `DONE:`."
 )
+MERGE_REMEDY = (
+    "The refusal was `[Merge Without Review]` and no `review` agent has run in this session: that refusal names "
+    "its own remedy. Spawn `review` with the `git diff`, fix what it finds, run the project's checks, then retry "
+    "`gh pr merge` as a lone Bash call - never chained with a push, a create or anything else. Only a refusal of "
+    "that retry backs `BLOCKED:`. If the classifier refuses preparing the review too, it has latched for this "
+    "session: give the reviewer the worktree path and the changed files to read instead of the diff."
+)
 OPEN_HEADER = "The turn is not over (no-punt)."
 GO_AHEAD_BODY = (
     "Your final message stops to ask for a go-ahead: {phrase!r}. Nobody is answering - the turn is yours "
@@ -384,6 +398,7 @@ class Turn:
     idle: int = 0  # of those, the trailing run with no tool call after them
     worked: bool = False  # the turn edited, ran or delegated something (WORK_TOOLS)
     refused: bool = False  # a tool call in the turn was refused (classifier or user) - the model tried
+    merge_unreviewed: bool = False  # a merge refused as unreviewed before any `review` spawn: not a stop
     lost_mary: bool = False  # /lost-mary invoked since the last /clear
     task: str = ""  # the user's own words that started the turn
     done_means: str = ""  # the `Done means` line the lead wrote in this turn, if any
@@ -527,6 +542,7 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
     """
     turn = Turn()
     collecting = prompt_id is None
+    reviewed = False  # a `review` agent was spawned earlier in the session (any turn)
     with transcript.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             if '"user"' not in line and '"assistant"' not in line:
@@ -540,6 +556,8 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
             kind = record.get("type")
             message = record.get("message")
             content = message.get("content") if isinstance(message, dict) else None
+            if kind == "assistant" and any(review_spawn(tool) for tool in blocks_of(content, "tool_use")):
+                reviewed = True
             match command_of(content) if kind == "user" else None:
                 case "lost-mary":
                     turn.lost_mary = True
@@ -561,12 +579,13 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
             elif prompt:  # without an id every real prompt starts the count afresh
                 turn = Turn(found=True, lost_mary=turn.lost_mary, task=prompt_text(record))
                 continue
-            if (
-                kind == "user"
-                and not turn.refused
-                and any(refused_result(r) for r in blocks_of(content, "tool_result"))
-            ):
-                turn.refused = True
+            if kind == "user" and not turn.refused:
+                for result in blocks_of(content, "tool_result"):
+                    if refused_result(result):
+                        if backs_blocked(result_body(result), reviewed):
+                            turn.refused = True
+                        else:
+                            turn.merge_unreviewed = True
             if kind == "user" and own_feedback(content):
                 uid = record.get("uuid")
                 if isinstance(uid, str) and uid:
@@ -597,9 +616,26 @@ def refused_body(body: str, is_error: object) -> bool:
     return is_error is True and any(0 <= body.find(marker) < 80 for marker in REFUSAL_MARKERS)
 
 
-def refused_result(block: dict[str, Any]) -> bool:
+def result_body(block: dict[str, Any]) -> str:
     raw = block.get("content")
-    return refused_body(raw if isinstance(raw, str) else text_of(raw), block.get("is_error"))
+    return raw if isinstance(raw, str) else text_of(raw)
+
+
+def refused_result(block: dict[str, Any]) -> bool:
+    return refused_body(result_body(block), block.get("is_error"))
+
+
+def review_spawn(tool: dict[str, Any]) -> bool:
+    """An Agent (or legacy Task) call that spawns the `review` role."""
+    tool_input = tool.get("input")
+    role = tool_input.get("subagent_type") if isinstance(tool_input, dict) else None
+    named = isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE  # or `<plugin>:review`
+    return tool.get("name") in ("Agent", "Task") and named
+
+
+def backs_blocked(body: str, reviewed: bool) -> bool:
+    """Whether a refusal backs a BLOCKED: stop: every refusal does, except an unreviewed merge before a review."""
+    return reviewed or MERGE_UNREVIEWED not in body[:300]
 
 
 def strip_quoted(text: str) -> str:
@@ -740,6 +776,8 @@ def bounce_text(found: HandBack, subagent: bool, turn: Turn) -> str:
     else:
         body = {"remaining": REMAINING_BODY, "unclosed": UNCLOSED_BODY}.get(found.kind, GO_AHEAD_BODY)
         lines = [OPEN_HEADER, body.format(phrase=found.phrase)]
+    if turn.merge_unreviewed and found.kind in ("assigned", "blocked"):
+        lines.append(MERGE_REMEDY)
     if turn.lost_mary and found.kind not in ("unclosed", "assigned", "blocked"):
         lines.append(LOST_MARY_CLOSE)
     if turn.done_means:
