@@ -40,6 +40,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | [`scripts/check-spawn.py`](scripts/check-spawn.py) | **PreToolUse hook on `Agent`.** An `implement` spawn whose brief lacks `OWNED`, `OFF-LIMITS`, `DONE MEANS` or `VALIDATION` is blocked before it starts, with the `MISSING:` line - the contract the subagent used to enforce after a full round trip. Other roles are never blocked. |
 | [`scripts/permit.py`](scripts/permit.py) | **PermissionRequest hook.** Allow-only: `git push` to any branch that is not main/master (no force, delete, tags or `--no-verify`), commands made solely of the project's validation runs plus benign wrappers, and the installers' verify mode. Anything else gets no decision and follows the normal flow. Matters in Manual mode and for background subagents, which are auto-denied without such a hook. |
 | [`scripts/witness.py`](scripts/witness.py) | **PostToolUse + PostToolUseFailure hooks.** Appends one JSON line per tool call - which agent, which command or file, the exit code, the output (head and tail) - to `~/.claude/agent-library/evidence/<session>/`, so evidence comes from the runtime handing over each call rather than from parsing a transcript the docs call internal, version-unstable and written asynchronously. It classifies nothing: what counts as a validation run is the reader's judgment, not the record's. Fails open on anything unreadable; session directories whose newest line is older than `EVIDENCE_KEEP_DAYS` (default 14) are pruned - and only directories holding nothing but this hook's own `witness-*.jsonl` files, so a mis-set `EVIDENCE_ROOT` cannot make it delete anything it did not write. |
+| [`scripts/guard-shared-checkouts.py`](scripts/guard-shared-checkouts.py) | **PreToolUse hook, config-driven.** In a checkout several sessions use at once it blocks `git switch`, a branch-changing `checkout`, `stash` (but not `stash list`/`show`), `reset --hard|--merge|--keep`, `rebase`, `pull --rebase`, `clean -f` and `gh pr checkout`, and points at `git worktree add <dir>_wt_<name> -b <branch>`; in a frozen tree only a deploy script may change, it blocks every git command and every `Edit`/`Write`. Tracks `cd`/`Set-Location`/`git -C` through the command, relative paths included. Without `~/.claude/agent-library/shared-checkouts.json` (template: [`shared-checkouts.example.json`](shared-checkouts.example.json)) it does nothing. |
 | [`agents/explore.md`](agents/explore.md) | Read-only investigation **and planning** on `fable` at medium effort - it returns the `PLAN` when work must be split, and a wrong plan multiplies into every implementer. `Read/Grep/Glob/WebFetch/WebSearch`, no Bash - it cannot change anything. Returns a brief with `path:line` anchors. |
 | [`agents/implement.md`](agents/implement.md) | Scoped change plus validation on `opus` (execution), with project-local persistent memory (`memory: local` - commands that work, code paths, traps; not versioned). Reports `CHANGED / RAN / DONE MEANS / RISKS`; the evidence hook checks `RAN` against reality. |
 | [`agents/review.md`](agents/review.md) | Independent review on `fable` (judgment is the bottleneck here) with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
@@ -47,7 +48,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | [`/validate [paths]`](skills/validate/SKILL.md) | Lint + typecheck + tests for what changed, commands taken from the project's `CLAUDE.md`, exact results reported. Claude may invoke it itself before declaring something done. |
 | [`/pr [notes]`](skills/pr/SKILL.md) | Push and open a PR with the GitHub account that owns the repository (personal vs work), then switch `gh` back. User-invoked only. |
 | [`/ledger [n]`](skills/ledger/SKILL.md) | Show the ledger's latest entries for the current project on demand - what agents actually edited and ran. Claude may invoke it itself when a report needs checking against the record. |
-| [`global-CLAUDE.md`](global-CLAUDE.md) | ~2.8 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
+| [`global-CLAUDE.md`](global-CLAUDE.md) | ~3 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
 | [`capabilities.md`](capabilities.md) | Every runtime field, frontmatter key and file layout the library depends on, how each was verified, and how it degrades. |
 
 ## Layout
@@ -59,7 +60,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 ├── capabilities.md               # runtime dependencies + degradation
 ├── agents/       explore.md  implement.md  review.md
 ├── skills/       lost-mary/  validate/  pr/  ledger/   (each a SKILL.md)
-├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py  friction.py  ledger.py  check-spawn.py  permit.py  witness.py
+├── scripts/      pycheck.py  check-evidence.py  no-ask.py  no-punt.py  friction.py  ledger.py  check-spawn.py  permit.py  witness.py  guard-shared-checkouts.py
 ├── tests/        test-hooks.py  test-agents.py  test-skills.py  fixtures/pycheck/
 ├── evals/        spawn-contract/  no-menu/  no-hand-back/  evidence-in-report/  keep-going/  keep-going/
 ├── .claude-plugin/plugin.json    # makes the repo an eval target (install path unchanged)
@@ -199,7 +200,7 @@ live; restart if it does not.
 | 13-key JSON handoff envelope + schema + validator + `SubagentStop` format hook | 4-line prose report + `check-evidence` transcript hook | Nothing downstream parsed the JSON except the hook; it enforced the *shape* of a claim, not its truth. The transcript is the evidence. |
 | `PreToolUse` regex denylist keeping review roles from writing via Bash | Review roles have no Bash | A denylist over shell text is bypassable (v1 said so itself); no sandbox exists on Windows; the lead can paste `git diff`. |
 | 7 persona roles, no model routing | 3 roles with `model`/`effort` in frontmatter | Persona text moves modern models little; routing moves cost a lot. |
-| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~2.8 KB) | Rules compete for attention; one canonical copy, on demand. |
+| 6 orchestration docs + playbooks + principles restating one procedure | `/lost-mary` (one screen) + `global-CLAUDE.md` (~3 KB) | Rules compete for attention; one canonical copy, on demand. |
 | Manual `git worktree add` convention | Agent tool `isolation: worktree` | The runtime does it. |
 | Nothing runs on edit | `pycheck` PostToolUse hook | The single highest-leverage mechanism for a typed codebase. |
 
