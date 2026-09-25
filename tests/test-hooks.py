@@ -2082,6 +2082,10 @@ UNBACKED = [
     "BLOCKED: which first?",
     "BLOCKED: the merge decision is yours.",
     "**BLOCKED:** running the deploy script; you run it and I verify.",
+    # review 2026-09-25: a code span backs nothing, and a decision asked as a what-question is a menu
+    "BLOCKED: the merge; command: `gh pr merge 21 --squash --delete-branch`.",
+    "BLOCKED: what should I do with PR #21?",
+    "BLOCKED: what do you want first?",
 ]
 for i, msg in enumerate(UNBACKED):
     rc, err = run_hook(NOPUNT, stop_payload(msg))
@@ -2130,6 +2134,28 @@ def kg_refused(uid: str = "t-merge", pid: str = PID) -> list[dict[str, object]]:
 t = kg_transcript("blocked-tried.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(UNBACKED[0])])
 rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), prompt_id=PID))
 expect("a refused call in the turn backs the BLOCKED: -> allow", rc, ALLOW, err)
+# Review 2026-09-25 (HIGH): after a refusal the bounce must not point at another session - asking a peer to do
+# what your own classifier refused is permission laundering. It asks for the BLOCKED: line instead.
+t = kg_transcript("assigned-refused.jsonl", [kg_prompt("merge both"), *kg_refused(), kg_said(ASSIGNED[7])])
+rc, err = run_hook(NOPUNT, stop_payload(ASSIGNED[7], transcript_path=str(t), prompt_id=PID))
+expect_true(
+    "an assigned step after a refusal -> bounced for a BLOCKED: line, never routed to another session",
+    rc == BLOCK and "SendMessage" not in err and "refused action" in err and "Never ask another session" in err,
+    err,
+)
+# Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
+HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."
+t = kg_transcript("how-to.jsonl", [kg_prompt("how do I set up ssh on a new laptop?"), kg_said(HOW_TO)])
+rc, err = run_hook(NOPUNT, stop_payload(HOW_TO, transcript_path=str(t), prompt_id=PID))
+expect("a how-to answer in a turn that did no work -> allow", rc, ALLOW, err)
+t = kg_transcript("how-to-worked.jsonl", [kg_prompt("set up ssh on this laptop"), kg_tool(), kg_said(HOW_TO)])
+rc, err = run_hook(NOPUNT, stop_payload(HOW_TO, transcript_path=str(t), prompt_id=PID))
+expect("the same sentence after the turn ran something -> block", rc, BLOCK, err)
+long_report = "You'll need to run the installer after a fresh clone.\n\n" + "\n\n".join(
+    f"Paragraph {n}: the loader and the tests are fixed." for n in range(4)
+)
+rc, err = run_hook(NOPUNT, stop_payload(long_report))
+expect("no transcript: only the closing paragraphs are judged for an assigned step -> allow", rc, ALLOW, err)
 t = kg_transcript(
     "blocked-old-refusal.jsonl",
     [

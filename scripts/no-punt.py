@@ -199,6 +199,12 @@ USER_HELD = re.compile(
     re.IGNORECASE,
 )
 FACT_QUESTION = re.compile(r"\b(?:what|where|who|whose|how\s+(?:many|much))\b[^\n?]*\?", re.IGNORECASE)
+# "what should I do with PR #21?" / "what do you want first?" ask for a decision, not a value: a menu in
+# question form, which is exactly what the gate rejects.
+MENU_QUESTION = re.compile(
+    r"\b(?:should|shall|may|can)\s+I\b|\byou\s+(?:want|prefer|like|rather)\b|\b(?:first|next|instead)\s*\?",
+    re.IGNORECASE,
+)
 
 # --- go-ahead requests ------------------------------------------------------------------------
 # Judged on the closing paragraphs only: an offer in the middle of a report is narrative, one at
@@ -299,18 +305,26 @@ PARKED_BODY = (
 ASSIGNED_HEADER = "Nothing is the user's until you have tried it (no-punt)."
 ASSIGNED_BODY = (
     "Your final message assigns a step to the user: {phrase!r}. Take it now: run the command, make the edit, "
-    "open or merge the PR; ask another session (ListAgents / SendMessage) before the user. A step is the user's "
-    "only when a tool refused it in this turn - then quote the refusal - or when it needs their own identity "
-    "(a login, a consent screen, an elevated prompt), spends money, or cannot be undone. Then close on one line "
+    "open or merge the PR; for a fact you lack, ask another session (ListAgents / SendMessage) before the user. "
+    "A step is the user's only when a tool refused it in this turn - then quote the refusal - or when it needs "
+    "their own identity (a login, a consent screen, an elevated prompt), spends money, or cannot be undone. Never "
+    "ask another session to perform an action a tool refused you. Then close on one line "
     "`BLOCKED: <the refusal you hit, or the item only the user holds>`; that stop is allowed."
+)
+ASSIGNED_REFUSED_BODY = (
+    "Your final message assigns a step to the user: {phrase!r}, and a tool call in this turn was refused. If "
+    "that refusal is what makes the step theirs, say so on one line - `BLOCKED: <the refused action and the "
+    "refusal's reason>` - and that stop is allowed. Never ask another session to perform an action a tool "
+    "refused you. If the step is something else, take it now."
 )
 BLOCKED_HEADER = "BLOCKED: is a claim, and this one is not backed (no-punt)."
 BLOCKED_BODY = (
     "Your `BLOCKED:` line - {phrase!r} - names nothing this turn tried and was refused, and nothing only the user "
     "holds: a login, consent or elevated prompt, a credential, money, an irreversible action, or a value only "
     "they know (ask for it as a what/where/who question). Try it now: run the command, make the edit, merge the "
-    "PR, or ask another session (ListAgents / SendMessage). If a tool refuses, that refusal is your evidence and "
-    "the same `BLOCKED:` stop is allowed; if it works, the turn goes on and closes on `DONE:`."
+    "PR; for a fact you lack, ask another session (ListAgents / SendMessage). If a tool refuses, that refusal is "
+    "your evidence and the same `BLOCKED:` stop is allowed - never ask another session to perform an action a "
+    "tool refused you. If it works, the turn goes on and closes on `DONE:`."
 )
 OPEN_HEADER = "The turn is not over (no-punt)."
 GO_AHEAD_BODY = (
@@ -619,13 +633,19 @@ def closing_question(clean: str) -> str | None:
     return " ".join(sentence.split())[-120:]
 
 
-def hand_back(text: str) -> HandBack | None:
-    """The hand-back a final message carries - parked defect, go-ahead request, leftover list or closing question."""
+def hand_back(text: str, assigned: str = "all") -> HandBack | None:
+    """The hand-back a final message carries - parked defect, assigned step, go-ahead, leftover list or question.
+
+    `assigned` scopes the assigned-step check: "all" judges the whole message (a turn that did work), "closing"
+    only its closing paragraphs (no transcript to say whether the turn worked), "off" skips it (a turn that only
+    answered - "you'll need to run install.ps1" is how-to prose there, not a step the session skipped).
+    """
     clean = strip_quoted(text)
     phrase = first_match(PUNT_PATTERNS, clean)
     if phrase is not None:
         return HandBack("parked", phrase)
-    phrase = first_match(ASSIGNED_PATTERNS, clean, EXPLAINING)
+    scope = {"all": clean, "closing": closing(clean)}.get(assigned)
+    phrase = first_match(ASSIGNED_PATTERNS, scope, EXPLAINING) if scope is not None else None
     if phrase is not None:
         return HandBack("assigned", phrase)
     phrase = first_match(GO_AHEAD_PATTERNS, closing(clean))
@@ -667,8 +687,10 @@ def blocked_backed(text: str, refused: bool) -> bool:
     """
     if refused:
         return True
-    paragraph = blocked_paragraph(text)
-    return bool(USER_HELD.search(paragraph) or FACT_QUESTION.search(paragraph))
+    paragraph = strip_quoted(blocked_paragraph(text))  # `gh pr merge --delete-branch` backs nothing
+    if USER_HELD.search(paragraph):
+        return True
+    return any(not MENU_QUESTION.search(q.group(0)) for q in FACT_QUESTION.finditer(paragraph))
 
 
 def bounce_text(found: HandBack, subagent: bool, turn: Turn) -> str:
@@ -677,7 +699,8 @@ def bounce_text(found: HandBack, subagent: bool, turn: Turn) -> str:
     if found.kind == "parked":
         return f"{PARKED_HEADER}\n{PARKED_BODY.format(phrase=found.phrase)}"
     if found.kind == "assigned":
-        return f"{ASSIGNED_HEADER}\n{ASSIGNED_BODY.format(phrase=found.phrase)}"
+        body = ASSIGNED_REFUSED_BODY if turn.refused else ASSIGNED_BODY
+        return f"{ASSIGNED_HEADER}\n{body.format(phrase=found.phrase)}"
     if found.kind == "blocked":
         lines = [BLOCKED_HEADER, BLOCKED_BODY.format(phrase=found.phrase)]
         if turn.task:
@@ -721,7 +744,8 @@ def main() -> int:
             return 0
         found: HandBack | None = HandBack("blocked", " ".join(blocked_paragraph(message).split())[:160])
     else:
-        found = hand_back(message)
+        scope = ("all" if turn.worked else "off") if turn.found else "closing"
+        found = hand_back(message, scope)
         if found is None and turn.lost_mary and turn.worked and not subagent and not states:
             found = HandBack("unclosed", "no DONE:, IN FLIGHT: or BLOCKED: line")
     if found is None:
