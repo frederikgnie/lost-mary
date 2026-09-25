@@ -24,7 +24,7 @@ $DriftCount = 0
 $IncompleteCount = 0
 
 # What v2 manages under ~/.claude/agent-library.
-$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'scripts/ledger.py', 'scripts/check-spawn.py', 'scripts/permit.py', 'scripts/witness.py', 'scripts/guard-shared-checkouts.py', 'global-CLAUDE.md', 'capabilities.md')
+$LibFiles = @('scripts/pycheck.py', 'scripts/check-evidence.py', 'scripts/no-ask.py', 'scripts/no-punt.py', 'scripts/friction.py', 'scripts/ledger.py', 'scripts/check-spawn.py', 'scripts/permit.py', 'scripts/witness.py', 'scripts/guard-shared-checkouts.py', 'scripts/prune-worktrees.py', 'global-CLAUDE.md', 'capabilities.md')
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.

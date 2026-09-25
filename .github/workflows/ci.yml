@@ -53,6 +53,8 @@ jobs:
         run: python tests/test-skills.py
       - name: Hooks behave (pycheck, check-evidence)
         run: python tests/test-hooks.py
+      - name: Stale-worktree pruner keeps everything not provably safe
+        run: python tests/test-prune-worktrees.py
       - name: Hooks survive a Windows PowerShell 5.1 pipe (UTF-8 BOM)
         # Windows PowerShell 5.1 (the default shell on the maintainer's machine)
         # writes a BOM with -Encoding utf8 and prepends one when piping to a
@@ -137,6 +139,7 @@ jobs:
           test -x "$FAKE_HOME/.claude/agent-library/scripts/guard-shared-checkouts.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/no-punt.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/friction.py"
+          test -x "$FAKE_HOME/.claude/agent-library/scripts/prune-worktrees.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/ledger.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/check-spawn.py"
           test -x "$FAKE_HOME/.claude/agent-library/scripts/permit.py"
@@ -352,6 +355,7 @@ jobs:
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/guard-shared-checkouts.py'))) { throw 'guard-shared-checkouts.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/no-punt.py'))) { throw 'no-punt.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/friction.py'))) { throw 'friction.py did not install.' }
+          if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/prune-worktrees.py'))) { throw 'prune-worktrees.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/ledger.py'))) { throw 'ledger.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/check-spawn.py'))) { throw 'check-spawn.py did not install.' }
           if (-not (Test-Path (Join-Path $fake '.claude/agent-library/scripts/permit.py'))) { throw 'permit.py did not install.' }

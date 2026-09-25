@@ -169,7 +169,9 @@ library's defaults.
 `~/.claude/agent-library/shared-checkouts.json` and edit the lists: `shared`
 checkouts keep their branch and stash (sessions work in their own worktree),
 `frozen` trees change only through `frozen_by`. The hook reads the file on every
-call - no restart; without it the hook does nothing.
+call - no restart; without it the hook does nothing. Those worktrees pile up:
+`python ~/.claude/agent-library/scripts/prune-worktrees.py` lists each one with
+a verdict, and `--apply` removes only the clean, pushed, merged, idle ones.
 
 ## 7. Troubleshooting
 
