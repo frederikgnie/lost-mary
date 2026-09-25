@@ -98,11 +98,15 @@ def worktree(name: str, *extra: str) -> Path:
 
 def age_tree(root: Path, seconds: float) -> None:
     stamp = time.time() - seconds
+    dirs: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirnames:
             dirnames.remove(".git")
+        dirs.append(Path(dirpath))
         for f in filenames:
             os.utime(Path(dirpath) / f, (stamp, stamp))
+    for d in reversed(dirs):  # the pruner reads directory mtimes too (a deletion changes only those)
+        os.utime(d, (stamp, stamp))
 
 
 def age_gitdir(wt: Path, seconds: float) -> None:
@@ -122,6 +126,7 @@ def merge_to_main(wt: Path, branch: str) -> None:
 
 
 def load_module() -> ModuleType:
+    os.environ.update({k: v for k, v in ENV.items() if k.startswith(("GIT_", "HOME", "USERPROFILE", "LOST_MARY"))})
     spec = importlib.util.spec_from_file_location("prune_worktrees", PRUNE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -148,6 +153,11 @@ merge_to_main(wt_cache, "feat/cache")
 wt_active = worktree("active", "-b", "feat/active")  # merged, but a file changed just now
 commit(wt_active, "active.txt")
 merge_to_main(wt_active, "feat/active")
+wt_skip = worktree("skip", "-b", "feat/skip")  # merged, but a skip-worktree file could hold invisible edits
+commit(wt_skip, "skip.txt")
+merge_to_main(wt_skip, "feat/skip")
+git(wt_skip, "update-index", "--skip-worktree", "skip.txt")
+(wt_skip / "skip.txt").write_text("edited where status cannot see it", encoding="utf-8")
 wt_fresh = worktree("fresh", "-b", "feat/fresh")  # just added from main: an ancestor of it, no work done yet
 
 wt_dirty = worktree("dirty", "-b", "feat/dirty")
@@ -173,7 +183,7 @@ wt_locked = worktree("locked", "-b", "feat/locked")
 git(PROJ, "worktree", "lock", str(wt_locked))
 wt_frozen = worktree("frozen", "-b", "feat/frozen")
 
-ALL_WT = (wt_merged, wt_cache, wt_active, wt_fresh, wt_dirty, wt_ignored, wt_unpushed, wt_open, wt_detached)
+ALL_WT = (wt_merged, wt_cache, wt_active, wt_skip, wt_fresh, wt_dirty, wt_ignored, wt_unpushed, wt_open, wt_detached)
 for wt in (*ALL_WT, wt_locked, wt_frozen):
     age_tree(wt, 2 * 86400)
     age_gitdir(wt, 2 * 86400)
@@ -186,6 +196,8 @@ not_empty.mkdir()
 (not_empty / "keep.txt").write_text("x", encoding="utf-8")
 other = WORK / "other_empty"
 other.mkdir()
+not_wt = WORK / "proj_data"  # empty, but not the guard's <repo>_wt_* shape: could be a mount point
+not_wt.mkdir()
 
 CONFIG.write_text(json.dumps({"shared": [str(PROJ)], "frozen": [str(wt_frozen)]}), encoding="utf-8")
 worktrees_before = git(PROJ, "worktree", "list", "--porcelain")
@@ -196,6 +208,7 @@ EXPECTED = {
     wt_ignored: ("KEPT", "ignored file .git-info-exclude-probe (remove would delete it)"),
     wt_cache: ("REMOVABLE", "clean, pushed, merged, idle"),
     wt_fresh: ("KEPT", "no commits of its own yet"),
+    wt_skip: ("KEPT", "skip-worktree/assume-unchanged file skip.txt (status cannot see its edits)"),
     wt_unpushed: ("KEPT", "unpushed"),
     wt_open: ("KEPT", "not merged"),
     wt_active: ("KEPT", "active 0m ago"),
@@ -228,11 +241,12 @@ for path, (verdict, reason) in EXPECTED.items():
     )
 check("dry run: non-empty proj_backup not reported", norm_key(not_empty) not in rows, str(rows.keys()))
 check("dry run: other_empty (not proj_*) not reported", norm_key(other) not in rows, str(rows.keys()))
+check("dry run: empty proj_data (not proj_wt_*) not reported", norm_key(not_wt) not in rows, str(rows.keys()))
 check("dry run: branch reported", rows.get(norm_key(wt_merged), {}).get("branch") == "feat/merged", str(rows))
 summ = json.loads(r.stdout)["summary"] if r.returncode == 0 else {}
 check(
     "dry run: summary counts",
-    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 1, 0, 12),
+    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 1, 0, 13),
     str(summ),
 )
 check("dry run changed no worktree", git(PROJ, "worktree", "list", "--porcelain") == worktrees_before)
@@ -250,7 +264,14 @@ check("--idle-hours 0: the active worktree becomes removable", line.startswith("
 check("--idle-hours -1 -> exit 2", cli("--idle-hours", "-1").returncode == 2)
 check("unknown flag -> exit 2", cli("--bogus").returncode == 2)
 r = cli(str(TMP / "not-a-repo"), str(PROJ), "--json")
-check("unreadable repo: exit 0, stderr names it", r.returncode == 0 and "not-a-repo" in r.stderr, r.stderr)
+check("unreadable repo: exit 1, stderr names it", r.returncode == 1 and "not-a-repo" in r.stderr, r.stderr)
+check("unreadable repo: the summary counts it as skipped", json.loads(r.stdout)["summary"]["skipped"] == 1, r.stdout)
+r = cli(str(PROJ), str(wt_open), "--json")  # two paths into one repository
+check(
+    "two paths into one repository are scanned once",
+    r.returncode == 0 and json.loads(r.stdout)["summary"]["worktrees"] == 13,
+    r.stdout[-400:],
+)
 check("unreadable repo: the next repo is still scanned", norm_key(wt_merged) in rows_by_path(r.stdout), r.stdout)
 
 # --- PR lookup, injected (gh is never called in tests) --------------------------------------------
@@ -260,6 +281,9 @@ head_merged = git(wt_merged, "rev-parse", "HEAD").strip()
 wt = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_open.name)
 cases = [
     ("merged PR at HEAD -> removable", [mod.PR(7, "MERGED", head_open)], None),
+    ("merged PR at HEAD into another base -> not merged", [mod.PR(7, "MERGED", head_open, "stack")], "not merged"),
+    ("merged PR at HEAD from a fork -> not merged", [mod.PR(7, "MERGED", head_open, "main", True)], "not merged"),
+    ("merged PR at HEAD into main -> removable", [mod.PR(7, "MERGED", head_open, "main")], None),
     ("merged PR at another commit -> not merged", [mod.PR(7, "MERGED", head_merged)], "not merged"),
     ("open PR -> open PR #8", [mod.PR(8, "OPEN", head_open)], "open PR #8"),
     ("gh failing (None) -> ancestry only", None, "not merged"),
@@ -303,6 +327,12 @@ check("--apply unregistered the removed worktree", "proj_wt_merged" not in liste
 check("--apply removed the empty leftover", not leftover.exists())
 check("--apply kept the non-empty sibling", (not_empty / "keep.txt").exists())
 check("--apply kept other_empty", other.is_dir())
+check("--apply kept the empty proj_data (not proj_wt_*)", not_wt.is_dir())
+check(
+    "--apply kept the skip-worktree edit",
+    (wt_skip / "skip.txt").read_text(encoding="utf-8") == "edited where status cannot see it",
+)
+check("--apply did not run `git worktree prune`", "prunable" not in git(PROJ, "worktree", "list", "--porcelain"))
 r = cli("--json")
 summ = json.loads(r.stdout)["summary"] if r.returncode == 0 else {}
 check("second dry run: nothing left to remove", (summ.get("removable"), summ.get("leftover")) == (0, 0), str(summ))

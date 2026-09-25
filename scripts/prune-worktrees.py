@@ -37,13 +37,22 @@ worktree, anything at or under a `frozen` root. Every KEPT line names the first
 reason that failed.
 
 --apply runs `git -C <main> worktree remove <path>` (never --force) for each
-REMOVABLE worktree, right after judging it, keeps its branch (local and
-remote), then `git worktree prune`. It also rmdirs EMPTY directories named
-`<repo>_*` next to a scanned repo that are not registered worktrees - the
+REMOVABLE worktree, right after judging it, and keeps its branch (local and
+remote). It never runs `git worktree prune`: that clears the record of EVERY
+missing worktree at once, including one on an unmounted drive or one a session
+moved, which `git worktree repair` could relink. It also rmdirs EMPTY
+directories named `<repo>_wt_*` (the guard's convention) next to a scanned repo
+that are not registered worktrees, re-listed just before the sweep - the
 leftovers of a remove a Windows file lock interrupted. A dry run reports them.
 
-Exit 0 always, 2 on bad arguments. A repo that cannot be read gets one line on
-stderr and the scan continues.
+"merged" through gh means a PR from the same repository (not a fork), merged
+into the default branch, whose head is HEAD. Tracked files marked
+skip-worktree or assume-unchanged keep the worktree, since status cannot see
+edits to them.
+
+Exit 0 when every repo was scanned and nothing FAILED, 1 otherwise, 2 on bad
+arguments. A repo that cannot be read gets one line on stderr and the scan
+continues.
 """
 
 from __future__ import annotations
@@ -117,8 +126,13 @@ def key(path: str | Path) -> tuple[str, ...]:
 
 
 def under(path: str | Path, roots: list[tuple[str, ...]]) -> bool:
-    k = key(path)
-    return any(k[: len(r)] == r for r in roots if r)
+    """At or under a root, by the path as given or as resolved (junctions, subst drives, short names, links)."""
+    keys = {key(path)}
+    try:
+        keys.add(key(Path(path).resolve()))
+    except OSError:
+        pass
+    return any(k[: len(r)] == r for k in keys for r in roots if r)
 
 
 def git(cwd: Path, *args: str, timeout: float | None = 120) -> subprocess.CompletedProcess[str]:
@@ -175,6 +189,8 @@ class PR:
     number: int
     state: str
     head_oid: str
+    base: str = ""  # "" = unknown (an injected lookup); gh always fills it
+    cross_repo: bool = False
 
 
 PrLookup = Callable[[Path, str], list[PR] | None]
@@ -196,7 +212,8 @@ class GhLookup:
         if self.off:
             self.warn(f"gh disabled by {NO_GH_ENV}")
             return None
-        cmd = ["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state,headRefOid"]
+        fields = "number,state,headRefOid,baseRefName,isCrossRepository"
+        cmd = ["gh", "pr", "list", "--head", branch, "--state", "all", "--json", fields]
         try:
             r = subprocess.run(
                 cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60
@@ -204,9 +221,18 @@ class GhLookup:
             if r.returncode != 0:
                 raise RuntimeError((r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[0])
             rows = json.loads(r.stdout)
-            return [PR(int(x["number"]), str(x["state"]), str(x["headRefOid"])) for x in rows]
+            return [
+                PR(
+                    int(x["number"]),
+                    str(x["state"]),
+                    str(x["headRefOid"]),
+                    str(x.get("baseRefName") or ""),
+                    bool(x.get("isCrossRepository")),
+                )
+                for x in rows
+            ]
         except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, KeyError, TypeError) as exc:
-            self.off = True
+            # Not switched off for later repos: the active gh account may see one repository and not another.
             self.warn(f"gh unavailable ({exc})")
             return None
 
@@ -226,6 +252,10 @@ def newest_mtime(root: Path) -> float:
     newest = 0.0
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        try:  # a deletion changes only its directory's mtime
+            newest = max(newest, Path(dirpath).stat().st_mtime)
+        except OSError:
+            pass
         for name in filenames:
             if name in SKIP_DIRS:  # a linked worktree's .git is a file
                 continue
@@ -257,6 +287,24 @@ def disposable(path: str) -> bool:
     return any(x in DISPOSABLE for x in parts) or path.strip().rstrip("/").endswith(DISPOSABLE_SUFFIXES)
 
 
+def default_branch(wt: Path) -> str:
+    """origin's default branch name ("main"), or "" when origin/HEAD is not set."""
+    r = git(wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return r.stdout.strip().removeprefix("origin/") if r.returncode == 0 else ""
+
+
+def hidden_edits(wt: Path) -> str | None:
+    """A tracked file whose edits status cannot see: skip-worktree (S) or assume-unchanged (lowercase tag)."""
+    r = git(wt, "ls-files", "-v")
+    if r.returncode != 0:
+        return "git ls-files failed"
+    for line in r.stdout.splitlines():
+        tag, _, name = line.partition(" ")
+        if tag == "S" or (tag.isalpha() and tag.islower()):
+            return name
+    return None
+
+
 def own_commits(wt: Worktree) -> bool:
     """Whether the branch ever got a commit of its own: its reflog holds more than the "Created from" entry.
 
@@ -284,7 +332,7 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
     if wt.locked:
         return "locked"
     if wt.prunable or not wt.path.is_dir():
-        return "missing (git worktree prune clears it)"
+        return "missing (run `git worktree prune` yourself if it is really gone)"
     status = git(wt.path, "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none")
     if status.returncode != 0:
         return f"git status failed: {first_line(status)}"
@@ -295,13 +343,19 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
                 return f"ignored file {entry.strip()} (remove would delete it)"
         elif line.strip():
             return "dirty"
+    if hidden := hidden_edits(wt.path):
+        return f"skip-worktree/assume-unchanged file {hidden} (status cannot see its edits)"
     contains = git(wt.path, "branch", "-r", "--contains", wt.head)
     if contains.returncode != 0 or not contains.stdout.strip():
         return "unpushed"
     found = prs(wt.path, wt.branch)
     if found and (open_pr := next((p for p in found if p.state.upper() == "OPEN"), None)):
         return f"open PR #{open_pr.number}"
-    merged = found is not None and any(p.state.upper() == "MERGED" and p.head_oid == wt.head for p in found)
+    base = default_branch(wt.path)
+    merged = found is not None and any(
+        p.state.upper() == "MERGED" and p.head_oid == wt.head and not p.cross_repo and p.base in ("", base)
+        for p in found
+    )
     if not merged:
         ancestor = git(wt.path, "merge-base", "--is-ancestor", wt.head, "origin/HEAD")
         if ancestor.returncode != 0:
@@ -331,7 +385,6 @@ def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLo
         return None
     main = listed[0].path
     rows: list[Row] = []
-    removed = False
     for i, wt in enumerate(listed):
         try:
             reason = judge(wt, i == 0, cfg.frozen, idle_hours, prs)
@@ -344,24 +397,17 @@ def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLo
                 try:  # no timeout: killing git mid-delete leaves a half-removed, still registered tree
                     r = git(main, "worktree", "remove", str(wt.path), timeout=None)
                     if r.returncode == 0:
-                        row.verdict, removed = "REMOVED", True
+                        row.verdict = "REMOVED"
                     else:
                         row.verdict, row.reason = "FAILED", first_line(r)
                 except OSError as exc:
                     row.verdict, row.reason = "FAILED", f"worktree remove failed ({exc!r})"
         rows.append(row)
-    if apply and removed:
-        try:
-            r = git(main, "worktree", "prune")
-            if r.returncode != 0:
-                notice(f"{main}: git worktree prune failed: {first_line(r)}")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            notice(f"{main}: git worktree prune failed ({exc!r})")
     return rows, main
 
 
 def leftovers(mains: list[Path], registered: set[tuple[str, ...]], cfg: Config, apply: bool) -> list[Row]:
-    """Empty `<repo>_*` directories next to a scanned repo that no scanned repo has registered."""
+    """Empty `<repo>_wt_*` directories next to a scanned repo that no scanned repo has registered."""
     rows: list[Row] = []
     seen: set[tuple[str, ...]] = set(registered) | {key(p) for p in cfg.shared}
     for main in mains:
@@ -373,7 +419,7 @@ def leftovers(mains: list[Path], registered: set[tuple[str, ...]], cfg: Config, 
             continue
         for entry in entries:
             k = key(entry)
-            if k in seen or not entry.name.lower().startswith(main.name.lower() + "_"):
+            if k in seen or not entry.name.lower().startswith(main.name.lower() + "_wt_"):
                 continue
             seen.add(k)
             junction = getattr(entry, "is_junction", lambda: False)()  # Path.is_junction is 3.12+; CI runs 3.11
@@ -395,30 +441,49 @@ def leftovers(mains: list[Path], registered: set[tuple[str, ...]], cfg: Config, 
     return rows
 
 
-def run(repos: list[Path], idle_hours: float, apply: bool, prs: PrLookup) -> tuple[list[Row], int]:
+def common_dir(repo: Path) -> tuple[str, ...] | None:
+    """The repository's shared git dir, so two paths into one repository are scanned once."""
+    try:
+        r = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return key(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+
+
+def run(repos: list[Path], idle_hours: float, apply: bool, prs: PrLookup) -> tuple[list[Row], int, int]:
+    """(rows, repos scanned, repos skipped)."""
     cfg = load_config()
     if not repos:
         repos = [Path(p) for p in cfg.shared]
     rows: list[Row] = []
     mains: list[Path] = []
     done: set[tuple[str, ...]] = set()
+    skipped = 0
     for repo in repos:
+        common = common_dir(repo)
+        if common is not None and common in done:
+            continue
         try:
             result = scan_repo(repo, cfg, idle_hours, apply, prs)
         except Exception as exc:  # one repo's failure never aborts the others
             notice(f"{repo}: scan failed ({exc!r}) - skipped")
+            skipped += 1
             continue
         if result is None:
+            skipped += 1
             continue
+        if common is not None:
+            done.add(common)
         repo_rows, main = result
-        if key(main) in done:
-            continue
-        done.add(key(main))
         mains.append(main)
         rows.extend(repo_rows)
     registered = {key(r.path) for r in rows}
+    for main in mains:  # re-listed: a `git worktree add` since the scan started owns its (still empty) directory
+        listed = list_worktrees(main)
+        if not isinstance(listed, str):
+            registered |= {key(w.path) for w in listed}
     rows.extend(leftovers(mains, registered, cfg, apply))
-    return rows, len(mains)
+    return rows, len(mains), skipped
 
 
 def summary(rows: list[Row], repos: int, apply: bool) -> dict[str, int | bool]:
@@ -451,19 +516,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None, prs: PrLookup | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    rows, repos = run(args.repos, args.idle_hours, args.apply, prs or GhLookup())
-    totals = summary(rows, repos, args.apply)
+    rows, repos, skipped = run(args.repos, args.idle_hours, args.apply, prs or GhLookup())
+    totals = summary(rows, repos, args.apply) | {"skipped": skipped}
+    code = 1 if skipped or totals["failed"] else 0
     if args.json:
         print(json.dumps({"rows": [asdict(r) for r in rows], "summary": totals}, indent=2))
-        return 0
+        return code
     for r in rows:
         print(f"{r.verdict:<9}  {r.path}  {r.branch}  {r.reason}")
     tail = "" if args.apply else " (dry run - pass --apply to remove)"
     print(
         f"{totals['repos']} repos, {len(rows)} entries: {totals['removable']} removable, {totals['removed']} removed, "
-        f"{totals['failed']} failed, {totals['kept']} kept, {totals['leftover']} empty leftover dirs{tail}"
+        f"{totals['failed']} failed, {totals['kept']} kept, {totals['leftover']} empty leftover dirs, "
+        f"{skipped} repos skipped{tail}"
     )
-    return 0
+    return code
 
 
 if __name__ == "__main__":
