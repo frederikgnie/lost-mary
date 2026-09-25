@@ -71,6 +71,9 @@ it branches from the repository's default branch unless `worktree.baseRef` is
 implementers one at a time in the shared checkout.
 
 Add an agent only to remove a risk you can name. Reassess after each result.
+`explore`, `review` and `implement` run as background subagents that end when
+they report - the spawn hook drops a `name`, which would make them teammates
+that stay running. Follow up with SendMessage to the agent id if needed.
 
 **Model per spawn.** Spend the strong model where errors compound and the cheap
 one where they are caught. `explore` (investigation and the `PLAN`) and `review`

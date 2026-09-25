@@ -1357,6 +1357,83 @@ expect_true("a far-future last_seen is dropped, not trusted -> fable", out is No
 failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
 rc, out, _ = spawn_out(REVIEW)
 expect_true("a non-numeric last_seen is dropped and the scan still arms the fallback", out is not None, str(out))
+# Review 2026-09-25: the realistic false signal - a tool result quoting the compact marker as a JSON string value
+# carries escaped quotes, so the byte marker cannot match it.
+reset_fable_state()
+quoted = {
+    "type": "user",
+    "timestamp": iso(60),
+    "message": {"content": [{"type": "tool_result", "content": credit_429(iso(60))}]},
+}
+failed.write_text(json.dumps(quoted, separators=(",", ":")) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a tool result quoting a compact failure record (escaped quotes) is not a failure", out is None, str(out))
+# A file last changed before the window is never read, even if it holds a fresh-looking record.
+reset_fable_state()
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+old = time.time() - 7 * 3600
+os.utime(failed, (old, old))
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a transcript untouched for longer than the window is skipped", out is None, str(out))
+# The time budget: a scan cut short keeps what it read and finishes on a later spawn.
+reset_fable_state()
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW, {**SPAWN_ENV, "LOST_MARY_SCAN_SECONDS": "-1"})
+expect_true("a spent budget reads nothing -> the spawn is left alone", out is None, str(out))
+rc, out, _ = spawn_out(REVIEW)
+expect_true("... and the next spawn, with budget, finds the failure", out is not None, str(out))
+# CLAUDE_CODE_SUBAGENT_MODEL: a role without a model line inherits it.
+reset_fable_state()
+(CS_HOME / ".claude" / "agents" / "plain.md").write_text("---\nname: plain\n---\nNo model.\n", encoding="utf-8")
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+plain = {**spawn("plain", "x"), "cwd": str(CS)}
+rc, out, _ = spawn_out(plain, {**SPAWN_ENV, "CLAUDE_CODE_SUBAGENT_MODEL": "fable"})
+expect_true("a role without a model line inherits CLAUDE_CODE_SUBAGENT_MODEL=fable -> opus", out is not None, str(out))
+rc, out, _ = spawn_out(plain)
+expect_true("... and without that variable it is left alone (the lead's model is unknown)", out is None, str(out))
+# No lingering teammates (2026-09-25): a named explore/review/implement spawn stays listed as running after its
+# report; the name (and team_name) is dropped so it runs as a background subagent that ends.
+reset_fable_state()
+named = review_event(name="review-x", team_name="t")
+rc, out, _ = spawn_out(named)
+hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+hso = {str(k): v for k, v in hso_raw.items()} if isinstance(hso_raw, dict) else {}
+upd_raw = hso.get("updatedInput")
+upd = {str(k): v for k, v in upd_raw.items()} if isinstance(upd_raw, dict) else {}
+expect_true(
+    "a named review spawn loses name and team_name, keeps everything else, and is told why",
+    rc == ALLOW
+    and "name" not in upd
+    and "team_name" not in upd
+    and upd.get("prompt") == "Review this diff."
+    and "model" not in upd
+    and "stays running" in str(hso.get("additionalContext")),
+    str(out),
+)
+other = {
+    **spawn("researcher", "x"),
+    "cwd": str(CS),
+    "tool_input": {"subagent_type": "researcher", "prompt": "x", "name": "r1"},
+}
+rc, out, _ = spawn_out(other)
+expect_true("a role outside the library keeps its name", out is None, str(out))
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(named)
+hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+upd_raw = hso_raw.get("updatedInput") if isinstance(hso_raw, dict) else None
+expect_true(
+    "both rewrites in one spawn: name dropped and model moved to opus",
+    isinstance(upd_raw, dict) and "name" not in upd_raw and upd_raw.get("model") == "opus",
+    str(out),
+)
+named_impl = {
+    **spawn("implement", FULL),
+    "cwd": str(CS),
+    "tool_input": {"subagent_type": "implement", "prompt": FULL, "name": "impl-1"},
+}
+rc, out, err = spawn_out(named_impl)
+expect_true("a named implement with its contract loses the name", rc == ALLOW and out is not None, f"{out} {err}")
+reset_fable_state()
 # A broken state file fails open to a fresh scan.
 reset_fable_state()
 (CS_STATE / "fable-out.json").write_text("not json", encoding="utf-8")

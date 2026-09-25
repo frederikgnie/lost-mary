@@ -21,6 +21,7 @@ usage credits, `check-spawn` runs every fable spawn (`explore`, `review`, an
 explicit `model: fable`) on `opus` - the newest Opus - for the next 6 hours, then
 lets one spawn try Fable again while the rest stay on Opus. The spawns already
 running when the limit first hits fail: spawn them again unchanged.
-`LOST_MARY_FABLE=off` forces Opus, `=on` disables the switch. A fable lead at the cap raises a usage-credits consent
-prompt that Remote Control cannot display, so the session just stops answering
-until `/model opus` (works from the phone).
+`LOST_MARY_FABLE=off` forces Opus, `=on` disables the switch. A fable LEAD at
+the cap raises a usage-credits consent prompt that Remote Control cannot
+display, so the session just stops answering until `/model opus` (works from
+the phone).

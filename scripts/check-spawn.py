@@ -21,6 +21,12 @@ Runtime dependencies (see capabilities.md): PreToolUse stdin fields `tool_name`,
 parameters). The set of governed roles and their required fields is the table
 below; keep it in step with the spawn block in skills/lost-mary/SKILL.md.
 
+No lingering teammates
+----------------------
+An `explore`, `review` or `implement` spawn given a `name` has it dropped
+(with `team_name`): a named spawn is a teammate that stays listed as running
+after its report, and hands the report back truncated. See unnamed().
+
 Fable fallback
 --------------
 `explore` and `review` run on fable. When the Fable allowance or the monthly
@@ -48,7 +54,16 @@ chunks). State lives in `<agent-library>/state/fable-out.json`, replaced
 atomically; a malformed or future-dated field is dropped.
 `LOST_MARY_FABLE=off` forces the fallback, `=on` disables it.
 `LOST_MARY_PROJECTS_DIR` / `LOST_MARY_STATE_DIR` relocate the two roots (tests).
-On any error the spawn goes unchanged.
+`LOST_MARY_SCAN_SECONDS` overrides the budget (tests). On any error the spawn
+goes unchanged.
+
+Not moved (known gaps): a plugin role (`plugin:role`, whose file is not read),
+a role without a `model:` line that inherits a fable LEAD (the payload does not
+name the lead's model; `CLAUDE_CODE_SUBAGENT_MODEL` is honoured), and a project
+agent file under a directory other than the payload's `cwd`. A 429 on another
+model that also bills usage credits would arm it too - harmless, since that
+model would be out as well. "Only Fable bills to usage credits" is observed,
+not documented.
 """
 
 from __future__ import annotations
@@ -69,6 +84,8 @@ REQUIRED: dict[str, tuple[str, ...]] = {
 # `OWNED:` at the start of a line, optionally bolded or bulleted, case-insensitive.
 FIELD_LINE = r"(?im)^[\s*#>-]*{field}\s*:"
 
+LIBRARY_ROLES = frozenset({"explore", "review", "implement"})  # spawned and forgotten: never teammates
+TEAM_KEYS = ("name", "team_name")
 FALLBACK_MODEL = "opus"  # the family alias: the newest permitted Opus (sub-agents docs)
 FABLE_MARKER = b'"apiError":"model_requires_usage_credits"'
 FABLE_RETRY_HOURS = 6.0
@@ -187,6 +204,10 @@ def scan(projects: Path, state: dict[str, Any], now: float) -> None:
     live = {str(p) for _, _, p in candidates}
     for name in [k for k in offsets if k not in live]:
         del offsets[name]  # older than the window: never needed again
+    try:
+        scan_seconds = float(os.environ.get("LOST_MARY_SCAN_SECONDS") or SCAN_SECONDS)
+    except ValueError:
+        scan_seconds = SCAN_SECONDS
     started = time.monotonic()
     for _, size, path in candidates:
         name = str(path)
@@ -199,7 +220,7 @@ def scan(projects: Path, state: dict[str, Any], now: float) -> None:
             with path.open("rb") as handle:
                 handle.seek(max(0, done - OVERLAP))
                 while done < size:
-                    if time.monotonic() - started > SCAN_SECONDS:
+                    if time.monotonic() - started > scan_seconds:
                         return
                     chunk = handle.read(min(CHUNK, size - handle.tell()))
                     if not chunk:
@@ -249,8 +270,8 @@ def fable_out(now: float) -> bool:
     return out
 
 
-def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> dict[str, Any] | None:
-    """The PreToolUse output that moves a fable spawn to opus while Fable is out; None to leave it alone."""
+def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> str | None:
+    """The additionalContext line when this fable spawn must move to opus because Fable is out; else None."""
     requested = tool_input.get("model")
     if requested:
         if not is_fable(requested):
@@ -258,19 +279,65 @@ def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> dict[str, A
     else:
         role = tool_input.get("subagent_type")
         cwd = payload.get("cwd")
-        if not isinstance(role, str) or not is_fable(agent_model(role, cwd if isinstance(cwd, str) else ".")):
+        if not isinstance(role, str):
+            return None
+        model = agent_model(role, cwd if isinstance(cwd, str) else ".")
+        if model in (None, "inherit"):  # no model line: CLAUDE_CODE_SUBAGENT_MODEL, else the lead's (unknown here)
+            model = os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
+        if not is_fable(model):
             return None
     if not fable_out(time.time()):
+        return None
+    return (
+        f"Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h), so this spawn runs on "
+        f"{FALLBACK_MODEL} (the newest Opus) instead of fable; it moves back on its own."
+    )
+
+
+def unnamed(tool_input: dict[str, Any]) -> str | None:
+    """The additionalContext line when a library role was spawned with a `name`, which is dropped; else None.
+
+    A named spawn becomes an agent-team teammate: it stays listed as running after its report (four reviewers
+    sat there for up to 3 h on 2026-09-25, one on an exhausted model that could not even take a shutdown), and
+    its report reaches the lead as an idle notification truncated at about 3 KB. Unnamed, the role runs as a
+    background subagent that ends when it reports, hands back its whole report, and can still be resumed
+    with SendMessage to its agent id.
+    """
+    role = tool_input.get("subagent_type")
+    if not (isinstance(role, str) and role.strip().lower() in LIBRARY_ROLES):
+        return None
+    if not any(tool_input.get(key) for key in TEAM_KEYS):
+        return None
+    return (
+        f"the `name` was dropped: a named `{role}` becomes a teammate that stays running after its report. "
+        "It runs as a background subagent instead; resume it with SendMessage to the agent id in the result."
+    )
+
+
+def rewrite(payload: dict[str, Any], tool_input: dict[str, Any]) -> dict[str, Any] | None:
+    """The PreToolUse output with the rewritten spawn, or None when nothing changes. Never raises."""
+    updated = dict(tool_input)
+    notes: list[str] = []
+    try:
+        if note := unnamed(tool_input):
+            for key in TEAM_KEYS:
+                updated.pop(key, None)
+            notes.append(note)
+    except Exception as exc:  # a convenience: never let it cost the spawn
+        notice(f"name check skipped ({exc!r})")
+    try:
+        if note := fallback(payload, tool_input):
+            updated["model"] = FALLBACK_MODEL
+            notes.append(note)
+    except Exception as exc:
+        notice(f"fable fallback skipped ({exc!r})")
+    if not notes:
         return None
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "updatedInput": {**tool_input, "model": FALLBACK_MODEL},
-            "additionalContext": (
-                f"check-spawn: Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h), so this "
-                f"spawn runs on {FALLBACK_MODEL} (the newest Opus) instead of fable. It moves back to fable "
-                "on its own once no failure has been seen for that long."
-            ),
+            "updatedInput": updated,
+            "additionalContext": "check-spawn: " + " Also, ".join(notes),
         }
     }
 
@@ -290,11 +357,7 @@ def main() -> int:
     prompt = tool_input.get("prompt")
     missing = missing_fields(role, prompt) if isinstance(role, str) and isinstance(prompt, str) else []
     if not missing:
-        try:
-            output = fallback(payload, tool_input)
-        except Exception as exc:  # the fallback is a convenience: never let it cost the spawn
-            notice(f"fable fallback skipped ({exc!r})")
-            output = None
+        output = rewrite(payload, tool_input)
         if output is not None:
             print(json.dumps(output))
         return 0
