@@ -136,9 +136,8 @@ PUNT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 STEP = (
     r"(?:steps?|commands?|clicks?|keystrokes?|decisions?|choices?|calls?|rulings?|runs?|merges?|deploys?"
     r"|retags?|rebuilds?|restarts?|switch(?:es)?|pulls?|pushes|consent|sign-?ins?|logins?|actions?|items?"
-    r"|things?|rest|remainder|bumps?|grants?|fix(?:es)?|tasks?|jobs?|moves?|others?|one|two|three|four|five"
-    r"|both|last|final)"
-)
+    r"|things?|remainder|bumps?|grants?|fix(?:es)?|tasks?|jobs?|moves?)"
+)  # no bare numbers, "others" or "rest": "two commits are mine; the other three are yours" is authorship
 USER_VERB = (
     r"(?:do|run|type|click|open|register|execute|invoke|switch|fill|approve|merge|deploy|pull|push|restart"
     r"|start|stop|kill|log\s+in|sign\s+in|authori[sz]e|grant|accept|confirm|paste|add|edit|set|change|rebuild"
@@ -156,8 +155,10 @@ ASSIGNED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"(?:yours|with\s+you|on\s+your\s+(?:side|end|plate))\b",
         r"\bonly\s+(?:you|the\s+user)\s+can\s+(?:\w+\s+){0,2}?" + ONLY_YOU_VERB + r"\b",
         r"\byours\s+(?:because|to\s+" + USER_VERB + r"\b)",
-        r"\byou(?:'ll|\s+will|\s+would|\s+need\s+to|\s+have\s+to|\s+must|\s+should)\s+"
-        r"(?:need\s+to\s+|have\s+to\s+)?" + USER_VERB + r"\b",
+        r"\byou(?:'ll|'d|\s+will|\s+would|\s+need\s+to|\s+have\s+to|\s+must|\s+should|\s+can\s+now)\s+"
+        r"(?:need\s+to\s+|have\s+to\s+|want\s+to\s+)?" + USER_VERB + r"\b",
+        r"\bonly\s+(?:you|the\s+user)\s+can\s*[.!:;]",
+        r"\bplease\s+(?:run|type|click|execute|merge|approve|paste|restart|deploy|apply|open)\b",
         r"\brun\s+(?:this|that|these|those|it|them)\s+yourself\b(?!\s+(?:later|any\s*time|whenever|with|to\s+see|if)\b)",
         r"\b(?:items?|steps?|actions?|things?|open|pending|remaining|left|waiting)\b[^.\n]{0,30}"
         r"\bon\s+your\s+(?:side|end|plate)\b",
@@ -188,14 +189,19 @@ REFUSAL_MARKERS = (
 # What only the user holds: their identity, a credential, money, an irreversible action - or a value, when
 # the BLOCKED paragraph asks for it as a what/where/who question. Not here on purpose: decision, choice,
 # approval, review, merge, classifier, denied, permission - a decision is the lead's to take, and "the
-# classifier would deny it" is a claim until the transcript holds the denial.
+# classifier would deny it" is a claim until the transcript holds the denial. "production" backs a stop only
+# beside a write to it (a deploy, a retag, a restart, a migration): the bare word is how a classifier claim
+# ("gated as a production deploy" aside) gets reworded past the gate.
+PROD_WRITE = r"(?:deploy\w*|releas\w*|retag\w*|restart\w*|migrat\w*|writ\w*|push\w*|rebuild\w*|rollout\w*)"
 USER_HELD = re.compile(
     r"\b(?:credentials?|passwords?|passphrases?|secrets?|tokens?|api[ -]?keys?|ssh[ -]?keys?|log(?:ged)?[ -]?in"
     r"|login|sign(?:ed)?[ -]?in|sso|mfa|2fa|consent|elevat\w*|uac|administrator|admin\s+(?:rights|prompt|shell|console)"
     r"|run\s+as\s+admin\w*|interactive\s+(?:session|prompt|login|shell)|browser\s+(?:prompt|consent|login)|captcha"
     r"|money|spend\w*|budget|paid|payment|invoice|billing|irreversible|data\s+loss|delet\w+"
     r"|drop(?:s|ping)?\s+(?:the\s+)?(?:table|database|schema)|history\s+rewrite|rewrit\w+\s+history|force[- ]push\w*"
-    r"|production|prod|live\s+(?:site|system|roles?|trading|deploy\w*|data)|customer[- ]facing)\b",
+    r"|" + PROD_WRITE + r"\b[^.\n]{0,40}\b(?:production|prod|live)"
+    r"|(?:production|prod|live)\b[^.\n]{0,40}\b(?:" + PROD_WRITE[3:-1] + r"|roles?|sites?|databases?|db|trading)"
+    r"|customer[- ]facing)\b",
     re.IGNORECASE,
 )
 FACT_QUESTION = re.compile(r"\b(?:what|where|who|whose|how\s+(?:many|much))\b[^\n?]*\?", re.IGNORECASE)
@@ -254,6 +260,10 @@ REMAINING_LABEL = re.compile(
     r"(?!\s+(?:risks?|budget|balance|time|effort|cost|capacity|questions?|context|tokens|allowance|credit|debt)\b)"
     r"[^\n:]{0,20}:[ \t]*(.*)$"
 )
+USER_LABEL = re.compile(
+    r"(?im)^[ \t*#>_-]*(?:your\s+(?:steps?|part|side|turn|actions?|to-?dos?|move)|for\s+you|on\s+your\s+(?:side|end))"
+    r"[^\n:]{0,20}:[ \t]*(.*)$"
+)
 NOTHING = re.compile(r"^\W*(?:none|nothing|no\b|n/a|nil|empty|0\b|-\s*$)", re.IGNORECASE)
 
 QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
@@ -268,7 +278,9 @@ CLOSING_PARAGRAPHS = 3
 # waiting for your go-ahead", "will not wait for your call" are allowed; "the fix is not small so
 # I'll leave that for you" is still a hand-back.
 NEGATED = re.compile(
-    r"(?:\b(?:nothing|none|no|nobody|without|rather\s+than|instead\s+of)\s+(?:[\w'-]+\s+){0,3}"
+    r"(?:\b(?:nothing|none|no\s+one|nobody|without|rather\s+than|instead\s+of"
+    r"|no\s+(?:decisions?|steps?|actions?|items?|commands?|clicks?))\s+(?:[\w'-]+\s+){0,3}"
+    r"|\bno\s+"  # right before the match: "No decision is yours" - but "No time left so I'll leave ..." stays
     r"|\b(?:is|are|was|were|will|would|do|did|does|need)\s+not\s+(?:[\w'-]+\s+)?"
     r"|\b(?:isn't|aren't|wasn't|weren't|won't|don't|didn't|doesn't|needn't)\s+(?:[\w'-]+\s+)?)$",
     re.IGNORECASE,
@@ -576,11 +588,18 @@ def turn_so_far(transcript: Path, prompt_id: str | None) -> Turn:
     return turn
 
 
+def refused_body(body: str, is_error: object) -> bool:
+    """A refusal as Claude Code writes it: an error result whose marker sits in its opening words.
+
+    Measured 2026-09-25 over every transcript on this machine: all 182 real refusals carry `is_error: true`
+    with the marker before character 80; the two hits past it were log output quoting a refusal.
+    """
+    return is_error is True and any(0 <= body.find(marker) < 80 for marker in REFUSAL_MARKERS)
+
+
 def refused_result(block: dict[str, Any]) -> bool:
-    """A tool_result whose body is a refusal - the marker sits at its start, as Claude Code writes it."""
     raw = block.get("content")
-    body = raw if isinstance(raw, str) else text_of(raw)
-    return any(marker in body[:300] for marker in REFUSAL_MARKERS)
+    return refused_body(raw if isinstance(raw, str) else text_of(raw), block.get("is_error"))
 
 
 def strip_quoted(text: str) -> str:
@@ -604,6 +623,19 @@ def first_match(patterns: tuple[re.Pattern[str], ...], clean: str, *context: re.
             if NEGATED.search(before) or any(c.search(before) for c in context):
                 continue
             return " ".join(match.group(0).split())
+    return None
+
+
+def user_label(clean: str) -> str | None:
+    """A closing 'Your steps:' / 'On your end:' label with something after it - a list of steps for the user."""
+    tail = closing(clean)
+    for match in USER_LABEL.finditer(tail):
+        rest = match.group(1).strip()
+        if not rest:
+            following = [ln.strip() for ln in tail[match.end() :].splitlines() if ln.strip()]
+            rest = following[0] if following else ""
+        if rest and not NOTHING.match(rest):
+            return " ".join(match.group(0).split())[:120]
     return None
 
 
@@ -646,6 +678,8 @@ def hand_back(text: str, assigned: str = "all") -> HandBack | None:
         return HandBack("parked", phrase)
     scope = {"all": clean, "closing": closing(clean)}.get(assigned)
     phrase = first_match(ASSIGNED_PATTERNS, scope, EXPLAINING) if scope is not None else None
+    if phrase is None and scope is not None:
+        phrase = user_label(clean)
     if phrase is not None:
         return HandBack("assigned", phrase)
     phrase = first_match(GO_AHEAD_PATTERNS, closing(clean))
@@ -700,15 +734,13 @@ def bounce_text(found: HandBack, subagent: bool, turn: Turn) -> str:
         return f"{PARKED_HEADER}\n{PARKED_BODY.format(phrase=found.phrase)}"
     if found.kind == "assigned":
         body = ASSIGNED_REFUSED_BODY if turn.refused else ASSIGNED_BODY
-        return f"{ASSIGNED_HEADER}\n{body.format(phrase=found.phrase)}"
-    if found.kind == "blocked":
+        lines = [ASSIGNED_HEADER, body.format(phrase=found.phrase)]
+    elif found.kind == "blocked":
         lines = [BLOCKED_HEADER, BLOCKED_BODY.format(phrase=found.phrase)]
-        if turn.task:
-            lines.append(f"The task for this turn: {turn.task}")
-        return "\n".join(lines)
-    body = {"remaining": REMAINING_BODY, "unclosed": UNCLOSED_BODY}.get(found.kind, GO_AHEAD_BODY)
-    lines = [OPEN_HEADER, body.format(phrase=found.phrase)]
-    if turn.lost_mary and found.kind != "unclosed":
+    else:
+        body = {"remaining": REMAINING_BODY, "unclosed": UNCLOSED_BODY}.get(found.kind, GO_AHEAD_BODY)
+        lines = [OPEN_HEADER, body.format(phrase=found.phrase)]
+    if turn.lost_mary and found.kind not in ("unclosed", "assigned", "blocked"):
         lines.append(LOST_MARY_CLOSE)
     if turn.done_means:
         lines.append(f"Done means, as you framed it: {turn.done_means}")
@@ -740,8 +772,8 @@ def main() -> int:
             notice(f"cannot read {transcript} ({exc})")
     subagent = isinstance(payload.get("agent_id"), str)
     if "BLOCKED" in states:
-        if blocked_backed(message, turn.refused):
-            return 0
+        if subagent or blocked_backed(message, turn.refused):
+            return 0  # a subagent's BLOCKED: is a report to the lead, who judges it; its own form is MISSING:
         found: HandBack | None = HandBack("blocked", " ".join(blocked_paragraph(message).split())[:160])
     else:
         scope = ("all" if turn.worked else "off") if turn.found else "closing"
