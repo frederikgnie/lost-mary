@@ -2821,6 +2821,100 @@ for shared_call, want, label in (
     rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
     expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
 
+# One scanner reads quotes, escapes, `$(...)`, comments and heredocs the way the shell does (fifth review).
+for label, shell_line, transcript, want, tool in (
+    (
+        "an escaped quote before `(#31)`, then a merge",
+        'gh pr create --title "Revert \\"fix (#31)\\"" --fill && gh pr merge 32 --squash',
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "escaped quotes around `#12`, then a merge",
+        'printf "{\\"title\\": \\"Fix #12\\"}" > b.json && gh pr merge 29',
+        t_none,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "nested quotes in a quoted substitution, then a merge",
+        'X="$(echo "a #b")"; gh pr merge 29 --squash',
+        t_none,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "a PowerShell backtick-quote before `#1`, then a merge",
+        'Write-Host "say `"hi #1`""; gh pr merge 29',
+        t_none,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("an escaped apostrophe, then a substituted merge", "echo It\\'s done $(gh pr merge 29)", t_none, BLOCK, "Bash"),
+    ("separators inside a substitution", "X=$(git log -1; git status); gh pr merge 29 --squash", t_rev, ALLOW, "Bash"),
+    ("a merge in single quotes", "echo '$(gh pr merge 29)'", t_none, ALLOW, "Bash"),
+    ("arithmetic, then a merge", "echo $((1+2)) && gh pr merge 29 --squash", t_rev, ALLOW, "Bash"),
+    ("a comment right after `(`", "( # note\ngh pr merge 29 --squash )", t_rev, ALLOW, "Bash"),
+    ("a merge in a process substitution", "cat <(gh pr merge 29 --squash)", t_rev, BLOCK, "Bash"),
+    ("a PowerShell `$out=gh pr merge`, reviewed", "$out=gh pr merge 29 --squash", t_rev, ALLOW, "PowerShell"),
+    ("... unreviewed", "$out=gh pr merge 29 --squash", t_none, BLOCK, "PowerShell"),
+    ("a PowerShell `$out=(gh pr merge)`, unreviewed", "$out=(gh pr merge 29 --squash)", t_none, BLOCK, "PowerShell"),
+    (
+        "a merge, then `$($LASTEXITCODE)` printed",
+        'gh pr merge 29 --squash; Write-Host "exit $($LASTEXITCODE)"',
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    ("a merge, then `$LASTEXITCODE`", "gh pr merge 29 --squash; $LASTEXITCODE", t_rev, ALLOW, "PowerShell"),
+    ("a merge, then `$(date)` echoed", 'gh pr merge 29 --squash && echo "done $(date)"', t_rev, ALLOW, "Bash"),
+    (
+        "a GraphQL enablePullRequestAutoMerge",
+        "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge(NO_NUMBER, t_none)
+expect_true("the unreviewed message says to name the PR", "name the PR" in err, err)
+
+# What a merge names: a substituted -R names nothing; GH_REPO and `-Ro/x` name the repository; a
+# `gh repo set-default` between two merges makes the same bare number two PRs.
+SUBST_REPO = 'gh pr merge 29 -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --squash'
+for label, earlier, between, now, want in (
+    ("a substituted -R, twice", SUBST_REPO, None, SUBST_REPO, BLOCK),
+    ("GH_REPO=o/x, then GH_REPO=o/y", "GH_REPO=o/x gh pr merge 29", None, "GH_REPO=o/y gh pr merge 29", BLOCK),
+    ("GH_REPO=o/x twice", "GH_REPO=o/x gh pr merge 29", None, "GH_REPO=o/x gh pr merge 29", ALLOW),
+    ("`-Ro/x`, then `-R o/x`", "gh pr merge 29 -Ro/x", None, "gh pr merge 29 -R o/x", ALLOW),
+    ("29, a `gh repo set-default`, then 29", MERGE, "gh repo set-default o/y", MERGE, BLOCK),
+):
+    records = [kg_prompt("ship it"), kg_review(), kg_bash(earlier, "t-earlier"), kg_result("t-earlier", "", False)]
+    if between is not None:
+        records += [kg_bash(between, "t-between"), kg_result("t-between", "", False)]
+    rc, err = guard_merge(now, kg_transcript("merge-names.jsonl", records))
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+
+# Shared checkouts: escapes no longer hide a checkout, and a bash `$(...)` keeps its `cd` inside.
+for label, shell_line in (
+    (
+        "a branch checkout after a commit subject with escaped quotes",
+        'git commit -m "Revert \\"x (#31)\\"" && git checkout -b feat',
+    ),
+    ("a switch after a substitution that changed directory", "X=$(cd /c/other && git rev-parse HEAD); git switch main"),
+    ("a switch after a quoted substitution that cd'd away", 'DIR="$(cd ~/x && pwd)"; git switch main'),
+    ("a switch after a heredoc inside a substitution", "MSG=$(cat <<'EOF'\nnote\nEOF\ngit switch main\n)"),
+):
+    rc, err = run_hook(GUARD, guard_event("Bash", command=shell_line), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit 2", rc, BLOCK, err)
+ps_event = guard_event("PowerShell", command="$null = $(Set-Location C:/repo/EU/OBF_experiments); git switch main")
+ps_event["cwd"] = GS_ELSE
+rc, err = run_hook(GUARD, ps_event, env=GS_ENV)
+expect("shared checkout: a PowerShell subexpression's Set-Location holds for what follows -> exit 2", rc, BLOCK, err)
+
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
 expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)
