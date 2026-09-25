@@ -1318,6 +1318,32 @@ GS_BLOCKED = [
     ("Set-Location C:\\repo\\EU\\OBF_ops; git switch main", GS_ELSE),
     ("git -C C:/repo/EU/deploy/.staging/OBF_ops fetch", GS_ELSE),  # a frozen subdir
     ("git -C c:/REPO/eu/obf_ops switch main", GS_ELSE),  # case-insensitive
+    # review of 51c5334
+    ("cd OBF_ops\ngit switch y", "C:/repo/EU"),  # a newline still separates commands
+    ("gh pr checkout 123", GS_SHARED),  # runs fetch + checkout in the cwd
+    ("gh.exe pr checkout 123 --force", GS_SHARED),
+    ("( cd /c/repo/EU/OBF_ops && git switch x )", GS_ELSE),
+    ("(cd /c/repo/EU/OBF_ops && git switch x)", GS_ELSE),
+    ("command git switch x", GS_SHARED),
+    ("if git switch x; then echo ok; fi", GS_SHARED),
+    ("time git switch x", GS_SHARED),
+    ("{ git switch x; }", GS_SHARED),
+    ("git \\\nswitch x", GS_SHARED),  # backslash-newline continuation
+    ("git checkout main --", GS_SHARED),  # a bare trailing -- is still a branch checkout
+    ("git pull --rebase", GS_SHARED),
+    ("git pull --autostash origin main", GS_SHARED),
+    ("git pull -r", GS_SHARED),
+    ("git checkout src/a.py", GS_SHARED),  # a restore without -- is indistinguishable from a ref
+    ("Set-Location C:\\repo\\EU\\OBF_ops -ErrorAction Stop; git switch x", GS_ELSE),
+    ("& git switch x", GS_SHARED),  # PowerShell call operator
+    ("git.exe switch x", GS_SHARED),
+    ("FOO=1 git switch x", GS_SHARED),
+    ("Push-Location C:/repo/EU/OBF_ops; git switch x", GS_ELSE),
+    ("sl C:/repo/EU/OBF_ops; git switch x", GS_ELSE),
+    ("pushd /c/repo/EU/OBF_ops && git switch x", GS_ELSE),
+    ("cd -LiteralPath C:\\repo\\EU\\OBF_ops; git switch x", GS_ELSE),
+    ("cd ../OBF_ops && git switch x", "C:/repo/EU/gsd"),
+    ("git -c core.x=1 switch y", GS_SHARED),
 ]
 for cmd, cwd in GS_BLOCKED:
     reason = guard.check_command(cmd, cwd, GS_CFG)
@@ -1344,6 +1370,16 @@ GS_ALLOWED = [
     ("cd - && git switch x", GS_SHARED),  # tracked dir unknown -> matches nothing
     ("cd && git switch x", GS_SHARED),
     ("git switch x", ""),  # no cwd in the event
+    # review of 51c5334
+    ("cat <<'EOF' > NOTES.md\ngit switch main\nEOF", GS_SHARED),  # a heredoc body is not a command
+    ("cat <<-EOF > NOTES.md\n\tgit stash\n\tEOF\ngit status", GS_SHARED),
+    ("git commit -m \"$(cat <<'EOF'\nfix: don't git switch main here\n\ngit stash too\nEOF\n)\"", GS_SHARED),
+    ('git commit -m "first line\ngit switch main; git stash"', GS_SHARED),  # a quoted multi-line message
+    ("gh pr checkout 123", "C:\\repo\\EU\\OBF_experiments_wt_x"),  # own worktree
+    ("gh pr view 123", GS_SHARED),
+    ("git checkout \\\n-- file.txt", GS_SHARED),  # continuation into a restore
+    ("git pull --no-rebase", GS_SHARED),
+    ("git -C C:/repo/EU/OBF_experiments_wt_x switch y", GS_SHARED),
 ]
 for cmd, cwd in GS_ALLOWED:
     reason = guard.check_command(cmd, cwd, GS_CFG)
@@ -1386,6 +1422,30 @@ for bad, why in (
     expect_true(f"config rejected: {why}", isinstance(guard.parse_config(bad), str))
 expect_true("unknown keys are ignored", not isinstance(guard.parse_config({"_comment": "x", "shared": []}), str))
 
+reason = guard.check_command("git checkout src/a.py", GS_SHARED, GS_CFG)
+expect_true(
+    "checkout <path> without -- -> the message points at `git checkout -- <path>`",
+    reason is not None and "git checkout -- <path>" in reason,
+    str(reason),
+)
+slash_cfg = guard.parse_config({"shared": ["C:/repo/EU/OBF_ops/"]})
+expect_true(
+    "a config entry with a trailing slash matches the dir",
+    not isinstance(slash_cfg, str) and guard.check_command("git switch x", "C:/repo/EU/OBF_ops", slash_cfg) is not None,
+    str(slash_cfg),
+)
+posix_cfg = guard.parse_config({"shared": ["/home/u/repo"]})
+expect_true("a POSIX absolute config entry is accepted", not isinstance(posix_cfg, str), str(posix_cfg))
+if not isinstance(posix_cfg, str):
+    expect_true(
+        "POSIX: git switch in /home/u/repo -> blocked",
+        guard.check_command("git switch x", "/home/u/repo", posix_cfg) is not None,
+    )
+    expect_true(
+        "POSIX: git switch in the sibling /home/u/repo_wt_x -> allowed",
+        guard.check_command("git switch x", "/home/u/repo_wt_x", posix_cfg) is None,
+    )
+
 
 def guard_event(tool: str, **tool_input: str) -> dict[str, object]:
     return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "cwd": GS_SHARED}
@@ -1412,6 +1472,24 @@ expect("hook: BOM-prefixed payload still blocks (exit 2)", rc, BLOCK, err)
 proc = subprocess.run([sys.executable, str(GUARD)], input=b"not json", capture_output=True, env=GS_ENV)
 expect("hook: garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode())
 expect_true("... with a notice", "guard-shared-checkouts:" in proc.stderr.decode(), proc.stderr.decode())
+GS_CRASH = (
+    "import runpy, sys\n"
+    "class Boom:\n"
+    "    def read(self, *a):\n"
+    "        raise RuntimeError('boom')\n"
+    "class Stdin:\n"
+    "    buffer = Boom()\n"
+    "sys.stdin = Stdin()\n"
+    f"runpy.run_path({str(GUARD)!r}, run_name='__main__')\n"
+)
+proc = subprocess.run([sys.executable, "-c", GS_CRASH], capture_output=True, env=GS_ENV)
+crash_err = proc.stderr.decode("utf-8", "replace")
+expect("hook: an unexpected exception -> exit 0 (fail open)", proc.returncode, ALLOW, crash_err)
+expect_true(
+    "... with one notice line, no traceback",
+    "unexpected error" in crash_err and "Traceback" not in crash_err and len(crash_err.strip().splitlines()) == 1,
+    crash_err,
+)
 
 no_config = {**GS_ENV, "LOST_MARY_SHARED_CHECKOUTS": str(GS / "missing.json")}
 rc, err = run_hook(GUARD, guard_event("Bash", command="git checkout -b x"), env=no_config)

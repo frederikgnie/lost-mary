@@ -21,7 +21,8 @@ shared-checkouts.example.json in the library repository):
   shared  - checkouts several sessions use at once. Blocked there: `switch`,
             a branch-changing `checkout` (file restores are fine), `stash`
             other than list/show, `reset --hard|--merge|--keep`, `rebase`,
-            `clean` with a force flag. Work on a branch in your own worktree.
+            `pull --rebase|--autostash`, `clean` with a force flag, and
+            `gh pr checkout`. Work on a branch in your own worktree.
   frozen  - trees only a deploy script may change. Blocked: every git command
             aimed there and every Edit/Write/MultiEdit/NotebookEdit inside.
             Running the deploy script is fine - only `git` invocations are
@@ -32,7 +33,13 @@ A target matches a configured dir when it is that dir or lies inside it by
 path components (`X_wt_y` is not inside `X`). The working dir is tracked
 through the command from the event's `cwd` across cd / pushd / Set-Location /
 sl / Push-Location and `git -C`, relative paths included; anything it cannot
-resolve matches nothing.
+resolve matches nothing. Commands split on ; | && || and newlines outside
+quotes; heredoc bodies are skipped, backslash-newline continuations joined.
+
+Still passes by design (known gaps, not a sandbox): `git reset <commit>`
+(mixed/soft), `commit --amend`, `merge`, `branch -f/-D`, git aliases, inner
+commands of eval / $(...) / bash -c, `--git-dir` / `--work-tree` / `GIT_DIR=`,
+symlinks and junctions, and a worktree nested inside a shared checkout.
 
 Wiring: PreToolUse, matcher "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit".
 Exit 2 blocks the call and returns stderr to the model; exit 0 allows. Fails
@@ -61,6 +68,11 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CD_COMMANDS = ("cd", "chdir", "pushd", "set-location", "sl", "push-location")
 POP_COMMANDS = ("popd", "pop-location")
 BRANCH_FLAGS = ("-b", "-B", "--orphan", "--detach")
+# Words that may precede the real command in a simple command; skipped before the cd/git dispatch.
+PREFIX_WORDS = ("&", "!", "command", "time", "exec", "nohup", "env")
+PREFIX_WORDS += ("then", "do", "if", "elif", "else", "while", "until")
+VALUE_FLAGS = ("-erroraction", "-warningaction", "-informationaction")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 
 
 class Dir(NamedTuple):
@@ -96,8 +108,8 @@ def norm(path: str, base: PureWindowsPath | None = None) -> PureWindowsPath | No
     if m := re.match(r"^/([a-zA-Z])(/.*)?$", p):
         p = f"{m[1]}:{m[2] or '/'}"
     candidate = PureWindowsPath(p)
-    if not candidate.drive:
-        if candidate.root or base is None:
+    if not candidate.drive and not candidate.root:  # relative; a POSIX absolute path keeps its root
+        if base is None:
             return None
         candidate = base / candidate
     parts: list[str] = []
@@ -166,16 +178,109 @@ def load_config() -> Config | None:
     return parsed
 
 
+def split_commands(command: str) -> list[str]:
+    """Split a shell command on ; | && || and newlines outside quotes, skipping heredoc bodies.
+
+    Backslash-newline continuations are joined first. A heredoc opener (`<<EOF`, `<<-'EOF'`) is
+    recognised outside single quotes - inside double quotes too, for `"$(cat <<'EOF' ... EOF)"` -
+    and its body, up to the terminator line, is dropped unread.
+    """
+    text = re.sub(r"\\\r?\n", " ", command)
+    pieces: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    pending: list[str] = []
+    i, n = 0, len(text)
+
+    def flush() -> None:
+        piece = "".join(buf).strip()
+        if piece:
+            pieces.append(piece)
+        buf.clear()
+
+    while i < n:
+        ch = text[i]
+        if quote != "'" and text.startswith("<<<", i):
+            buf.append("<<<")
+            i += 3
+            continue
+        if quote != "'" and text.startswith("<<", i) and (m := HEREDOC.match(text, i)):
+            pending.append(m[2])
+            buf.append(m[0])
+            i = m.end()
+            continue
+        if ch == "\n" and pending:
+            if quote is None:
+                flush()
+            i += 1
+            for term in pending:
+                while i < n:
+                    end = text.find("\n", i)
+                    line = text[i:] if end == -1 else text[i:end]
+                    i = n if end == -1 else end + 1
+                    if line.strip() == term:
+                        break
+            pending = []
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            buf.append(ch)
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+        elif text.startswith(("&&", "||"), i):
+            flush()
+            i += 2
+        elif ch in ";|\n":
+            flush()
+            i += 1
+        else:
+            buf.append(ch)
+            i += 1
+    flush()
+    return pieces
+
+
+def strip_wrappers(tokens: list[str]) -> list[str]:
+    """Drop what may precede the real command - `(`, `{`, `command`, `if`, `VAR=1` ... - and trailing `)` / `}`."""
+    out = list(tokens)
+    opened = False
+    while out:
+        first = out[0]
+        if first.startswith(("(", "{")):
+            opened = True
+            rest = first.lstrip("({")
+            if rest:
+                out[0] = rest
+            else:
+                out.pop(0)
+        elif first in PREFIX_WORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
+            out.pop(0)
+        else:
+            break
+    while out and out[-1] in (")", "}", "))"):
+        out.pop()
+    if opened and out and out[-1].endswith(")"):
+        out[-1] = out[-1].rstrip(")")
+        if not out[-1]:
+            out.pop()
+    return out
+
+
 def segments(command: str) -> list[list[str]]:
-    """Split a shell command into simple-command token lists on ; && || | and newlines."""
+    """Split a shell command into simple-command token lists, wrappers stripped."""
     out: list[list[str]] = []
-    # Backslashes are Windows path separators here, not escapes; posix shlex would eat them.
-    command = command.replace("\\", "/")
-    for chunk in re.split(r"&&|\|\||[;|\n]", command):
+    for chunk in split_commands(command):
+        # Backslashes are Windows path separators here, not escapes; posix shlex would eat them.
+        chunk = chunk.replace("\\", "/")
         try:
             tokens = shlex.split(chunk, posix=True)
         except ValueError:
             tokens = chunk.split()
+        tokens = strip_wrappers(tokens)
         if tokens:
             out.append(tokens)
     return out
@@ -183,21 +288,38 @@ def segments(command: str) -> list[list[str]]:
 
 def cd_target(args: list[str], current: PureWindowsPath | None) -> PureWindowsPath | None:
     """Where cd / Set-Location / pushd with `args` leaves the tracked dir; None when unknown."""
-    operands = [a for a in args if a == "-" or not a.startswith("-")]
+    operands: list[str] = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif a.lower() in VALUE_FLAGS:
+            skip = True
+        elif a == "-" or not a.startswith("-"):
+            operands.append(a)
     if len(operands) != 1:
         return None
     return norm(operands[0], current)
 
 
-def git_call(tokens: list[str], current: PureWindowsPath | None) -> tuple[PureWindowsPath | None, list[str]] | None:
-    """(target dir, subcommand args) when `tokens` runs git, else None."""
-    i = 0
-    while i < len(tokens) and (tokens[i] == "&" or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i])):
-        i += 1
-    if i >= len(tokens) or PureWindowsPath(tokens[i]).name.lower() not in ("git", "git.exe"):
+class Call(NamedTuple):
+    target: PureWindowsPath | None
+    label: str
+    changes_shared: bool
+    hint: str
+
+
+def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None:
+    """What a git or `gh pr checkout` invocation does, or None when `tokens` is neither."""
+    name = PureWindowsPath(tokens[0]).name.lower()
+    if name in ("gh", "gh.exe"):
+        if tokens[1:3] != ["pr", "checkout"]:
+            return None
+        return Call(current, " ".join(["gh", *tokens[1:]]), True, "")
+    if name not in ("git", "git.exe"):
         return None
     target = current
-    args = tokens[i + 1 :]
+    args = tokens[1:]
     while args and args[0].startswith("-"):
         opt = args[0]
         if opt == "-C" and len(args) >= 2:
@@ -207,7 +329,8 @@ def git_call(tokens: list[str], current: PureWindowsPath | None) -> tuple[PureWi
             args = args[2:]
         else:
             args = args[1:]
-    return target, args
+    hint = " For a file restore use `git checkout -- <path>`." if args[:1] == ["checkout"] else ""
+    return Call(target, " ".join(["git", *args]), changes_shared_state(args), hint)
 
 
 def changes_shared_state(args: list[str]) -> bool:
@@ -218,9 +341,16 @@ def changes_shared_state(args: list[str]) -> bool:
     if sub in ("switch", "rebase"):
         return True
     if sub == "checkout":
-        if "--" in rest or rest == ["."]:
+        if "--" in rest:
+            cut = rest.index("--")
+            if cut < len(rest) - 1:
+                return False  # checkout [<ref>] -- <path>: a restore
+            rest = rest[:cut]  # a bare trailing `--` still checks out the ref
+        if rest == ["."]:
             return False
         return any(not a.startswith("-") for a in rest) or any(a in BRANCH_FLAGS for a in rest)
+    if sub == "pull":
+        return any(a in ("-r", "--autostash") or (a.startswith("--rebase") and a != "--rebase=false") for a in rest)
     if sub == "stash":
         return not rest or rest[0] not in ("list", "show")
     if sub == "reset":
@@ -248,18 +378,18 @@ def check_command(command: str, cwd: str, config: Config) -> str | None:
         if head in POP_COMMANDS:
             current = None
             continue
-        call = git_call(tokens, current)
+        call = repo_call(tokens, current)
         if call is None:
             continue
-        target, args = call
-        if where := match(target, config.frozen):
-            return frozen_reason(f"`git {' '.join(args)}` in {target}", where, config)
-        if (where := match(target, config.shared)) and changes_shared_state(args):
+        if where := match(call.target, config.frozen):
+            return frozen_reason(f"`{call.label}` in {call.target}", where, config)
+        if (where := match(call.target, config.shared)) and call.changes_shared:
             base = where.shown.rstrip("/\\")
             return (
-                f"guard-shared-checkouts: blocked `git {' '.join(args)}` in {target} - {where.shown} is a checkout "
+                f"guard-shared-checkouts: blocked `{call.label}` in {call.target} - {where.shown} is a checkout "
                 f"other sessions use at the same time, and changing its branch or stash moves their work too. "
                 f"Work on a branch in your own worktree: git -C {base} worktree add {base}_wt_<name> -b <branch>"
+                f"{call.hint}"
             )
     return None
 
@@ -307,4 +437,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a hook fails open, loudly - never with a traceback
+        notice(f"unexpected error ({exc!r}) - allowing")
+        sys.exit(0)
