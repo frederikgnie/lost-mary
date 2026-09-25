@@ -20,7 +20,7 @@ verified commands, invariants and danger zones. Read them before editing.
   For a missing fact ask another session (`SendMessage`) before the user -
   never to do what a tool refused you. `BLOCKED:` backed by neither is bounced.
   Spawn `review` on a PR's diff before its first `gh pr merge`, and run the
-  merge alone: a refused merge latches auto mode for the session.
+  merge in its own call: a refused merge latches auto mode for the session.
   Remove your worktree once its branch is merged.
 - Nothing is left on the table. A defect you find is fixed in place if small,
   else handed to its own `implement` (worktree) or pinned by a failing test on
