@@ -1978,16 +1978,18 @@ print()
 print("hooks/run.sh - the plugin's interpreter shim runs a hook with its payload")
 RUN_SH = ROOT / "hooks" / "run.sh"
 wiring = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-entries = [h for groups in wiring["hooks"].values() for g in groups for h in g["hooks"] if "run.sh" in h["command"]]
+run_sh_hooks = [
+    h for groups in wiring["hooks"].values() for g in groups for h in g["hooks"] if "run.sh" in h["command"]
+]
 expect_true(
     "every scripted hook runs through hooks/run.sh and names a script that exists",
-    entries
+    bool(run_sh_hooks)
     and all(
         h["command"].startswith('/bin/bash "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/')
         and (ROOT / h["command"].split('"')[3].replace("${CLAUDE_PLUGIN_ROOT}/", "")).is_file()
-        for h in entries
+        for h in run_sh_hooks
     ),
-    str([h["command"] for h in entries]),
+    str([h["command"] for h in run_sh_hooks]),
 )
 # Git's bash, the one Claude Code runs hook command strings in; on Windows a bare `bash` on PATH can be the
 # WSL stub in System32.
