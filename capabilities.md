@@ -130,6 +130,19 @@ strings (they match one command forever - the shape that keeps prompts coming).
 questions, refusals, hand-backs and dead allow rules over the last N transcripts
 and depends on the same transcript shape as `check-evidence`.
 
+`scripts/prune-worktrees.py` (read-only unless `--apply`) depends on git and gh
+output rather than on Claude Code (checked 2026-09-25, git 2.54.0.windows.1, gh
+2.97.0). It reads the keys `worktree`, `HEAD`, `branch`, `detached`, `locked` and
+`prunable` from `git worktree list --porcelain`. It reads the `!!` code from
+`git status --porcelain --ignored --untracked-files=all
+--ignore-submodules=none`, where those flags override user config. It reads the
+`S` and lowercase tags from `git ls-files -v`, and the branch reflog subject
+`branch: Created from`. From `gh pr list --json` it uses `number`, `state`,
+`headRefOid`, `baseRefName` and `isCrossRepository`. gh answers as the active
+account, so a repository that account cannot see falls back to the ancestry
+test, which only keeps more. If a key is renamed, the worktree is read as
+detached or not merged, and it is kept.
+
 **Permissions and auto mode** (verified 2026-09-04 against
 `code.claude.com/docs/en/auto-mode-config` and `permissions`):
 

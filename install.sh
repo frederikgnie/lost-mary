@@ -19,7 +19,7 @@ DRIFT_COUNT=0
 INCOMPLETE_COUNT=0
 
 # What v2 manages under ~/.claude/agent-library.
-LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py scripts/friction.py scripts/ledger.py scripts/check-spawn.py scripts/permit.py scripts/witness.py scripts/guard-shared-checkouts.py global-CLAUDE.md capabilities.md)
+LIB_FILES=(scripts/pycheck.py scripts/check-evidence.py scripts/no-ask.py scripts/no-punt.py scripts/friction.py scripts/ledger.py scripts/check-spawn.py scripts/permit.py scripts/witness.py scripts/guard-shared-checkouts.py scripts/prune-worktrees.py global-CLAUDE.md capabilities.md)
 # What v1 installed and v2 no longer ships. Retired by renaming, never deleted.
 # Agent files are retired ONLY when their content is provably v1 (every v1 role
 # referenced the handoff schema); a user's own reviewer.md is left alone.
@@ -393,9 +393,9 @@ fi
 ensure_import
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" "$DEST_LIB/scripts/friction.py" "$DEST_LIB/scripts/ledger.py" "$DEST_LIB/scripts/check-spawn.py" "$DEST_LIB/scripts/permit.py" "$DEST_LIB/scripts/witness.py" "$DEST_LIB/scripts/guard-shared-checkouts.py" 2>/dev/null || true
+  chmod +x "$DEST_LIB/scripts/pycheck.py" "$DEST_LIB/scripts/check-evidence.py" "$DEST_LIB/scripts/no-ask.py" "$DEST_LIB/scripts/no-punt.py" "$DEST_LIB/scripts/friction.py" "$DEST_LIB/scripts/ledger.py" "$DEST_LIB/scripts/check-spawn.py" "$DEST_LIB/scripts/permit.py" "$DEST_LIB/scripts/witness.py" "$DEST_LIB/scripts/guard-shared-checkouts.py" "$DEST_LIB/scripts/prune-worktrees.py" 2>/dev/null || true
 else
-  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py $DEST_LIB/scripts/friction.py $DEST_LIB/scripts/ledger.py $DEST_LIB/scripts/check-spawn.py $DEST_LIB/scripts/permit.py $DEST_LIB/scripts/witness.py $DEST_LIB/scripts/guard-shared-checkouts.py"
+  log "[dry-run] chmod +x $DEST_LIB/scripts/pycheck.py $DEST_LIB/scripts/check-evidence.py $DEST_LIB/scripts/no-ask.py $DEST_LIB/scripts/no-punt.py $DEST_LIB/scripts/friction.py $DEST_LIB/scripts/ledger.py $DEST_LIB/scripts/check-spawn.py $DEST_LIB/scripts/permit.py $DEST_LIB/scripts/witness.py $DEST_LIB/scripts/guard-shared-checkouts.py $DEST_LIB/scripts/prune-worktrees.py"
 fi
 
 echo
