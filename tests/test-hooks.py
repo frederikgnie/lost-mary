@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1132,6 +1133,20 @@ expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode(
 # ------------------------------------------------------------------------ check-spawn
 print()
 print("check-spawn.py - PreToolUse on Agent: an implement spawn carries its contract or does not start")
+# Every check-spawn call runs sandboxed: the Fable fallback reads transcripts and writes a state file.
+CS = SCRATCH / "check-spawn"
+CS_HOME, CS_PROJECTS, CS_STATE = CS / "home", CS / "projects", CS / "state"
+for d in (CS_HOME / ".claude" / "agents", CS_PROJECTS / "proj", CS_STATE):
+    d.mkdir(parents=True, exist_ok=True)
+SPAWN_ENV: dict[str, str] = {
+    **os.environ,
+    "HOME": str(CS_HOME),
+    "USERPROFILE": str(CS_HOME),
+    "LOST_MARY_PROJECTS_DIR": str(CS_PROJECTS),
+    "LOST_MARY_STATE_DIR": str(CS_STATE),
+}
+for _var in ("LOST_MARY_FABLE", "CLAUDE_CODE_SUBAGENT_MODEL", "LOST_MARY_SCAN_SECONDS"):
+    SPAWN_ENV.pop(_var, None)
 
 
 def spawn(role: str, prompt: str, tool: str = "Agent") -> dict[str, object]:
@@ -1151,9 +1166,9 @@ FULL += (
     + chr(10)
     + "REPORT: CHANGED / RAN"
 )
-rc, err = run_hook(SPAWN, spawn("implement", FULL))
+rc, err = run_hook(SPAWN, spawn("implement", FULL), env=SPAWN_ENV)
 expect("implement with all four fields -> allow", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, spawn("implement", "OWNED: src/x.py" + chr(10) + "DONE MEANS: tests pass"))
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: src/x.py" + chr(10) + "DONE MEANS: tests pass"), env=SPAWN_ENV)
 expect("implement missing two fields -> block", rc, BLOCK, err)
 expect_true(
     "... names exactly the missing ones, in order",
@@ -1169,22 +1184,287 @@ decorated = (
     + chr(10)
     + "  validation: pytest -q"
 )
-rc, err = run_hook(SPAWN, spawn("implement", decorated))
+rc, err = run_hook(SPAWN, spawn("implement", decorated), env=SPAWN_ENV)
 expect("bold, bulleted, heading or lower-case field lines all count -> allow", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, spawn("implement", "the owned files are src/x.py and validation is pytest"))
+rc, err = run_hook(SPAWN, spawn("implement", "the owned files are src/x.py and validation is pytest"), env=SPAWN_ENV)
 expect("field names in prose without a colon do not count -> block", rc, BLOCK, err)
-rc, err = run_hook(SPAWN, spawn("explore", "Find where the loader parses dates."))
+rc, err = run_hook(SPAWN, spawn("explore", "Find where the loader parses dates."), env=SPAWN_ENV)
 expect("explore has no contract -> allow", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, spawn("review", "Review this diff."))
+rc, err = run_hook(SPAWN, spawn("review", "Review this diff."), env=SPAWN_ENV)
 expect("review has no contract -> allow", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x", tool="Bash"))
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x", tool="Bash"), env=SPAWN_ENV)
 expect("another tool -> allow", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, {"hook_event_name": "PreToolUse", "tool_name": "Agent"})
+rc, err = run_hook(SPAWN, {"hook_event_name": "PreToolUse", "tool_name": "Agent"}, env=SPAWN_ENV)
 expect("no tool_input fails open", rc, ALLOW, err)
-rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x"), bom=True)
+rc, err = run_hook(SPAWN, spawn("implement", "OWNED: x"), bom=True, env=SPAWN_ENV)
 expect("BOM-prefixed payload still blocks", rc, BLOCK, err)
-proc = subprocess.run([sys.executable, str(SPAWN)], input=b"not json", capture_output=True)
+proc = subprocess.run([sys.executable, str(SPAWN)], input=b"not json", capture_output=True, env=SPAWN_ENV)
 expect("garbage payload fails open", proc.returncode, ALLOW, proc.stderr.decode())
+
+# The Fable fallback: fallbackModel excludes billing and rate-limit errors, so a spawn that would run on fable is
+# rewritten to opus (updatedInput) while a usage-credit 429 has been seen within FABLE_RETRY_HOURS.
+print()
+print("check-spawn.py - Fable fallback: a fable spawn runs on opus while Fable is out")
+(CS_HOME / ".claude" / "agents" / "review.md").write_text(
+    "---\nname: review\nmodel: fable\neffort: high\n---\nReview.\n", encoding="utf-8"
+)
+(CS_HOME / ".claude" / "agents" / "implement.md").write_text(
+    "---\nname: implement\nmodel: opus\n---\nImplement.\n", encoding="utf-8"
+)
+
+
+def spawn_out(event: dict[str, object], env: dict[str, str] | None = None) -> tuple[int, dict[str, object] | None, str]:
+    proc = subprocess.run(
+        [sys.executable, str(SPAWN)], input=json.dumps(event).encode(), capture_output=True, env=env or SPAWN_ENV
+    )
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    return proc.returncode, (json.loads(out) if out else None), proc.stderr.decode("utf-8", "replace")
+
+
+def credit_429(when: str) -> str:
+    record = {
+        "type": "assistant",
+        "timestamp": when,
+        "message": {
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "You've hit your monthly spend limit."}],
+        },
+        "apiError": "model_requires_usage_credits",
+        "error": "rate_limit",
+        "isApiErrorMessage": True,
+    }
+    return json.dumps(record, separators=(",", ":"))  # as Claude Code writes it: no spaces
+
+
+def iso(seconds_ago: float) -> str:
+    return datetime.fromtimestamp(time.time() - seconds_ago, UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def reset_fable_state() -> None:
+    for f in CS_STATE.glob("*"):
+        f.unlink()
+    for f in CS_PROJECTS.glob("**/*.jsonl"):
+        f.unlink()
+
+
+def review_event(**tool_input: str) -> dict[str, object]:
+    return {
+        **spawn("review", "Review this diff."),
+        "cwd": str(CS),
+        "tool_input": {
+            "subagent_type": "review",
+            "description": "Do the thing",
+            "prompt": "Review this diff.",
+            **tool_input,
+        },
+    }
+
+
+REVIEW = review_event()
+reset_fable_state()
+rc, out, err = spawn_out(REVIEW)
+expect_true("no failure anywhere -> the fable spawn is left alone", rc == ALLOW and out is None, f"{out} {err}")
+failed = CS_PROJECTS / "proj" / "sub.jsonl"
+failed.write_text('{"type":"user"}\n' + credit_429(iso(600)) + "\n", encoding="utf-8")
+rc, out, err = spawn_out(REVIEW)
+hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+hso: dict[str, object] = {str(k): v for k, v in hso_raw.items()} if isinstance(hso_raw, dict) else {}
+upd_raw = hso.get("updatedInput")
+upd: dict[str, object] = {str(k): v for k, v in upd_raw.items()} if isinstance(upd_raw, dict) else {}
+expect_true(
+    "a usage-credit 429 ten minutes ago -> the review spawn is rewritten to opus, the whole input kept",
+    rc == ALLOW
+    and upd.get("model") == "opus"
+    and upd.get("prompt") == "Review this diff."
+    and upd.get("subagent_type") == "review"
+    and hso.get("hookEventName") == "PreToolUse"
+    and "Fable is out" in str(hso.get("additionalContext")),
+    f"{out} {err}",
+)
+state = json.loads((CS_STATE / "fable-out.json").read_text(encoding="utf-8"))
+expect_true("the failure is remembered in the state file", state.get("last_seen", 0) > 0, str(state))
+failed.unlink()
+rc, out, _ = spawn_out(REVIEW)
+expect_true("remembered: still opus after the transcript is gone", out is not None, str(out))
+rc, out, _ = spawn_out(review_event(model="sonnet"))
+expect_true("an explicit non-fable model is the lead's choice -> left alone", out is None, str(out))
+rc, out, _ = spawn_out(review_event(model="fable"))
+expect_true("an explicit model: fable is rewritten too", out is not None, str(out))
+rc, out, _ = spawn_out({**spawn("implement", FULL), "cwd": str(CS)})
+expect_true("an opus agent (implement) is left alone", out is None, str(out))
+rc, out, _ = spawn_out({**spawn("general-purpose", "x"), "cwd": str(CS)})
+expect_true("an agent without a fable file is left alone", out is None, str(out))
+rc, out, err = spawn_out({**spawn("implement", "OWNED: x"), "cwd": str(CS)})
+expect_true("a contract block still wins over the fallback", rc == BLOCK and out is None and "MISSING" in err, err)
+# The retry window: a failure older than FABLE_RETRY_HOURS lets fable be tried again.
+reset_fable_state()
+failed.write_text(credit_429(iso(7 * 3600)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a failure seven hours ago -> fable is tried again", out is None, str(out))
+# Overrides.
+reset_fable_state()
+rc, out, _ = spawn_out(REVIEW, {**SPAWN_ENV, "LOST_MARY_FABLE": "off"})
+expect_true("LOST_MARY_FABLE=off forces opus", out is not None, str(out))
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW, {**SPAWN_ENV, "LOST_MARY_FABLE": "on"})
+expect_true("LOST_MARY_FABLE=on disables the fallback", out is None, str(out))
+# A transcript that merely quotes the marker with spaces (a Read of this test) does not count.
+reset_fable_state()
+failed.write_text(
+    json.dumps({"timestamp": iso(60), "text": '"apiError": "model_requires_usage_credits"'}) + "\n", encoding="utf-8"
+)
+rc, out, _ = spawn_out(REVIEW)
+expect_true("the marker quoted with a space after the colon is not a failure", out is None, str(out))
+# Review 2026-09-25: after the window one spawn probes fable; a parallel spawn in the same batch stays on opus.
+reset_fable_state()
+failed.write_text(credit_429(iso(7 * 3600)) + "\n", encoding="utf-8")
+rc, first, _ = spawn_out(REVIEW)
+rc, second, _ = spawn_out(REVIEW)
+expect_true(
+    "window passed: the first spawn probes fable, the next one (the same batch) stays on opus",
+    first is None and second is not None,
+    f"{first} / {second}",
+)
+# Only appended bytes are read, and a failure appended after a scan is still found.
+reset_fable_state()
+failed.write_text('{"type":"user"}\n' * 3, encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+offsets = json.loads((CS_STATE / "fable-out.json").read_text(encoding="utf-8")).get("offsets", {})
+expect_true(
+    "the scan records how far it read each file", list(offsets.values()) == [failed.stat().st_size], str(offsets)
+)
+with failed.open("a", encoding="utf-8") as handle:
+    handle.write(credit_429(iso(30)) + "\n")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a failure appended after the last scan is found -> opus", out is not None, str(out))
+# A record cut in half by the previous read is re-read whole (the overlap).
+reset_fable_state()
+line = credit_429(iso(30))
+failed.write_text('{"type":"user"}\n' + line[:40], encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("half a failure record is not a failure yet", out is None, str(out))
+with failed.open("a", encoding="utf-8") as handle:
+    handle.write(line[40:] + "\n")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("... and once its second half lands, the whole record is found -> opus", out is not None, str(out))
+# Malformed or future-dated state never pins or disables the fallback.
+reset_fable_state()
+(CS_STATE / "fable-out.json").write_text(
+    json.dumps({"last_seen": time.time() + 10**6, "offsets": "x"}), encoding="utf-8"
+)
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a far-future last_seen is dropped, not trusted -> fable", out is None, str(out))
+(CS_STATE / "fable-out.json").write_text(json.dumps({"last_seen": "soon"}), encoding="utf-8")
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a non-numeric last_seen is dropped and the scan still arms the fallback", out is not None, str(out))
+# Review 2026-09-25: the realistic false signal - a tool result quoting the compact marker as a JSON string value
+# carries escaped quotes, so the byte marker cannot match it.
+reset_fable_state()
+quoted = {
+    "type": "user",
+    "timestamp": iso(60),
+    "message": {"content": [{"type": "tool_result", "content": credit_429(iso(60))}]},
+}
+failed.write_text(json.dumps(quoted, separators=(",", ":")) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a tool result quoting a compact failure record (escaped quotes) is not a failure", out is None, str(out))
+# A file last changed before the window is never read, even if it holds a fresh-looking record.
+reset_fable_state()
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+old = time.time() - 7 * 3600
+os.utime(failed, (old, old))
+rc, out, _ = spawn_out(REVIEW)
+expect_true("a transcript untouched for longer than the window is skipped", out is None, str(out))
+# The time budget: a scan cut short keeps what it read and finishes on a later spawn.
+reset_fable_state()
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(REVIEW, {**SPAWN_ENV, "LOST_MARY_SCAN_SECONDS": "-1"})
+expect_true("a spent budget reads nothing -> the spawn is left alone", out is None, str(out))
+rc, out, _ = spawn_out(REVIEW)
+expect_true("... and the next spawn, with budget, finds the failure", out is not None, str(out))
+# CLAUDE_CODE_SUBAGENT_MODEL: a role without a model line inherits it.
+reset_fable_state()
+(CS_HOME / ".claude" / "agents" / "plain.md").write_text("---\nname: plain\n---\nNo model.\n", encoding="utf-8")
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+plain = {**spawn("plain", "x"), "cwd": str(CS)}
+rc, out, _ = spawn_out(plain, {**SPAWN_ENV, "CLAUDE_CODE_SUBAGENT_MODEL": "fable"})
+expect_true("a role without a model line inherits CLAUDE_CODE_SUBAGENT_MODEL=fable -> opus", out is not None, str(out))
+rc, out, _ = spawn_out(plain)
+expect_true("... and without that variable it is left alone (the lead's model is unknown)", out is None, str(out))
+# No lingering teammates (2026-09-25): a named explore/review/implement spawn stays listed as running after its
+# report; the name (and team_name) is dropped so it runs as a background subagent that ends.
+reset_fable_state()
+named = review_event(name="review-x", team_name="t")
+rc, out, _ = spawn_out(named)
+hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+hso = {str(k): v for k, v in hso_raw.items()} if isinstance(hso_raw, dict) else {}
+upd_raw = hso.get("updatedInput")
+upd = {str(k): v for k, v in upd_raw.items()} if isinstance(upd_raw, dict) else {}
+expect_true(
+    "a named review spawn loses name and team_name, keeps everything else, and is told why",
+    rc == ALLOW
+    and "name" not in upd
+    and "team_name" not in upd
+    and upd.get("prompt") == "Review this diff."
+    and "model" not in upd
+    and "stays running" in str(hso.get("additionalContext")),
+    str(out),
+)
+other = {
+    **spawn("researcher", "x"),
+    "cwd": str(CS),
+    "tool_input": {"subagent_type": "researcher", "prompt": "x", "name": "r1"},
+}
+rc, out, _ = spawn_out(other)
+expect_true("a role outside the library keeps its name", out is None, str(out))
+failed.write_text(credit_429(iso(60)) + "\n", encoding="utf-8")
+rc, out, _ = spawn_out(named)
+hso_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+upd_raw = hso_raw.get("updatedInput") if isinstance(hso_raw, dict) else None
+expect_true(
+    "both rewrites in one spawn: name dropped and model moved to opus",
+    isinstance(upd_raw, dict)
+    and "name" not in upd_raw
+    and "team_name" not in upd_raw
+    and upd_raw.get("model") == "opus",
+    str(out),
+)
+named_impl = {
+    **spawn("implement", FULL),
+    "cwd": str(CS),
+    "tool_input": {"subagent_type": "implement", "prompt": FULL, "name": "impl-1"},
+}
+rc, out, err = spawn_out(named_impl)
+impl_raw = out.get("hookSpecificOutput") if isinstance(out, dict) else None
+impl_upd = impl_raw.get("updatedInput") if isinstance(impl_raw, dict) else None
+expect_true(
+    "a named implement with its contract loses the name and keeps its prompt",
+    rc == ALLOW and isinstance(impl_upd, dict) and "name" not in impl_upd and impl_upd.get("prompt") == FULL,
+    f"{out} {err}",
+)
+rc, out, err = spawn_out(
+    {
+        **spawn("implement", "OWNED: x"),
+        "cwd": str(CS),
+        "tool_input": {"subagent_type": "implement", "prompt": "OWNED: x", "name": "i"},
+    }
+)
+expect_true("a named implement missing fields is blocked before any rewrite", rc == BLOCK and out is None, err)
+rc, out, _ = spawn_out(review_event(team_name="t"))
+expect_true(
+    "a team_name-only review spawn is taken out of the team", out is not None and "team_name" in str(out), str(out)
+)
+mixed = {**spawn("Review", "x"), "cwd": str(CS), "tool_input": {"subagent_type": "Review", "prompt": "x", "name": "R"}}
+rc, out, _ = spawn_out(mixed)
+expect_true("a mixed-case role name still counts as a library role", out is not None, str(out))
+reset_fable_state()
+# A broken state file fails open to a fresh scan.
+reset_fable_state()
+(CS_STATE / "fable-out.json").write_text("not json", encoding="utf-8")
+rc, out, err = spawn_out(REVIEW)
+expect_true("a broken state file is ignored, not fatal", rc == ALLOW and out is None, err)
+reset_fable_state()
 
 # ----------------------------------------------------------------------------- permit
 print()

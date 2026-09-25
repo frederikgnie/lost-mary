@@ -15,9 +15,13 @@ The lead runs on opus (`/model opus`, persists). Measured 2026-09-15/16 over
 whole saving; the spawns stay where judgment concentrates. `/model fable` for a
 session where the framing itself is the hard part - it persists, so switch back.
 
-Nothing switches model when an allowance runs out: `fallbackModel` covers
-overload and unavailable only, and no hook can set a model. With the lead on
-opus the Fable cap can only hit a spawn, which ends in an API error - respawn
-it with `model: opus`. A fable lead at the cap raises a usage-credits consent
-prompt that Remote Control cannot display, so the session just stops answering
-until `/model opus` (works from the phone).
+`fallbackModel` covers overload and unavailable only - never a usage or spend
+limit. The spawn hook covers that for spawns: once a Fable spawn has failed on
+usage credits, `check-spawn` runs every fable spawn (`explore`, `review`, an
+explicit `model: fable`) on `opus` - the newest Opus - for the next 6 hours, then
+lets one spawn try Fable again while the rest stay on Opus. The spawns already
+running when the limit first hits fail: spawn them again unchanged.
+`LOST_MARY_FABLE=off` forces Opus, `=on` disables the switch. A fable LEAD at
+the cap raises a usage-credits consent prompt that Remote Control cannot
+display, so the session just stops answering until `/model opus` (works from
+the phone).
