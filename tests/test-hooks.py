@@ -2429,8 +2429,8 @@ def kg_refused(uid: str = "t-merge", pid: str = PID, body: str = REFUSAL) -> lis
     ]
 
 
-def kg_review(uid: str = "t-review") -> dict[str, object]:
-    call = {"type": "tool_use", "id": uid, "name": "Agent", "input": {"subagent_type": "review", "prompt": "diff"}}
+def kg_review(uid: str = "t-review", role: str = "review") -> dict[str, object]:
+    call = {"type": "tool_use", "id": uid, "name": "Agent", "input": {"subagent_type": role, "prompt": "diff"}}
     return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
 
 
@@ -2495,9 +2495,6 @@ MERGE = "gh pr merge 29 --squash --delete-branch"
 created = kg_bash("git push -u origin x && gh pr create --fill", "t-create")
 t_none = kg_transcript("merge-unreviewed.jsonl", [kg_prompt("ship it"), created])
 t_rev = kg_transcript("merge-reviewed.jsonl", [kg_prompt("ship it"), created, kg_review()])
-t_stale = kg_transcript(
-    "merge-stale-review.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash("gh pr merge 28 --squash", "t-m28")]
-)
 t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
 rc, err = run_hook(GUARD, merge_event(f"{MERGE} 2>&1 | tail -3; gh pr view 29", t_rev), env=NO_CONFIG)
 expect("merge guard: a chained merge -> exit 2, even with no config file", rc, BLOCK, err)
@@ -2509,8 +2506,6 @@ rc, err = run_hook(GUARD, merge_event(MERGE, t_rev), env=NO_CONFIG)
 expect("merge guard: a review spawned, merge alone -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, merge_event(MERGE, t_rev, tool="PowerShell"), env=NO_CONFIG)
 expect("merge guard: the same from PowerShell -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_stale), env=NO_CONFIG)
-expect("merge guard: the only review preceded an earlier merge -> exit 2", rc, BLOCK, err)
 rc, err = run_hook(GUARD, merge_event(MERGE, t_self), env=NO_CONFIG)
 expect("merge guard: the transcript already holds this very call -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, merge_event(MERGE, NP / "missing.jsonl"), env=NO_CONFIG)
@@ -2521,6 +2516,47 @@ rc, err = run_hook(GUARD, merge_event("gh pr view 29 --json state | head -3", t_
 expect("merge guard: other gh pr commands, chained -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, merge_event("C:/tools/gh.exe pr merge 29", t_none), env=NO_CONFIG)
 expect("merge guard: gh named by path -> exit 2", rc, BLOCK, err)
+
+
+def kg_result(uid: str, body: str, error: bool) -> dict[str, object]:
+    block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
+    return {"type": "user", "uuid": uuid.uuid4().hex, "message": {"role": "user", "content": [block]}}
+
+
+# Review 2026-09-25 (HIGH): only a merge that went through spends the review. One this hook held back, the
+# classifier refused or GitHub rejected never ran - the obedient lone retry must pass.
+held = kg_bash(f"{MERGE} | tail -3", "t-held")
+t_held = kg_transcript(
+    "merge-held-then-lone.jsonl",
+    [kg_prompt("ship it"), kg_review(), held, kg_result("t-held", "guard-shared-checkouts: run it alone", True)],
+)
+rc, err = run_hook(GUARD, merge_event(MERGE, t_held), env=NO_CONFIG)
+expect("merge guard: review -> chained merge held -> lone retry -> exit 0", rc, ALLOW, err)
+t_done = kg_transcript(
+    "merge-went-through.jsonl",
+    [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-m29"), kg_result("t-m29", "Merged", False)],
+)
+rc, err = run_hook(GUARD, merge_event("gh pr merge 30 --squash", t_done), env=NO_CONFIG)
+expect("merge guard: the review was spent on a merge that went through -> exit 2", rc, BLOCK, err)
+t_bare = kg_transcript("merge-no-id.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
+event = merge_event(MERGE, t_bare)
+event.pop("tool_use_id")
+rc, err = run_hook(GUARD, event, env=NO_CONFIG)
+expect("merge guard: no tool_use_id and the call already in the transcript -> exit 0", rc, ALLOW, err)
+t_ns = kg_transcript("merge-ns-review.jsonl", [kg_prompt("ship it"), kg_review(role="lost-mary:review")])
+rc, err = run_hook(GUARD, merge_event(MERGE, t_ns), env=NO_CONFIG)
+expect("merge guard: a plugin-namespaced review counts -> exit 0", rc, ALLOW, err)
+NOT_MERGES = [
+    "echo 'gh pr merge 29' | tee note.txt",
+    'grep -n "gh pr merge" notes.md | head -3',
+    'git commit -q -m "then gh pr merge 29; done" && git push',
+    "cat > msg.txt <<'EOF'\ngh pr merge 29 | tail\nEOF\ngit status",
+]
+for i, mention in enumerate(NOT_MERGES):
+    rc, err = run_hook(GUARD, merge_event(mention, t_none), env=NO_CONFIG)
+    expect(f"merge guard: a merge only mentioned #{i + 1} -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, merge_event("& gh pr merge 29 --auto", t_none, tool="PowerShell"), env=NO_CONFIG)
+expect("merge guard: PowerShell `& gh pr merge --auto`, unreviewed -> exit 2", rc, BLOCK, err)
 
 # Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
 HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."

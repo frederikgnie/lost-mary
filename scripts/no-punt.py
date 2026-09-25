@@ -629,7 +629,8 @@ def review_spawn(tool: dict[str, Any]) -> bool:
     """An Agent (or legacy Task) call that spawns the `review` role."""
     tool_input = tool.get("input")
     role = tool_input.get("subagent_type") if isinstance(tool_input, dict) else None
-    return tool.get("name") in ("Agent", "Task") and isinstance(role, str) and role.strip().lower() == REVIEW_ROLE
+    named = isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE  # or `<plugin>:review`
+    return tool.get("name") in ("Agent", "Task") and named
 
 
 def backs_blocked(body: str, reviewed: bool) -> bool:

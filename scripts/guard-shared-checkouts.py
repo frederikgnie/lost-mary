@@ -434,16 +434,24 @@ def is_merge(tokens: list[str]) -> bool:
     return exe in ("gh", "gh.exe") and tokens[1] == "pr" and tokens[2] == "merge"
 
 
-def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
-    """Whether a `review` spawn follows the last earlier `gh pr merge` call in the transcript; None if unreadable.
+def is_review_role(role: object) -> bool:
+    """`review`, or a plugin-namespaced `<plugin>:review`."""
+    return isinstance(role, str) and role.strip().lower().rsplit(":", 1)[-1] == REVIEW_ROLE
 
-    `current` is this call's tool_use_id: the transcript may already hold it, and it is not an earlier merge.
+
+def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
+    """Whether a `review` spawn follows the last earlier merge that went through; None if unreadable.
+
+    Only a merge whose result is not an error resets it: one this hook held back, the classifier refused or
+    GitHub rejected never ran, so the review before it still stands. `current` is this call's tool_use_id,
+    skipped in case the transcript already holds it (it has no result yet either way).
     """
     reviewed = False
+    merges: set[str] = set()  # tool_use ids of earlier merge calls, awaiting their results
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if '"tool_use"' not in line:
+                if '"tool_' not in line:
                     continue
                 try:
                     record = json.loads(line)
@@ -454,20 +462,23 @@ def reviewed_since_merge(transcript: Path, current: str) -> bool | None:
                 if not isinstance(content, list):
                     continue
                 for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    if not isinstance(block, dict):
                         continue
-                    if current and block.get("id") == current:
+                    if block.get("type") == "tool_result":
+                        if block.get("tool_use_id") in merges and block.get("is_error") is not True:
+                            reviewed = False  # a merge went through: the next one needs a review of its own
+                        continue
+                    if block.get("type") != "tool_use" or (current and block.get("id") == current):
                         continue
                     tool_input = block.get("input")
                     if not isinstance(tool_input, dict):
                         continue
-                    role = tool_input.get("subagent_type")
-                    if block.get("name") in ("Agent", "Task") and str(role).strip().lower() == REVIEW_ROLE:
+                    if block.get("name") in ("Agent", "Task") and is_review_role(tool_input.get("subagent_type")):
                         reviewed = True
                     elif block.get("name") in SHELL_TOOLS and any(
                         is_merge(t) for t in segments(str(tool_input.get("command") or ""))
                     ):
-                        reviewed = False  # the next merge needs a review of its own
+                        merges.add(str(block.get("id")))
     except OSError:
         return None
     return reviewed
