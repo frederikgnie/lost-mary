@@ -44,11 +44,13 @@ here-strings handled; a bash `cd` to a path bash would mangle (an unquoted
 backslash) goes nowhere, as it does in bash, and so does a `cd` in a bash
 pipeline stage or background command. A call whose scan ends inside
 something - a quote, a substitution, arithmetic, a heredoc - is also read
-naively (every separator and bracket splits): a misread that leaves the
-scan inside a construct cannot hide a command, only add a false hold. A
-misread that ends outside every construct can still hide one; eight review
-rounds found such shapes and each is fixed and pinned in tests/test-hooks.py,
-but the list below is not proof that none is left.
+naively (every separator and bracket splits, continuations joined): a
+misread that leaves the scan inside a construct then finds any command that
+starts a naive chunk, at the price of false holds - every directory the call
+cd'd into counts. A misread that ends outside every construct can still hide
+a command; nine review rounds found such shapes and each now reads correctly
+or is caught by the fail-safe, with a test in tests/test-hooks.py, but the
+list below is not proof that none is left.
 
 Still passes by design (known gaps, not a sandbox): `git reset <commit>`
 (mixed/soft), `commit --amend`, `merge`, `branch -f/-D`, git aliases, inner
@@ -57,8 +59,10 @@ function defined in an earlier call, a `case` arm's command, `xargs git`,
 a `{` block glued to its first command (`{git switch main}`), quotes the
 shell nests where the scanner does not (`"${x:-"a"}"`), `--git-dir` /
 `--work-tree` / `GIT_DIR=`, a `cd` inside a `( ... )` subshell (it leaks to
-the commands after it), symlinks and junctions, and a worktree nested
-inside a shared checkout. The commands inside `$(...)` are checked, each substitution with its
+the commands after it), a `cd` inside a `{ ... }` block or a function
+body (counted as run), a `$(...)` inside an unquoted heredoc body (bash runs
+it; the body is dropped unread), symlinks and junctions, and a worktree
+nested inside a shared checkout. The commands inside `$(...)` are checked, each substitution with its
 own working directory in bash (a subshell) and the caller's in PowerShell.
 
 Merges the auto-mode classifier would refuse
@@ -224,7 +228,11 @@ CHAIN_OK = {
     "where-object",
     "out-null",
     "out-string",
+    "try",
+    "catch",
+    "finally",
 }
+PS_OPERATORS = {"-eq", "-ne", "-gt", "-ge", "-lt", "-le", "-and", "-or", "-not", "-like", "-match", "-contains"}
 CHAIN_OK_GH = {
     ("pr", "view"),
     ("pr", "checks"),
@@ -486,7 +494,7 @@ def scan_commands(
     """
     text = command.translate(CURLY_QUOTES) if powershell else command
     escape = "`" if powershell else "\\"
-    word_start = " \t\n;|&()" + ("{},=" if powershell else "")
+    word_start = " \t\n;|&()" + ("{}," if powershell else "")
     pieces: list[tuple[str, list[str], bool]] = []
     buf: list[str] = []
     captured: list[str] = []
@@ -507,7 +515,7 @@ def scan_commands(
 
     def flush(detached: bool = False) -> None:
         nonlocal piped
-        piece = "".join(buf).strip()
+        piece = continued("".join(buf), powershell).strip()
         if piece or captured:
             pieces.append((piece, captured.copy(), detached or piped))
         buf.clear()
@@ -569,9 +577,11 @@ def scan_commands(
                 i += 1  # the here-string's text is dropped; its substitutions are not
             continue
         if ch == escape and i + 1 < n:
-            emit(text[i : i + 2])
-            i += 2
-            escaped_until = i
+            pair = 3 if powershell and text.startswith("\r\n", i + 1) else 2
+            emit(text[i : i + pair])
+            if not (text[i + 1] in "\r\n" and (i == 0 or text[i - 1] in word_start)):
+                escaped_until = i + pair  # the word goes on after an escaped character
+            i += pair
             continue
         if ch == "\n" and pending and top != '"':
             i += 1
@@ -718,7 +728,7 @@ def scan_commands(
             stack.append(ch)
             emit(ch)
             i += 1
-        elif ch == "#" and at_word and i not in (escaped_until, glued_at):
+        elif ch == "#" and (at_word or ps_assigns(text, i, powershell)) and i not in (escaped_until, glued_at):
             end = text.find("\n", i)
             i = n if end == -1 else end  # the comment goes; the newline still ends the command
         elif ch == "(" and top in ("$(", "("):
@@ -768,6 +778,12 @@ def scan_commands(
         state["uncertain"] = True
         state.setdefault("open", opened)
     return pieces
+
+
+def ps_assigns(text: str, i: int, powershell: bool) -> bool:
+    """Whether the `#` at `i` follows a PowerShell assignment's `=` (`$x=#note`), where a comment may start - in an
+    argument (`--grep=#12`) the `=` is part of the word (checked in Windows PowerShell 5.1, 2026-09-26)."""
+    return powershell and bool(re.search(r"(?:\$[\w:]+|[)\]])\s*=$", text[max(0, i - 80) : i]))
 
 
 def cd_breaks(word: str) -> bool:
@@ -934,6 +950,7 @@ def naive_segments(command: str) -> list[list[str]]:
     """The call cut at every separator, bracket and substitution, quotes ignored: the fallback for an unclear()
     call, where the careful scan may have hidden a command. It finds anything hidden, at the price of false holds."""
     out: list[list[str]] = []
+    command = re.sub(r"[\\`]\r?\n", " ", command)
     for chunk in re.split(r"&&|\|\||\$\(|[;|&\n()`{}]", command):
         chunk = chunk.replace("\\", "/")
         try:
@@ -941,8 +958,16 @@ def naive_segments(command: str) -> list[list[str]]:
         except ValueError:
             tokens = chunk.split()
         part = strip_wrappers(tokens)
-        while part and ASSIGNMENT.match(part[0]):
-            part = strip_wrappers(part[1:])
+        while part:
+            glued = re.match(r"^\$[\w:]+=(.*)$", part[0])
+            if ASSIGNMENT.match(part[0]):
+                part = strip_wrappers(part[1:])
+            elif glued:  # PowerShell `$out=gh pr merge 29`
+                part = strip_wrappers(([glued.group(1)] if glued.group(1) else []) + part[1:])
+            elif part[0].startswith("$") and part[1:2] == ["="]:  # PowerShell `$out = gh pr merge 29`
+                part = strip_wrappers(part[2:])
+            else:
+                break
         if part:
             out.append(part)
     return out
@@ -1043,8 +1068,9 @@ def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None
         remote = any(a in ("-R", "--repo") or a.startswith(("--repo=", "-R")) for a in args)  # gh keeps them
         if tokens[1:3] == ["pr", "merge"] and deletes and not remote:
             hint = (
-                " Or merge without `-d` / `--delete-branch` (delete the remote branch with `git push origin --delete"
-                " <branch>`): with the PR's branch checked out here, gh would check out the base branch and pull."
+                " Or merge without `-d` / `--delete-branch`, or run the merge from your own worktree, where gh"
+                " leaves the checkout alone: with the PR's branch checked out here, gh would check out the base"
+                " branch and pull."
             )
             return Call(current, label, True, hint)
         if tokens[1:3] != ["pr", "checkout"]:
@@ -1359,6 +1385,8 @@ def harmless(tokens: list[str], powershell: bool = False) -> bool:
     """
     if value_only(tokens, powershell):
         return True
+    if powershell and tokens[0].startswith("$") and PS_OPERATORS & {t.lower() for t in tokens}:
+        return True  # a PowerShell condition such as `$LASTEXITCODE -eq 0`: an expression, not a command
     exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if exe in CHAIN_OK:
         return True

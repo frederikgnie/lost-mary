@@ -3267,11 +3267,17 @@ for label, tool, shell_line, cwd, want in (
     (
         "C2 a heredoc opener line with a quote spanning lines",
         "Bash",
-        'cat <<EOF "a\nb"\nbody\nEOF\ngit switch main',
+        'cat <<EOF "a\nb"\nbody\nEOF\ngit switch main\n# say "hi',
         GS_SHARED,
         BLOCK,
     ),
-    ("C3 a heredoc terminator the guard cannot read", "Bash", "cat <<$X\nit's\n$X\ngit switch main", GS_SHARED, BLOCK),
+    (
+        "C3 a heredoc terminator the guard cannot read",
+        "Bash",
+        "cat <<$X\nit's\n$X\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
     ("D1 a quoted `$((` that bash runs as a subshell", "Bash", 'echo "$((true); git switch main))"', GS_SHARED, BLOCK),
     ("D2 a `((` that bash re-reads as subshells", "Bash", "((true); git switch main #))\n)", GS_SHARED, BLOCK),
     ("D3 an ANSI-C quote inside arithmetic", "Bash", "(( x = $'\\'' )); git switch main; # '))", GS_SHARED, BLOCK),
@@ -3304,11 +3310,17 @@ for label, tool, shell_line, cwd, want in (
     ("`timeout 5` before a switch", "Bash", "timeout 5 git switch main", GS_SHARED, BLOCK),
     ("`nice -n 10` before a stash", "Bash", "nice -n 10 git stash", GS_SHARED, BLOCK),
     ("`env -i` before a switch", "Bash", "env -i GIT_TRACE=1 git switch main", GS_SHARED, BLOCK),
-    ("curly quotes in PowerShell", "PowerShell", "Write-Output \u201cit's\u201d; git switch main", GS_SHARED, BLOCK),
+    (
+        "curly quotes in PowerShell",
+        "PowerShell",
+        "Write-Output \u201cit's\u201d; git switch main\n# that's it",
+        GS_SHARED,
+        BLOCK,
+    ),
     (
         "PowerShell `--%` holding an apostrophe",
         "PowerShell",
-        "cmd /c echo --% it's here\ngit switch main",
+        "cmd /c echo --% it's here\ngit switch main\n# that's it",
         GS_SHARED,
         BLOCK,
     ),
@@ -3386,6 +3398,79 @@ rc, err = guard_merge(
     t_none,
 )
 expect("merge guard: a commit naming a merge beside a `kebab-case` substitution -> exit 0", rc, ALLOW, err)
+
+# Ninth review: a continuation right before a separator (the leading-operator style - 120 of 3,136 multi-line bash
+# commands on this machine) kept a lone `\` that broke the cd; `=` starts a PowerShell comment only in expression
+# mode (checked in Windows PowerShell 5.1, 2026-09-26); a backtick continues over CRLF.
+for label, tool, shell_line, cwd, want in (
+    (
+        "a cd, a continuation, then `&& git switch`",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops \\\n  && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a relative cd inside a shared checkout, continued", "Bash", "cd src \\\n&& git stash", GS_SHARED, BLOCK),
+    ("a pushd, continued", "Bash", "pushd /c/repo/EU/OBF_ops \\\n  && git stash", GS_ELSE, BLOCK),
+    ("a continued cd inside a substitution", "Bash", "X=$(cd /c/repo/EU/OBF_ops \\\n  && git stash)", GS_ELSE, BLOCK),
+    (
+        "a comment on the line after a continuation",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops \\\n# note\ngit switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a PowerShell argument holding `=#`, then a switch",
+        "PowerShell",
+        "git log --oneline --grep=#12; git switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a PowerShell assignment comment with an apostrophe",
+        "PowerShell",
+        "$x=#it's a note\n1\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a PowerShell backtick-CRLF continuation", "PowerShell", "git `\r\nswitch main", GS_SHARED, BLOCK),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+rc, err = run_hook(
+    GUARD,
+    merge_event("cd /c/repo/EU/OBF_experiments \\\n  && gh pr merge 29 --squash -d", t_rev, cwd=GS_ELSE),
+    env=GS_ENV,
+)
+expect("merge guard: a continued cd into a shared checkout, then `gh pr merge -d` -> exit 2", rc, BLOCK, err)
+expect_true("... the -d hint points at the session's own worktree", "your own worktree" in err, err)
+for label, shell_line, transcript, want, tool in (
+    (
+        "a PowerShell merge inside `if ($LASTEXITCODE -eq 0) { ... }`",
+        "if ($LASTEXITCODE -eq 0) { gh pr merge 29 --squash }",
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "a PowerShell merge inside try/catch",
+        "try { gh pr merge 29 --squash } catch { Write-Host failed }",
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "a glued `$out=gh pr merge` in an unclear call",
+        "$out=gh pr merge 29 --squash\n$m = @'\nx",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("a continued merge in an unclear call", "gh pr \\\nmerge 29 --squash\necho 'x", t_rev, BLOCK, "Bash"),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
 
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
