@@ -25,6 +25,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1576,6 +1577,12 @@ expect_true("the shipped example parses as a config", not isinstance(GS_CFG, str
 GS_SHARED = "C:\\repo\\EU\\OBF_experiments"
 GS_ELSE = "C:\\Users\\x"
 
+
+def powershellish(command: str) -> bool:
+    """A table row written in PowerShell - judged as the PowerShell tool would send it."""
+    return any(word in command for word in ("Set-Location", "-LiteralPath", "-ErrorAction", "Push-Location"))
+
+
 GS_BLOCKED = [
     ("git checkout -b feat/typed-identity-legs", GS_SHARED),  # the 2026-09-24 incident
     ("git switch feature/new_running", GS_SHARED),
@@ -1626,7 +1633,7 @@ GS_BLOCKED = [
     ("git -c core.x=1 switch y", GS_SHARED),
 ]
 for cmd, cwd in GS_BLOCKED:
-    reason = guard.check_command(cmd, cwd, GS_CFG)
+    reason = guard.check_command(cmd, cwd, GS_CFG, powershellish(cmd))
     expect_true(f"block: {cmd[:60]!r} (cwd {cwd})", reason is not None, str(reason))
 
 GS_ALLOWED = [
@@ -1662,7 +1669,7 @@ GS_ALLOWED = [
     ("git -C C:/repo/EU/OBF_experiments_wt_x switch y", GS_SHARED),
 ]
 for cmd, cwd in GS_ALLOWED:
-    reason = guard.check_command(cmd, cwd, GS_CFG)
+    reason = guard.check_command(cmd, cwd, GS_CFG, powershellish(cmd))
     expect_true(f"allow: {cmd[:60]!r} (cwd {cwd or '-'})", reason is None, str(reason))
 
 reason = guard.check_command("git checkout -b x", GS_SHARED, GS_CFG)
@@ -2444,7 +2451,7 @@ rc, err = run_hook(NOPUNT, stop_payload(UNBACKED[0], transcript_path=str(t), pro
 expect("an unreviewed-merge refusal does not back the BLOCKED: -> block", rc, BLOCK, err)
 expect_true(
     "... and the bounce spells out the remedy",
-    "[Merge Without Review]" in err and "Spawn `review`" in err and "lone Bash call" in err,
+    "[Merge Without Review]" in err and "Spawn `review`" in err and "its own Bash call" in err,
     err,
 )
 t = kg_transcript(
@@ -2470,14 +2477,28 @@ expect_true(
 )
 
 
-# guard-shared-checkouts: a chained or unreviewed `gh pr merge` never reaches the auto-mode classifier, whose
-# refusal would latch the session (c--repo-EU 2026-09-25: `git diff` for the reviewer refused after it).
-def merge_event(command: str, transcript: Path | None, tool: str = "Bash", uid: str = "t-now") -> dict[str, object]:
+# guard-shared-checkouts: a merge auto mode would refuse never reaches the classifier, whose refusal would latch
+# the session (c--repo-EU 2026-09-25: `git diff` for the reviewer refused after an unreviewed merge).
+def kg_result(uid: str, body: str, error: bool) -> dict[str, object]:
+    block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
+    return {"type": "user", "uuid": uuid.uuid4().hex, "message": {"role": "user", "content": [block]}}
+
+
+def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
+    """A Bash call as Claude Code records it: the record carries the session's cwd, as the hook payload does."""
+    call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": command}}
+    message = {"id": uuid.uuid4().hex, "content": [call]}
+    return {"type": "assistant", "uuid": uuid.uuid4().hex, "cwd": str(NP), "message": message}
+
+
+def merge_event(
+    command: str, transcript: Path | None, tool: str = "Bash", uid: str = "t-now", cwd: str | None = None
+) -> dict[str, object]:
     event: dict[str, object] = {
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
         "tool_input": {"command": command},
-        "cwd": str(NP),
+        "cwd": cwd or str(NP),
         "tool_use_id": uid,
     }
     if transcript is not None:
@@ -2485,67 +2506,1072 @@ def merge_event(command: str, transcript: Path | None, tool: str = "Bash", uid: 
     return event
 
 
-def kg_bash(command: str, uid: str = "t-bash") -> dict[str, object]:
-    call = {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": command}}
-    return {"type": "assistant", "uuid": uuid.uuid4().hex, "message": {"id": uuid.uuid4().hex, "content": [call]}}
-
-
 NO_CONFIG = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(NP / "no-such-config.json")}
-MERGE = "gh pr merge 29 --squash --delete-branch"
+
+
+def guard_merge(command: str, transcript: Path | None, **kw: str) -> tuple[int, str]:
+    return run_hook(GUARD, merge_event(command, transcript, **kw), env=NO_CONFIG)
+
+
+MERGE = "gh pr merge 29 --squash"
 created = kg_bash("git push -u origin x && gh pr create --fill", "t-create")
 t_none = kg_transcript("merge-unreviewed.jsonl", [kg_prompt("ship it"), created])
 t_rev = kg_transcript("merge-reviewed.jsonl", [kg_prompt("ship it"), created, kg_review()])
-t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
-rc, err = run_hook(GUARD, merge_event(f"{MERGE} 2>&1 | tail -3; gh pr view 29", t_rev), env=NO_CONFIG)
-expect("merge guard: a chained merge -> exit 2, even with no config file", rc, BLOCK, err)
-expect_true("... told to run it alone", "lone call" in err, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_none), env=NO_CONFIG)
-expect("merge guard: no review spawned since the PR -> exit 2", rc, BLOCK, err)
-expect_true("... told to spawn review first", "spawn `review`" in err and "alone" in err, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_rev), env=NO_CONFIG)
-expect("merge guard: a review spawned, merge alone -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_rev, tool="PowerShell"), env=NO_CONFIG)
+
+# The review gate - with no config file at all.
+rc, err = guard_merge(MERGE, t_none)
+expect("merge guard: no review spawned in the session -> exit 2, even with no config file", rc, BLOCK, err)
+expect_true("... told to spawn review first", "spawn `review`" in err and "its own call" in err, err)
+rc, err = guard_merge(MERGE, t_rev)
+expect("merge guard: reviewed, merge in its own call -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(MERGE, t_rev, tool="PowerShell")
 expect("merge guard: the same from PowerShell -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_self), env=NO_CONFIG)
+t_before = kg_transcript(
+    "merge-review-before-create.jsonl",
+    [kg_prompt("ship it"), kg_review(), created, kg_result("t-create", "https://github.com/o/r/pull/9", False)],
+)
+rc, err = guard_merge(MERGE, t_before)
+expect("merge guard: review, then `gh pr create`, then the merge -> exit 0", rc, ALLOW, err)
+t_ns = kg_transcript("merge-ns-review.jsonl", [kg_prompt("ship it"), kg_review(role="lost-mary:review")])
+rc, err = guard_merge(MERGE, t_ns)
+expect("merge guard: a plugin-namespaced review counts -> exit 0", rc, ALLOW, err)
+t_self = kg_transcript("merge-self.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
+rc, err = guard_merge(MERGE, t_self)
 expect("merge guard: the transcript already holds this very call -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, NP / "missing.jsonl"), env=NO_CONFIG)
-expect("merge guard: unreadable transcript -> exit 0 (fail open)", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event(MERGE, None), env=NO_CONFIG)
-expect("merge guard: no transcript_path -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("gh pr view 29 --json state | head -3", t_none), env=NO_CONFIG)
-expect("merge guard: other gh pr commands, chained -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("C:/tools/gh.exe pr merge 29", t_none), env=NO_CONFIG)
-expect("merge guard: gh named by path -> exit 2", rc, BLOCK, err)
-
-
-def kg_result(uid: str, body: str, error: bool) -> dict[str, object]:
-    block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
-    return {"type": "user", "uuid": uuid.uuid4().hex, "message": {"role": "user", "content": [block]}}
-
-
-# Review 2026-09-25 (HIGH): only a merge that went through spends the review. One this hook held back, the
-# classifier refused or GitHub rejected never ran - the obedient lone retry must pass.
-held = kg_bash(f"{MERGE} | tail -3", "t-held")
-t_held = kg_transcript(
-    "merge-held-then-lone.jsonl",
-    [kg_prompt("ship it"), kg_review(), held, kg_result("t-held", "guard-shared-checkouts: run it alone", True)],
-)
-rc, err = run_hook(GUARD, merge_event(MERGE, t_held), env=NO_CONFIG)
-expect("merge guard: review -> chained merge held -> lone retry -> exit 0", rc, ALLOW, err)
-t_done = kg_transcript(
-    "merge-went-through.jsonl",
-    [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-m29"), kg_result("t-m29", "Merged", False)],
-)
-rc, err = run_hook(GUARD, merge_event("gh pr merge 30 --squash", t_done), env=NO_CONFIG)
-expect("merge guard: the review was spent on a merge that went through -> exit 2", rc, BLOCK, err)
-t_bare = kg_transcript("merge-no-id.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-now")])
-event = merge_event(MERGE, t_bare)
+event = merge_event(MERGE, t_self)
 event.pop("tool_use_id")
 rc, err = run_hook(GUARD, event, env=NO_CONFIG)
 expect("merge guard: no tool_use_id and the call already in the transcript -> exit 0", rc, ALLOW, err)
-t_ns = kg_transcript("merge-ns-review.jsonl", [kg_prompt("ship it"), kg_review(role="lost-mary:review")])
-rc, err = run_hook(GUARD, merge_event(MERGE, t_ns), env=NO_CONFIG)
-expect("merge guard: a plugin-namespaced review counts -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(MERGE, NP / "missing.jsonl")
+expect("merge guard: unreadable transcript -> exit 0 (fail open) ...", rc, ALLOW, err)
+expect_true("... with a notice", "cannot read the transcript" in err, err)
+rc, err = guard_merge(MERGE, None)
+expect("merge guard: no transcript_path -> exit 0 ...", rc, ALLOW, err)
+expect_true("... with a notice", "no transcript_path" in err, err)
+
+# Only a merge that went through spends the review. gh prints nothing on success when stdout is not a terminal.
+t_done = kg_transcript(
+    "merge-went-through.jsonl",
+    [kg_prompt("ship it"), kg_review(), kg_bash(MERGE, "t-m29"), kg_result("t-m29", "", False)],
+)
+rc, err = guard_merge("gh pr merge 30 --squash", t_done)
+expect("merge guard: the review was spent on a silent merge that went through -> exit 2", rc, BLOCK, err)
+NOT_SPENT = [
+    (
+        "held by this hook",
+        f"git push && {MERGE}",
+        'PreToolUse:Bash hook error: ["python" "guard-shared-checkouts.py"]: guard-shared-checkouts: run it alone',
+        True,
+    ),
+    ("refused by the classifier", MERGE, REFUSAL, True),
+    ("rejected by GitHub behind a pipe", f"{MERGE} 2>&1 | tail -3", "X Pull request #29 is not mergeable", False),
+    ("rejected by the API behind a pipe", f"{MERGE} 2>&1 | tail -1", "GraphQL: Base branch was modified", False),
+]
+for label, first, body, error in NOT_SPENT:
+    t = kg_transcript(
+        "merge-not-spent.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(first, "t-first"), kg_result("t-first", body, error)],
+    )
+    rc, err = guard_merge(MERGE, t)
+    expect(f"merge guard: review, this PR's merge {label}, then its retry -> exit 0", rc, ALLOW, err)
+
+SPENT = [
+    # c--repo-EU 2026-09-25 12:37, then PR #29 refused at 13:37: only the cleanup after the merge failed.
+    (
+        "whose cleanup failed behind a pipe",
+        f"{MERGE} --delete-branch 2>&1 | tail -2",
+        "failed to delete local branch x: failed to run git: error: cannot delete branch 'x' used by worktree\n\n"
+        "MERGED 0cc157ce18ca5b29a0af004fb8624a4c2faf77b9",
+        False,
+    ),
+    (
+        "whose cleanup failed with exit 1",
+        f"{MERGE} --delete-branch",
+        "Exit code 1\nfailed to run git: fatal: 'main' is already checked out at 'C:/repo/x'",
+        True,
+    ),
+]
+for label, first, body, error in SPENT:
+    t = kg_transcript(
+        "merge-spent.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(first, "t-first"), kg_result("t-first", body, error)],
+    )
+    rc, err = guard_merge("gh pr merge 30 --squash", t)
+    expect(f"merge guard: review, a merge {label}, then the next merge -> exit 2 (the review is spent)", rc, BLOCK, err)
+t = kg_transcript(
+    "merge-declined.jsonl",
+    [
+        kg_prompt("ship it"),
+        kg_review(),
+        kg_bash(MERGE, "t-first"),
+        kg_result("t-first", "The user doesn't want to proceed with this tool use.", True),
+    ],
+)
+rc, err = guard_merge(MERGE, t)
+expect("merge guard: review, a merge declined at the prompt, then the retry -> exit 0", rc, ALLOW, err)
+
+# The tokenizer: a command substitution in an assignment prefix is one word, and \" stays an escaped quote.
+TOKEN_MERGE = "GH_TOKEN=$(gh auth token -u fgn-odigo) gh pr merge 19 -R o/r --squash"
+rc, err = guard_merge(TOKEN_MERGE, t_rev)
+expect("merge guard: `GH_TOKEN=$(gh auth token ...) gh pr merge`, reviewed -> exit 0", rc, ALLOW, err)
+rc, err = guard_merge(TOKEN_MERGE, t_none)
+expect("merge guard: ... unreviewed -> exit 2 as unreviewed, not as chained", rc, BLOCK, err)
+expect_true("... told to spawn review", "spawn `review`" in err, err)
+rc, err = guard_merge('printf \'%s\' "{\\"command\\":\\"gh pr merge 1\\"}" > ev.json', t_none)
+expect("merge guard: a printf of JSON naming a merge, with escaped quotes -> exit 0", rc, ALLOW, err)
+
+# The review counts for the PR it precedes (third review, 2026-09-25): a retry of the same PR never spends it,
+# a merge of another PR that may have run always does - whatever that merge printed.
+HOOK_HELD = 'PreToolUse:Bash hook error: ["python" "guard-shared-checkouts.py"]: guard-shared-checkouts: run it alone'
+IDENTITY = [
+    (
+        "the same PR after its merge ran with a failed cleanup",
+        [(f"{MERGE} --delete-branch", "failed to run git: fatal: 'main' is already checked out at 'C:/x'", True)],
+        MERGE,
+        ALLOW,
+    ),
+    (
+        "another PR after a merge whose output names a failure",
+        [(f"{MERGE}; git log --oneline -1", "a1b2c3d guard: a not mergeable result keeps the review (#31)", False)],
+        "gh pr merge 30 --squash",
+        BLOCK,
+    ),
+    (
+        "the same number in another directory",
+        [("cd /c/repo/x && gh pr merge 29 --squash", "", False)],
+        "cd /c/repo/y && gh pr merge 29 --squash",
+        BLOCK,
+    ),
+    (
+        "the same number in the same directory",
+        [("cd /c/repo/x && gh pr merge 29 --squash", "", False)],
+        "cd /c/repo/x && gh pr merge 29 --squash",
+        ALLOW,
+    ),
+    (
+        "the same PR as a URL, then as -R and a number",
+        [("gh pr merge https://github.com/o/r/pull/29 --squash", "", False)],
+        "gh pr merge 29 -R o/r --squash",
+        ALLOW,
+    ),
+    (
+        "one PR of a two-merge call this hook held",
+        [("gh pr merge 29 --squash && gh pr merge 30 --squash", HOOK_HELD, True)],
+        MERGE,
+        ALLOW,
+    ),
+    ("another PR while an earlier merge has no result yet", [("gh pr merge 30 --squash", None, False)], MERGE, BLOCK),
+]
+for label, earlier, now, want in IDENTITY:
+    records: list[dict[str, object]] = [kg_prompt("ship it"), kg_review()]
+    for i, (first, body, error) in enumerate(earlier):
+        records.append(kg_bash(first, f"t-e{i}"))
+        if body is not None:
+            records.append(kg_result(f"t-e{i}", body, error))
+    rc, err = guard_merge(now, kg_transcript("merge-identity.jsonl", records))
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+
+# The tokenizer (third review): a command substitution is a command of its own, a lone `&` ends a command, an
+# unquoted `#` starts a comment, and `--help` / `--disable-auto` merge nothing.
+for label, shell_line, transcript, want in (
+    (
+        "a PR created and merged in one call (`url=$(gh pr create)`)",
+        'url=$(gh pr create --fill); gh pr merge "$url"',
+        t_rev,
+        BLOCK,
+    ),
+    ("`OUT=$( gh pr merge 29 )`, unreviewed", "OUT=$( gh pr merge 29 --squash 2>&1 )", t_none, BLOCK),
+    ("two merges joined by a lone `&`", "gh pr merge 27 --squash & gh pr merge 28 --squash", t_rev, BLOCK),
+    ("a merge beside a background push", "gh pr merge 29 --squash & git push", t_rev, BLOCK),
+    ("a PUT to the merge endpoint with a variable PR", "gh api -X PUT repos/o/r/pulls/$PR/merge", t_rev, BLOCK),
+    ("a merge followed by a comment naming another", "gh pr merge 29 --squash\n# next: gh pr merge 30", t_rev, ALLOW),
+    ("`gh pr merge --help`, unreviewed", "gh pr merge --help", t_none, ALLOW),
+    ("`gh pr merge 29 --disable-auto`, unreviewed", "gh pr merge 29 --disable-auto", t_none, ALLOW),
+):
+    rc, err = guard_merge(shell_line, transcript)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+expect_true(
+    "guard-shared-checkouts' DID_NOT_RUN holds no-punt's REFUSAL_MARKERS",
+    set(np_mod.REFUSAL_MARKERS) <= set(guard.DID_NOT_RUN),
+    f"{np_mod.REFUSAL_MARKERS} vs {guard.DID_NOT_RUN}",
+)
+
+# PowerShell has no backslash escapes: a quoted path ending in `\` still names the checkout.
+PS_CONFIG = NP / "ps-shared.json"
+PS_CONFIG.write_text(json.dumps({"shared": ["C:\\Users\\A B\\repo"], "frozen": []}), encoding="utf-8")
+PS_ENV = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(PS_CONFIG)}
+rc, err = run_hook(
+    GUARD,
+    guard_event("PowerShell", command='Set-Location "C:\\Users\\A B\\repo\\"; git switch main'),
+    env=PS_ENV,
+)
+expect("PowerShell: Set-Location to a quoted path ending in \\ with a space, then switch -> exit 2", rc, BLOCK, err)
+
+# Another PR's merge spends the review only if it may have run: a refusal, a decline or a hook block opens an
+# error result with its marker (did_not_run); anything else - a marker further on, or no error - ran.
+OTHER_PR = "gh pr merge 30 --squash"
+for label, body, error, want in (
+    ("refused by the classifier", REFUSAL, True, ALLOW),
+    ("declined at the prompt", "The user doesn't want to proceed with this tool use.", True, ALLOW),
+    ("held by this hook", HOOK_HELD, True, ALLOW),
+    ("that printed a refusal marker past its opening words", "x" * 200 + " " + REFUSAL, True, BLOCK),
+    ("whose output quotes a refusal, not as an error", REFUSAL, False, BLOCK),
+):
+    t = kg_transcript(
+        "merge-other-pr.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(OTHER_PR, "t-other"), kg_result("t-other", body, error)],
+    )
+    rc, err = guard_merge(MERGE, t)
+    expect(f"merge guard: review, another PR's merge {label}, then this one -> exit {want}", rc, want, err)
+
+# Only a literal number (in a known repository or directory) or a PR URL names a PR (fourth review, HIGH).
+NO_NUMBER = "gh pr merge --squash --delete-branch 2>&1 | tail -3"
+for label, earlier, now, want in (
+    ("a numberless merge, then another numberless merge in the same place", NO_NUMBER, NO_NUMBER, BLOCK),
+    ("`$PR`, then `$PR` again", 'PR=29; gh pr merge "$PR" --squash', 'PR=30; gh pr merge "$PR" --squash', BLOCK),
+    ("a branch name, then the same branch name", "gh pr merge feat/x --squash", "gh pr merge feat/x --squash", BLOCK),
+    (
+        "the same number in two directories the guard cannot resolve",
+        "cd ~/repos/ops && gh pr merge 9 --squash",
+        "cd ~/repos/gsd && gh pr merge 9 --squash",
+        BLOCK,
+    ),
+    ("`#29`, then 29", "gh pr merge '#29' --squash", MERGE, ALLOW),
+):
+    t = kg_transcript(
+        "merge-no-identity.jsonl",
+        [kg_prompt("ship it"), kg_review(), kg_bash(earlier, "t-earlier"), kg_result("t-earlier", "", False)],
+    )
+    rc, err = guard_merge(now, t)
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+t_bare_none = kg_transcript(
+    "merge-no-id-no-number.jsonl", [kg_prompt("ship it"), kg_review(), kg_bash(NO_NUMBER, "t-x")]
+)
+event = merge_event(NO_NUMBER, t_bare_none)
+event.pop("tool_use_id")
+rc, err = run_hook(GUARD, event, env=NO_CONFIG)
+expect("merge guard: a numberless merge, no tool_use_id, the call already in the transcript -> exit 0", rc, ALLOW, err)
+
+# Substitutions, comments, PowerShell (fourth review): the merge is found wherever it runs, and nothing else is.
+for label, shell_line, transcript, want, tool in (
+    (
+        "a merge in a quoted substitution, unreviewed",
+        'OUT="$(gh pr merge 29 --squash 2>&1)"; echo "$OUT" | tail -3',
+        t_none,
+        BLOCK,
+        "Bash",
+    ),
+    ("... reviewed", 'OUT="$(gh pr merge 29 --squash 2>&1)"; echo "$OUT" | tail -3', t_rev, ALLOW, "Bash"),
+    ("a merge in an argument's substitution, unreviewed", "printf '%s' \"$(gh pr merge 29)\"", t_none, BLOCK, "Bash"),
+    ("a merge in a nested substitution, unreviewed", "X=$(echo $(gh pr merge 29))", t_none, BLOCK, "Bash"),
+    (
+        "a comment with an apostrophe, then a push",
+        "gh pr merge 29 --squash  # it's reviewed\ngit push origin --delete x",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "a comment that names another merge",
+        "gh pr merge 29 --squash  # reviewed; then gh pr merge 30",
+        t_rev,
+        ALLOW,
+        "Bash",
+    ),
+    ("a bare `gh auth token` beside a merge", "gh auth token && gh pr merge 29 --squash", t_rev, BLOCK, "Bash"),
+    (
+        "a merge text inside a quoted heredoc",
+        "git commit -q -F - <<'EOF'\nurl=$(gh pr merge 29)\nEOF\ngit push",
+        t_none,
+        ALLOW,
+        "Bash",
+    ),
+    (
+        "a GraphQL mergePullRequest",
+        "gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+    ("a PowerShell backtick continuation", "gh pr merge 29 `\n--squash", t_rev, ALLOW, "PowerShell"),
+    ("a PowerShell `$out = gh pr merge`, reviewed", "$out = gh pr merge 29 --squash", t_rev, ALLOW, "PowerShell"),
+    ("... unreviewed", "$out = gh pr merge 29 --squash", t_none, BLOCK, "PowerShell"),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+expect_true(
+    "a mid-word # is no comment",
+    guard.segments("gh pr merge fix/#12-x") == [["gh", "pr", "merge", "fix/#12-x"]],
+    str(guard.segments("gh pr merge fix/#12-x")),
+)
+
+# Shared checkouts: comments no longer hide a switch, `C#` in a path is a path, and `-d` in its spellings.
+CS_CONFIG = NP / "cs-shared.json"
+CS_CONFIG.write_text(json.dumps({"shared": ["C:\\src\\C#\\repo"], "frozen": []}), encoding="utf-8")
+CS_ENV = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(CS_CONFIG)}
+for label, shell_line in (
+    (
+        "a switch after a comment with an apostrophe",
+        "cd /c/src/C#/repo && git status --short  # what's left\ngit switch main",
+    ),
+    ("a switch in a checkout whose path holds `#`", "cd /c/src/C#/repo && git switch main"),
+    ("a switch through `git -C` into that path", "git -C C:/src/C#/repo switch main"),
+):
+    rc, err = run_hook(GUARD, guard_event("Bash", command=shell_line), env=CS_ENV)
+    expect(f"shared checkout: {label} -> exit 2", rc, BLOCK, err)
+for shared_call, want, label in (
+    (f"{MERGE} --delete-branch=true", BLOCK, "`--delete-branch=true`"),
+    (f"{MERGE} --delete-branch=1", BLOCK, "`--delete-branch=1`"),
+    (f"{MERGE} -d -R o/r", ALLOW, "`-d` with `-R` (gh keeps local branches then)"),
+):
+    rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
+    expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
+
+# One scanner reads quotes, escapes, `$(...)`, comments and heredocs the way the shell does (fifth review).
+for label, shell_line, transcript, want, tool in (
+    (
+        "an escaped quote before `(#31)`, then a merge",
+        'gh pr create --title "Revert \\"fix (#31)\\"" --fill && gh pr merge 32 --squash',
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "escaped quotes around `#12`, then a merge",
+        'printf "{\\"title\\": \\"Fix #12\\"}" > b.json && gh pr merge 29',
+        t_none,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "nested quotes in a quoted substitution, then a merge",
+        'X="$(echo "a #b")"; gh pr merge 29 --squash',
+        t_none,
+        BLOCK,
+        "Bash",
+    ),
+    (
+        "a PowerShell backtick-quote before `#1`, then a merge",
+        'Write-Host "say `"hi #1`""; gh pr merge 29',
+        t_none,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("an escaped apostrophe, then a substituted merge", "echo It\\'s done $(gh pr merge 29)", t_none, BLOCK, "Bash"),
+    ("separators inside a substitution", "X=$(git log -1; git status); gh pr merge 29 --squash", t_rev, ALLOW, "Bash"),
+    ("a merge in single quotes", "echo '$(gh pr merge 29)'", t_none, ALLOW, "Bash"),
+    ("arithmetic, then a merge", "echo $((1+2)) && gh pr merge 29 --squash", t_rev, ALLOW, "Bash"),
+    ("a comment right after `(`", "( # note\ngh pr merge 29 --squash )", t_rev, ALLOW, "Bash"),
+    ("a merge in a process substitution", "cat <(gh pr merge 29 --squash)", t_rev, BLOCK, "Bash"),
+    ("a PowerShell `$out=gh pr merge`, reviewed", "$out=gh pr merge 29 --squash", t_rev, ALLOW, "PowerShell"),
+    ("... unreviewed", "$out=gh pr merge 29 --squash", t_none, BLOCK, "PowerShell"),
+    ("a PowerShell `$out=(gh pr merge)`, unreviewed", "$out=(gh pr merge 29 --squash)", t_none, BLOCK, "PowerShell"),
+    (
+        "a merge, then `$($LASTEXITCODE)` printed",
+        'gh pr merge 29 --squash; Write-Host "exit $($LASTEXITCODE)"',
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    ("a merge, then `$LASTEXITCODE`", "gh pr merge 29 --squash; $LASTEXITCODE", t_rev, ALLOW, "PowerShell"),
+    ("a merge, then `$(date)` echoed", 'gh pr merge 29 --squash && echo "done $(date)"', t_rev, ALLOW, "Bash"),
+    (
+        "a GraphQL enablePullRequestAutoMerge",
+        "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge(NO_NUMBER, t_none)
+expect_true("the unreviewed message says to name the PR", "name the PR" in err, err)
+
+# What a merge names: a substituted -R names nothing; GH_REPO and `-Ro/x` name the repository; a
+# `gh repo set-default` between two merges makes the same bare number two PRs.
+SUBST_REPO = 'gh pr merge 29 -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --squash'
+for label, earlier, between, now, want in (
+    ("a substituted -R, twice", SUBST_REPO, None, SUBST_REPO, BLOCK),
+    ("GH_REPO=o/x, then GH_REPO=o/y", "GH_REPO=o/x gh pr merge 29", None, "GH_REPO=o/y gh pr merge 29", BLOCK),
+    ("GH_REPO=o/x twice", "GH_REPO=o/x gh pr merge 29", None, "GH_REPO=o/x gh pr merge 29", ALLOW),
+    ("`-Ro/x`, then `-R o/x`", "gh pr merge 29 -Ro/x", None, "gh pr merge 29 -R o/x", ALLOW),
+    ("29, a `gh repo set-default`, then 29", MERGE, "gh repo set-default o/y", MERGE, BLOCK),
+):
+    records = [kg_prompt("ship it"), kg_review(), kg_bash(earlier, "t-earlier"), kg_result("t-earlier", "", False)]
+    if between is not None:
+        records += [kg_bash(between, "t-between"), kg_result("t-between", "", False)]
+    rc, err = guard_merge(now, kg_transcript("merge-names.jsonl", records))
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+
+# Shared checkouts: escapes no longer hide a checkout, and a bash `$(...)` keeps its `cd` inside.
+for label, shell_line in (
+    (
+        "a branch checkout after a commit subject with escaped quotes",
+        'git commit -m "Revert \\"x (#31)\\"" && git checkout -b feat',
+    ),
+    ("a switch after a substitution that changed directory", "X=$(cd /c/other && git rev-parse HEAD); git switch main"),
+    ("a switch after a quoted substitution that cd'd away", 'DIR="$(cd ~/x && pwd)"; git switch main'),
+    ("a switch after a heredoc inside a substitution", "MSG=$(cat <<'EOF'\nnote\nEOF\ngit switch main\n)"),
+):
+    rc, err = run_hook(GUARD, guard_event("Bash", command=shell_line), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit 2", rc, BLOCK, err)
+ps_event = guard_event("PowerShell", command="$null = $(Set-Location C:/repo/EU/OBF_experiments); git switch main")
+ps_event["cwd"] = GS_ELSE
+rc, err = run_hook(GUARD, ps_event, env=GS_ENV)
+expect("shared checkout: a PowerShell subexpression's Set-Location holds for what follows -> exit 2", rc, BLOCK, err)
+
+# Sixth review. GH_REPO names the repository but, unlike -R, lets gh delete the local branch (cli/cli
+# pkg/cmd/pr/merge/merge.go: CanDeleteLocalBranch = !Changed("repo"); GH_REPO is read by OverrideBaseRepoFunc).
+rc, err = run_hook(GUARD, merge_event(f"GH_REPO=o/r {MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
+expect("merge guard: reviewed `GH_REPO=o/r gh pr merge -d` in a shared checkout -> exit 2", rc, BLOCK, err)
+for label, earlier, now, want in (
+    ("-R o/x, then GH_REPO=o/x with -R o/y", "gh pr merge 29 -R o/x", "GH_REPO=o/x gh pr merge 29 -R o/y", BLOCK),
+    ("GH_REPO=o/x with -R o/y, then -R o/y", "GH_REPO=o/x gh pr merge 29 -R o/y", "gh pr merge 29 -R o/y", ALLOW),
+):
+    records = [kg_prompt("ship it"), kg_review(), kg_bash(earlier, "t-earlier"), kg_result("t-earlier", "", False)]
+    rc, err = guard_merge(now, kg_transcript("merge-env-repo.jsonl", records))
+    expect(f"merge guard: review, then {label} -> exit {want}", rc, want, err)
+view = [
+    kg_prompt("ship it"),
+    kg_review(),
+    kg_bash(MERGE, "t-earlier"),
+    kg_result("t-earlier", "", False),
+    kg_bash("gh repo set-default --view", "t-view"),
+    kg_result("t-view", "o/r", False),
+]
+rc, err = guard_merge(MERGE, kg_transcript("merge-view.jsonl", view))
+expect("merge guard: review, 29, a `gh repo set-default --view` (a read), then 29 -> exit 0", rc, ALLOW, err)
+
+
+def shell_event(tool: str, command: str, cwd: str) -> dict[str, object]:
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}
+
+
+# Shared checkouts: nested substitutions keep their enclosing directory; a bash `$(...)` keeps its cd inside;
+# the scanner reads here-strings, block comments, escapes, arithmetic, `$'...'` and every heredoc form.
+for label, tool, shell_line, cwd, want in (
+    (
+        "a stash in a substitution holding a nested one",
+        "Bash",
+        'OUT=$(cd /c/repo/EU/OBF_ops && git stash push -m "wip $(date +%F)" 2>&1); echo "$OUT"',
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a switch after a nested substitution",
+        "Bash",
+        'X=$(cd /c/repo/EU/OBF_ops && echo "$(pwd)" && git switch main)',
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a stash after pushd, inside a substitution",
+        "Bash",
+        "X=$(pushd /c/repo/EU/OBF_ops && git stash)",
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a switch after a substitution that pushd'd into a shared checkout",
+        "Bash",
+        "X=$(pushd /c/repo/EU/OBF_ops); git switch main",
+        GS_ELSE,
+        ALLOW,
+    ),
+    (
+        "a PowerShell path ending in a backslash, then a checkout",
+        "PowerShell",
+        "Get-ChildItem .\\src\\\ngit checkout -b feat",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a PowerShell here-string with an apostrophe, then a checkout",
+        "PowerShell",
+        "git commit -m @'\ndon't hide this\n'@\ngit checkout -b feat",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a PowerShell block comment with an apostrophe, then a switch",
+        "PowerShell",
+        "<# it's a note #>\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a PowerShell `@(git switch main)`", "PowerShell", "$r = @(git switch main)", GS_SHARED, BLOCK),
+    (
+        "a `#` after an escaped parenthesis, then a switch",
+        "Bash",
+        "git log --oneline | grep -E \\(#[0-9]+\\) && git switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a comment right after `)` holding an apostrophe, then a switch",
+        "Bash",
+        "(true)# it's a note\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a shift inside arithmetic, then a switch", "Bash", "echo $(( 1 << 4 ))\ngit switch main", GS_SHARED, BLOCK),
+    (
+        "an ANSI-C string with an escaped quote, then a switch",
+        "Bash",
+        "echo $'it\\'s'\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a `<<\\EOF` heredoc with an apostrophe, then a switch",
+        "Bash",
+        "cat <<\\EOF\nit's a body\nEOF\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a `<<'END-MSG'` heredoc with an apostrophe, then a switch",
+        "Bash",
+        "cat <<'END-MSG'\nit's a body\nEND-MSG\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a bash cd to an unquoted backslash path (it fails), then a checkout",
+        "Bash",
+        "cd C:\\repo\\EU\\OBF_ops_wt_x\ngit checkout -b x",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a bash cd to an unquoted backslash path into a shared checkout (it fails), then a switch",
+        "Bash",
+        "cd C:\\repo\\EU\\OBF_ops; git switch main",
+        GS_ELSE,
+        ALLOW,
+    ),
+    (
+        "a bash cd to a quoted backslash path, then a switch",
+        "Bash",
+        'cd "C:\\repo\\EU\\OBF_ops"; git switch main',
+        GS_ELSE,
+        BLOCK,
+    ),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+
+# The merge path through the same scanner.
+for label, shell_line, transcript, want, tool in (
+    (
+        "a heredoc inside a substitution, then a merge, reviewed",
+        "MSG=$(cat <<'EOF'\nnotes\nEOF\n); gh pr merge 29 --squash",
+        t_rev,
+        ALLOW,
+        "Bash",
+    ),
+    ("... unreviewed", "MSG=$(cat <<'EOF'\nnotes\nEOF\n); gh pr merge 29 --squash", t_none, BLOCK, "Bash"),
+    ("a bash `$CMD` beside a merge", 'CMD="git push --force"; $CMD; gh pr merge 29 --squash', t_rev, BLOCK, "Bash"),
+    ("a merge in a `>(...)`", "tee >(gh pr merge 29 --squash)", t_rev, BLOCK, "Bash"),
+    ("a PowerShell `@(gh pr merge)`, unreviewed", "$r = @(gh pr merge 29 --squash)", t_none, BLOCK, "PowerShell"),
+    ("... reviewed", "$r = @(gh pr merge 29 --squash)", t_rev, ALLOW, "PowerShell"),
+    (
+        "a PowerShell here-string printed, then a merge",
+        "Write-Output @'\nit's fine\n'@\ngh pr merge 29 --squash",
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+
+# Seventh review, and the fail-safe: a call whose scan ends inside something is also read naively.
+DEEP = "X=" + "$(" * 40 + "git switch main" + ")" * 40
+for label, tool, shell_line, cwd, want in (
+    (
+        "a stash in a substitution nested in one with no command of its own",
+        "Bash",
+        'X=$(echo "$(git stash)")',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a switch nested two deep after a cd",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops && X=$(echo $(git switch main))",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a quoted arithmetic shift, then a switch", "Bash", 'echo "mask $((1<<4))"\ngit switch main', GS_SHARED, BLOCK),
+    (
+        "a PowerShell `((...))` expression, then a switch",
+        "PowerShell",
+        "$n = ((Get-Content x.log) -split '(').Count\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a stash inside arithmetic", "Bash", "echo $(( $(git stash) + 1 ))", GS_SHARED, BLOCK),
+    ("nested subshells bash reads as `((`", "Bash", "((true); git switch main)", GS_SHARED, BLOCK),
+    (
+        "a `#` glued to a closing substitution, then a switch",
+        "Bash",
+        "echo $(date)#x; git switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        'a switch inside a PowerShell `@"` here-string',
+        "PowerShell",
+        '$m = @"\n$(git switch main)\n"@',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a cd with a backslash only in its redirect, then a switch",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops 2>C:\\tmp\\cd.log && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a failing cd behind `then`, then a checkout",
+        "Bash",
+        "if [ -d X ]; then cd C:\\repo\\EU\\OBF_ops_wt_x; fi\ngit checkout -b x",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("pushd, popd, then a switch", "Bash", "pushd /c/other; popd; git switch main", GS_SHARED, BLOCK),
+    ("a cd in a pipeline, then a switch", "Bash", "cd /c/other | true; git switch main", GS_SHARED, BLOCK),
+    ("a cd sent to the background, then a switch", "Bash", "cd /c/other & git switch main", GS_SHARED, BLOCK),
+    (
+        'a `<<"EOF"` heredoc with an apostrophe, then a switch',
+        "Bash",
+        'cat <<"EOF"\nit\'s\nEOF\ngit switch main',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "an arithmetic command with a shift, then a switch",
+        "Bash",
+        "(( x = 1 << 2 ))\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a heredoc that never ends, holding a switch", "Bash", "cat <<EOF\ngit switch main", GS_SHARED, BLOCK),
+    ("a switch nested past MAX_NESTING", "Bash", DEEP, GS_SHARED, BLOCK),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+rc, err = run_hook(
+    GUARD, shell_event("Bash", "cd C:\\repo\\EU\\OBF_ops_wt_x; git checkout -b x", GS_SHARED), env=GS_ENV
+)
+expect_true("... a block after a failing cd says why", rc == BLOCK and "quote the path" in err, err)
+expect_true(
+    "a deliberate escape in a cd path is no mangled path",
+    guard.bash_cd_fails("cd /c/repo/My\\ Repo") is None and guard.bash_cd_fails("cd C:\\repo\\x") == "cd",
+    str((guard.bash_cd_fails("cd /c/repo/My\\ Repo"), guard.bash_cd_fails("cd C:\\repo\\x"))),
+)
+
+for label, shell_line, transcript, want in (
+    (
+        "a merge, then quoted arithmetic holding a substitution",
+        'gh pr merge 29 --squash && echo "took $(( $(date +%s) - t0 ))s"',
+        t_rev,
+        ALLOW,
+    ),
+    ("a quoted arithmetic PR number, then a merge", 'echo "PR $((29))" && gh pr merge 29 --squash', t_rev, ALLOW),
+    ("a merge in a heredoc that never ends", "cat <<EOF\ngh pr merge 29 --squash", t_rev, BLOCK),
+):
+    rc, err = guard_merge(shell_line, transcript)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("cat <<EOF\ngh pr merge 29 --squash", t_rev)
+expect_true("... held as a call that does not parse cleanly", "does not parse cleanly" in err, err)
+for label, shared_call, want in (
+    ("a nested substitution's `-d`", 'X=$(echo "$(gh pr merge 29 --squash -d)")', BLOCK),
+    ("`-d` with a glued `-Ro/r` (gh keeps local branches)", f"{MERGE} -d -Ro/r", ALLOW),
+):
+    rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
+    expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
+rc, err = run_hook(GUARD, merge_event(f"GH_REPO=o/r {MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
+expect_true("... the block message carries no GH_REPO marker", rc == BLOCK and "\x00" not in err, repr(err))
+
+# Eighth review: misreads that ended balanced, so the fail-safe never saw them. Each shell behaviour was checked
+# live on 2026-09-26 (Git Bash; Windows PowerShell 5.1) before the fix.
+for label, tool, shell_line, cwd, want in (
+    (
+        "A1 a PowerShell comment ending in a backtick, then a switch",
+        "PowerShell",
+        "# Back to `main`\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A2 a bash comment ending in a backslash, then a checkout",
+        "Bash",
+        "# worktree C:\\repo\\EU\\OBF_ops_wt_x\\\ngit checkout -b x",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A3 a quoted heredoc whose last line ends in a backslash",
+        "Bash",
+        "cat <<'EOF' > a\nC:\\dir\\\nEOF\ngit switch main\ncat <<'EOF' > b\nx\nEOF",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A4 a here-string whose last line ends in a backtick",
+        "PowerShell",
+        "$a = @'\nrename `a`\n'@\ngit switch main\n$b = @'\nx\n'@",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A5 an escaped backslash at the end of a bash line",
+        "Bash",
+        "echo C:\\\\temp\\\\\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A5 an escaped backtick at the end of a PowerShell line",
+        "PowerShell",
+        "Write-Host a``\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("B1 a `#` inside `${...}`", "Bash", "echo ${x:-none #}; git switch main", GS_SHARED, BLOCK),
+    (
+        "B2 a comment glued to an arithmetic command",
+        "Bash",
+        "(( n++ ))#it's\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "B3 a PowerShell comment glued to `}`",
+        "PowerShell",
+        "if ($true) {Write-Output 1}#don't\ngit switch main\n# that's it",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "C1 an indented terminator is no terminator",
+        "Bash",
+        "cat <<EOF\n    EOF\nit's\nEOF\ngit switch main\n# it's done",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "C2 a heredoc opener line with a quote spanning lines",
+        "Bash",
+        'cat <<EOF "a\nb"\nbody\nEOF\ngit switch main\n# say "hi',
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "C3 a heredoc terminator the guard cannot read",
+        "Bash",
+        "cat <<$X\nit's\n$X\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("D1 a quoted `$((` that bash runs as a subshell", "Bash", 'echo "$((true); git switch main))"', GS_SHARED, BLOCK),
+    ("D2 a `((` that bash re-reads as subshells", "Bash", "((true); git switch main #))\n)", GS_SHARED, BLOCK),
+    ("D3 an ANSI-C quote inside arithmetic", "Bash", "(( x = $'\\'' )); git switch main; # '))", GS_SHARED, BLOCK),
+    ("a quoted parenthesis in arithmetic", "Bash", "echo $(( '(' )); git switch main", GS_SHARED, BLOCK),
+    ("a `#` glued to arithmetic", "Bash", "echo $((1))#x; git switch main", GS_SHARED, BLOCK),
+    ("pushd and popd inside a substitution", "Bash", "X=$(pushd /c/other; popd); git switch main", GS_SHARED, BLOCK),
+    ("popd with nothing pushed", "Bash", "popd; git switch main", GS_SHARED, BLOCK),
+    ("a failing cd with a redirect first", "Bash", "cd 2>/dev/null C:\\repo\\other; git switch main", GS_SHARED, BLOCK),
+    (
+        "a working cd with a backslash redirect first",
+        "Bash",
+        "cd 2>C:\\tmp\\x.log /c/repo/EU/OBF_ops && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a function body", "Bash", "f() { git switch main; }; f", GS_SHARED, BLOCK),
+    ("a ForEach-Object block", "PowerShell", "1..2 | ForEach-Object { git switch main }", GS_SHARED, BLOCK),
+    ("a PowerShell if block", "PowerShell", "if ($x) { git checkout -b y }", GS_SHARED, BLOCK),
+    ("a cd after `|&`", "Bash", "true |& cd /c/else; git switch main", GS_SHARED, BLOCK),
+    ("a switch in a process substitution", "Bash", "cat <(git switch main)", GS_SHARED, BLOCK),
+    (
+        "an alias-dodging `\\cd` into a shared checkout",
+        "Bash",
+        "\\cd /c/repo/EU/OBF_ops; git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("`builtin cd` into a shared checkout", "Bash", "builtin cd /c/repo/EU/OBF_ops; git switch main", GS_ELSE, BLOCK),
+    ("`time -p` before a switch", "Bash", "time -p git switch main", GS_SHARED, BLOCK),
+    ("`timeout 5` before a switch", "Bash", "timeout 5 git switch main", GS_SHARED, BLOCK),
+    ("`nice -n 10` before a stash", "Bash", "nice -n 10 git stash", GS_SHARED, BLOCK),
+    ("`env -i` before a switch", "Bash", "env -i GIT_TRACE=1 git switch main", GS_SHARED, BLOCK),
+    (
+        "curly quotes in PowerShell",
+        "PowerShell",
+        "Write-Output \u201cit's\u201d; git switch main\n# that's it",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "PowerShell `--%` holding an apostrophe",
+        "PowerShell",
+        "cmd /c echo --% it's here\ngit switch main\n# that's it",
+        GS_SHARED,
+        BLOCK,
+    ),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+
+for label, shell_line, transcript, want, tool in (
+    (
+        "A1 a PowerShell comment ending in a backtick, then a merge",
+        "# Merge PR `29`\ngh pr merge 29 --squash",
+        t_none,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a commit here-string whose body names `gh pr merge`",
+        "git commit -m @'\n- run `gh pr merge` alone\n- rename `a`\n'@",
+        t_none,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "an unclear call where `gh pr merge` only follows another word",
+        "cat <<EOF\necho run gh pr merge later",
+        t_none,
+        ALLOW,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("cat <<EOF\ngh pr merge 29 --squash", t_rev)
+expect_true("... an unclear hold names what never closed", rc == BLOCK and "never reaches `EOF`" in err, err)
+
+CLEAR = ["git status", "cat <<'EOF'\nx\nEOF", 'echo "$((1<<4))"', "echo ${x:-a #b}", "f() { :; }"]
+UNCLEAR = ["echo 'x", "echo $(x", "cat <<EOF\nx", 'echo "x', "cat <<$X\nbody", DEEP]
+expect_true(
+    "unclear(): every clean call reads cleanly",
+    not any(guard.unclear(c) for c in CLEAR),
+    str([guard.unclear(c) for c in CLEAR]),
+)
+expect_true(
+    "unclear(): every broken call is unclear",
+    all(guard.unclear(c) for c in UNCLEAR),
+    str([guard.unclear(c) for c in UNCLEAR]),
+)
+expect_true(
+    "unclear(): PowerShell here-strings and block comments that never close",
+    bool(guard.unclear("$a = @'\nx", True))
+    and bool(guard.unclear('$a = @"\nx', True))
+    and bool(guard.unclear("<# x", True)),
+    str((guard.unclear("$a = @'\nx", True), guard.unclear('$a = @"\nx', True), guard.unclear("<# x", True))),
+)
+
+# The `case` heuristic reads a `case WORD in` command, not the word: a real 2026-09-23 commit whose substitution held
+# a branch name like `kebab-case` was held as an unclear merge before (found by replaying 27,595 real commands).
+expect_true(
+    "unclear(): `case` in a branch name or a grep pattern inside a substitution is no case command",
+    guard.unclear('echo "$(git rev-parse origin/rename-skill-to-kebab-case)"') is None
+    and guard.unclear('n=$(grep -n "case SpreadLeg.IDA1 | SpreadLeg.IDA2:" f.py | head -1)') is None,
+    str(guard.unclear('echo "$(git rev-parse origin/rename-skill-to-kebab-case)"')),
+)
+expect_true(
+    "unclear(): a real `case ... in` inside a substitution without `esac` is unclear",
+    guard.unclear("X=$(case y in y) cd /c/else;; esac); git switch main") is not None,
+    str(guard.unclear("X=$(case y in y) cd /c/else;; esac); git switch main")),
+)
+rc, err = run_hook(
+    GUARD, shell_event("Bash", "X=$(case y in y) cd /c/else;; esac); git switch main", GS_SHARED), env=GS_ENV
+)
+expect("shared checkout: a `case` pattern closing a substitution early, then a switch -> exit 2", rc, BLOCK, err)
+rc, err = guard_merge(
+    'git commit -q -m "same logic; then gh pr merge it" -m "see $(git rev-parse origin/rename-skill-to-kebab-case)"',
+    t_none,
+)
+expect("merge guard: a commit naming a merge beside a `kebab-case` substitution -> exit 0", rc, ALLOW, err)
+
+# Ninth review: a continuation right before a separator (the leading-operator style - 120 of 3,136 multi-line bash
+# commands on this machine) kept a lone `\` that broke the cd; `=` starts a PowerShell comment only in expression
+# mode (checked in Windows PowerShell 5.1, 2026-09-26); a backtick continues over CRLF.
+for label, tool, shell_line, cwd, want in (
+    (
+        "a cd, a continuation, then `&& git switch`",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops \\\n  && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a relative cd inside a shared checkout, continued", "Bash", "cd src \\\n&& git stash", GS_SHARED, BLOCK),
+    ("a pushd, continued", "Bash", "pushd /c/repo/EU/OBF_ops \\\n  && git stash", GS_ELSE, BLOCK),
+    ("a continued cd inside a substitution", "Bash", "X=$(cd /c/repo/EU/OBF_ops \\\n  && git stash)", GS_ELSE, BLOCK),
+    (
+        "a comment on the line after a continuation",
+        "Bash",
+        "cd /c/repo/EU/OBF_ops \\\n# note\ngit switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    (
+        "a PowerShell argument holding `=#`, then a switch",
+        "PowerShell",
+        "git log --oneline --grep=#12; git switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "a PowerShell assignment comment with an apostrophe",
+        "PowerShell",
+        "$x=#it's a note\n1\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("a PowerShell backtick-CRLF continuation", "PowerShell", "git `\r\nswitch main", GS_SHARED, BLOCK),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+rc, err = run_hook(
+    GUARD,
+    merge_event("cd /c/repo/EU/OBF_experiments \\\n  && gh pr merge 29 --squash -d", t_rev, cwd=GS_ELSE),
+    env=GS_ENV,
+)
+expect("merge guard: a continued cd into a shared checkout, then `gh pr merge -d` -> exit 2", rc, BLOCK, err)
+expect_true("... the -d hint points at the session's own worktree", "your own worktree" in err, err)
+for label, shell_line, transcript, want, tool in (
+    (
+        "a PowerShell merge inside `if ($LASTEXITCODE -eq 0) { ... }`",
+        "if ($LASTEXITCODE -eq 0) { gh pr merge 29 --squash }",
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "a PowerShell merge inside try/catch",
+        "try { gh pr merge 29 --squash } catch { Write-Host failed }",
+        t_rev,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "a glued `$out=gh pr merge` in an unclear call",
+        "$out=gh pr merge 29 --squash\n$m = @'\nx",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("a continued merge in an unclear call", "gh pr \\\nmerge 29 --squash\necho 'x", t_rev, BLOCK, "Bash"),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+
+# Tenth review: a condition or try/catch counts as harmless beside a merge only when it holds no command of its own;
+# the naive read keeps the raw chunks beside the joined ones; `$x+=#` is an assignment comment (checked live).
+for label, shell_line, transcript, want, tool in (
+    (
+        "a condition with a glued block holding a push",
+        "if ($LASTEXITCODE -eq 0) {git push}\ngh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "try/catch with glued blocks, then a merge",
+        "try {git push} catch {}; gh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a condition calling git, then a merge",
+        "$ok -and (git push); gh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("a bash `try` word before a push, then a merge", "try git push && gh pr merge 29 --squash", t_rev, BLOCK, "Bash"),
+    (
+        "a glued `$out=gh pr merge` in an unclear call",
+        "$out=gh pr merge 29 --squash\nWrite-Output 'x",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a spaced `$out = gh pr merge` in an unclear call",
+        "$out = gh pr merge 29 --squash\nWrite-Output 'x",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a merge after a comment ending in `\\`, in an unclear call",
+        "# note C:\\x\\\ngh pr merge 29 --squash\necho 'x",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("$out=gh pr merge 29 --squash\nWrite-Output 'x", t_rev, tool="PowerShell")
+expect_true("... the glued merge is found by the naive read", "does not parse cleanly" in err, err)
+for label, tool, shell_line in (
+    ("a `#` after a continuation that follows a closing substitution", "Bash", "echo $(true)\\\n#x; git switch main"),
+    ("a PowerShell compound-assignment comment", "PowerShell", "$x = 1\n$x+=#it's\n2\ngit switch main\n# that's all"),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, GS_SHARED), env=GS_ENV)
+    expect(f"shared checkout: {label}, then a switch -> exit 2", rc, BLOCK, err)
+
+# Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
+rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
+expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)
+expect_true("... told to run it in its own call", "its own call" in err, err)
+HARMLESS_CHAINS = [
+    f"{MERGE} 2>&1 | tail -3; gh pr view 29 --json state",
+    f"cd /c/repo/EU/OBF_x && {MERGE}",
+    f"gh auth switch --user frederikgnie && {MERGE} && git checkout -q main && git pull -q",
+    f"Set-Location C:/repo/x; {MERGE} | Select-Object -Last 3",
+    f"{MERGE}; git -C /c/repo/x fetch -q origin; git --no-pager log --oneline -1",
+    f"gh pr comment 29 --body reviewed && {MERGE}",
+    f"# merge the reviewed PR\n{MERGE}",
+    f"if [ -n x ]; then {MERGE}; fi",
+    f"git diff --stat origin/main; {MERGE}; git branch -d feat/x",
+]
+for i, chain in enumerate(HARMLESS_CHAINS):
+    rc, err = guard_merge(chain, t_rev)
+    expect(f"merge guard: a reviewed merge in a harmless chain #{i + 1} -> exit 0", rc, ALLOW, err)
+HELD_CHAINS = [
+    "gh pr merge 27 --squash && gh pr merge 28 --squash",  # review 2026-09-25: two merges on one review
+    f"for i in 1 2; do {MERGE}; done",
+    f"git commit -qm x && {MERGE}",
+    f"git checkout -- . && {MERGE}",
+    f"{MERGE} && git branch -D feat/x",
+    f"{MERGE} && git pull --force",
+    "29,30 | ForEach-Object { gh pr merge $_ --squash }",
+    "xargs -n1 gh pr merge --squash < prs.txt",
+]
+for i, chain in enumerate(HELD_CHAINS):
+    rc, err = guard_merge(chain, t_rev)
+    expect(f"merge guard: a reviewed merge in a chain auto mode may refuse #{i + 1} -> exit 2", rc, BLOCK, err)
+
+# The REST endpoint: a PUT merges and is always held (the allow rule names `gh pr merge`); a GET only asks.
+for api_call in ("gh api -X PUT repos/o/r/pulls/29/merge", "gh api --method=PUT repos/o/r/pulls/29/merge"):
+    rc, err = guard_merge(api_call, t_rev)
+    expect(f"merge guard: `{api_call}`, reviewed -> exit 2", rc, BLOCK, err)
+    expect_true("... told to use gh pr merge", "`gh pr merge <number>`" in err, err)
+for api_call in ("gh api repos/o/r/pulls/29/merge", "gh api repos/o/r/pulls/29/files"):
+    rc, err = guard_merge(api_call, t_none)
+    expect(f"merge guard: `{api_call}` (a read), unreviewed -> exit 0", rc, ALLOW, err)
+
+# A merge only mentioned is not a merge; gh named by path, or behind PowerShell's `&`, is.
 NOT_MERGES = [
     "echo 'gh pr merge 29' | tee note.txt",
     'grep -n "gh pr merge" notes.md | head -3',
@@ -2553,10 +3579,26 @@ NOT_MERGES = [
     "cat > msg.txt <<'EOF'\ngh pr merge 29 | tail\nEOF\ngit status",
 ]
 for i, mention in enumerate(NOT_MERGES):
-    rc, err = run_hook(GUARD, merge_event(mention, t_none), env=NO_CONFIG)
+    rc, err = guard_merge(mention, t_none)
     expect(f"merge guard: a merge only mentioned #{i + 1} -> exit 0", rc, ALLOW, err)
-rc, err = run_hook(GUARD, merge_event("& gh pr merge 29 --auto", t_none, tool="PowerShell"), env=NO_CONFIG)
+rc, err = guard_merge("C:/tools/gh.exe pr merge 29", t_none)
+expect("merge guard: gh named by path, unreviewed -> exit 2", rc, BLOCK, err)
+rc, err = guard_merge("& gh pr merge 29 --auto", t_none, tool="PowerShell")
 expect("merge guard: PowerShell `& gh pr merge --auto`, unreviewed -> exit 2", rc, BLOCK, err)
+
+# In a configured shared checkout the checkout rules still apply to an allowed merge: `-d` deletes the local
+# branch and switches the checkout off it first, and a chained `git switch` is still a switch.
+for shared_call, want, label in (
+    (f"{MERGE} -d", BLOCK, "`gh pr merge -d`"),
+    (f"{MERGE} --delete-branch", BLOCK, "`gh pr merge --delete-branch`"),
+    (f"{MERGE} -sd", BLOCK, "`gh pr merge -sd` (combined short flags)"),
+    (MERGE, ALLOW, "`gh pr merge` without -d"),
+    (f"{MERGE} && git switch main", BLOCK, "a merge chained with `git switch`"),
+):
+    rc, err = run_hook(GUARD, merge_event(shared_call, t_rev, cwd=GS_SHARED), env=GS_ENV)
+    expect(f"merge guard: reviewed {label} in a shared checkout -> exit {want}", rc, want, err)
+rc, err = run_hook(GUARD, merge_event(f"{MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
+expect_true("... the -d block says to merge without it", "without `-d`" in err, err)
 
 # Review 2026-09-25 (HIGH): a turn that only answered is how-to prose, not a skipped step.
 HOW_TO = "You'll need to run ssh-keygen -t ed25519, then add the key to GitHub under Settings -> SSH keys."
@@ -4297,6 +5339,89 @@ if linked is not None:
     )
 else:
     print("  skip linked sibling: neither symlink nor junction can be created here")
+
+print("replay-merges.py - historical merges replayed through the guard's merge check")
+REPLAY = ROOT / "scripts" / "replay-merges.py"
+RP = SCRATCH / "replay" / "projects" / "c--repo-r"
+RP.mkdir(parents=True)
+
+
+def rp_call(uid: str, when: str, name: str, tool_input: dict[str, object]) -> dict[str, object]:
+    call = {"type": "tool_use", "id": uid, "name": name, "input": tool_input}
+    return {"type": "assistant", "timestamp": when, "cwd": "C:/repo/r", "message": {"content": [call]}}
+
+
+def rp_result(uid: str, when: str, body: str, error: bool) -> dict[str, object]:
+    block = {"type": "tool_result", "tool_use_id": uid, "content": body, "is_error": error}
+    return {"type": "user", "timestamp": when, "message": {"role": "user", "content": [block]}}
+
+
+(RP / "s1.jsonl").write_text(
+    jsonl(
+        [
+            {"type": "user", "timestamp": "2026-09-25T10:00:00Z", "message": {"role": "user", "content": "ship it"}},
+            rp_call("m1", "2026-09-25T10:01:00Z", "Bash", {"command": "gh pr merge 7 --squash"}),
+            rp_result("m1", "2026-09-25T10:01:05Z", REFUSAL, True),
+            rp_call("r1", "2026-09-25T10:02:00Z", "Agent", {"subagent_type": "review", "prompt": "the diff"}),
+            rp_call("m2", "2026-09-25T10:10:00Z", "Bash", {"command": "gh pr merge 7 --squash"}),
+            rp_result("m2", "2026-09-25T10:10:05Z", "", False),
+            rp_call("m3", "2026-09-25T10:20:00Z", "Bash", {"command": "git push && gh pr merge 8 --squash"}),
+            rp_result("m3", "2026-09-25T10:20:05Z", "", False),
+        ]
+    ),
+    encoding="utf-8",
+)
+replay_env = {**os.environ, "LOST_MARY_SHARED_CHECKOUTS": str(RP / "no-such-config.json")}
+proc = subprocess.run(
+    [sys.executable, str(REPLAY), "--projects", str(RP.parent), "--since", "2026-09-25T10:15", "--detail"],
+    capture_output=True,
+    env=replay_env,
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect("replay-merges.py exits 0", proc.returncode, ALLOW, out + proc.stderr.decode("utf-8", "replace"))
+expect_true("... counts the three merge calls", out.startswith("3 merge calls in 1 transcripts"), out)
+expect_true(
+    "... the unreviewed merge was refused, the reviewed one went through, the chained one would be held",
+    bool(re.search(r"refused\s+unreviewed\s+1", out))
+    and bool(re.search(r"ran\s+allow\s+1", out))
+    and bool(re.search(r"ran\s+chained\s+1", out)),
+    out,
+)
+expect_true(
+    "... and --detail lists the chained merge that ran",
+    "ran but held" in out and "git push && gh pr merge 8" in out.split("ran but held", 1)[-1],
+    out,
+)
+
+print("replay-commands.py - recorded commands through the guard, before and after a change")
+REPLAY_COMMANDS = ROOT / "scripts" / "replay-commands.py"
+RC = SCRATCH / "replay-commands" / "projects" / "c--repo-rc"
+RC.mkdir(parents=True)
+(RC / "s1.jsonl").write_text(
+    jsonl(
+        [
+            rp_call("c1", "2026-09-25T10:00:00Z", "Bash", {"command": "git switch main"}) | {"cwd": GS_SHARED},
+            rp_call("c2", "2026-09-25T10:01:00Z", "Bash", {"command": "git status"}) | {"cwd": GS_SHARED},
+            rp_call("c3", "2026-09-25T10:02:00Z", "Bash", {"command": "echo 'unclosed"}) | {"cwd": GS_SHARED},
+        ]
+    ),
+    encoding="utf-8",
+)
+proc = subprocess.run(
+    [sys.executable, str(REPLAY_COMMANDS), "--baseline", "HEAD", "--projects", str(RC.parent)],
+    capture_output=True,
+    env=GS_ENV,
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect("replay-commands.py exits 0", proc.returncode, ALLOW, out + proc.stderr.decode("utf-8", "replace"))
+expect_true("... reads the three distinct commands", out.startswith("3 distinct commands"), out)
+expect_true("... reports the unclear call", "unclear calls: 1" in out and "an unclosed single quote" in out, out)
+proc = subprocess.run(
+    [sys.executable, str(REPLAY_COMMANDS), "--baseline", "no-such-ref-x", "--projects", str(RC.parent)],
+    capture_output=True,
+    env=GS_ENV,
+)
+expect("replay-commands.py with a baseline git cannot read -> exit 2", proc.returncode, 2, proc.stderr.decode())
 
 nuke(SCRATCH)
 
