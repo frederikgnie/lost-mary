@@ -3472,6 +3472,64 @@ for label, shell_line, transcript, want, tool in (
     rc, err = guard_merge(shell_line, transcript, tool=tool)
     expect(f"merge guard: {label} -> exit {want}", rc, want, err)
 
+# Tenth review: a condition or try/catch counts as harmless beside a merge only when it holds no command of its own;
+# the naive read keeps the raw chunks beside the joined ones; `$x+=#` is an assignment comment (checked live).
+for label, shell_line, transcript, want, tool in (
+    (
+        "a condition with a glued block holding a push",
+        "if ($LASTEXITCODE -eq 0) {git push}\ngh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "try/catch with glued blocks, then a merge",
+        "try {git push} catch {}; gh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a condition calling git, then a merge",
+        "$ok -and (git push); gh pr merge 29 --squash",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    ("a bash `try` word before a push, then a merge", "try git push && gh pr merge 29 --squash", t_rev, BLOCK, "Bash"),
+    (
+        "a glued `$out=gh pr merge` in an unclear call",
+        "$out=gh pr merge 29 --squash\nWrite-Output 'x",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a spaced `$out = gh pr merge` in an unclear call",
+        "$out = gh pr merge 29 --squash\nWrite-Output 'x",
+        t_rev,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a merge after a comment ending in `\\`, in an unclear call",
+        "# note C:\\x\\\ngh pr merge 29 --squash\necho 'x",
+        t_rev,
+        BLOCK,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("$out=gh pr merge 29 --squash\nWrite-Output 'x", t_rev, tool="PowerShell")
+expect_true("... the glued merge is found by the naive read", "does not parse cleanly" in err, err)
+for label, tool, shell_line in (
+    ("a `#` after a continuation that follows a closing substitution", "Bash", "echo $(true)\\\n#x; git switch main"),
+    ("a PowerShell compound-assignment comment", "PowerShell", "$x = 1\n$x+=#it's\n2\ngit switch main\n# that's all"),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, GS_SHARED), env=GS_ENV)
+    expect(f"shared checkout: {label}, then a switch -> exit 2", rc, BLOCK, err)
+
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
 expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)

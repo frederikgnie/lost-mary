@@ -228,9 +228,6 @@ CHAIN_OK = {
     "where-object",
     "out-null",
     "out-string",
-    "try",
-    "catch",
-    "finally",
 }
 PS_OPERATORS = {"-eq", "-ne", "-gt", "-ge", "-lt", "-le", "-and", "-or", "-not", "-like", "-match", "-contains"}
 CHAIN_OK_GH = {
@@ -476,8 +473,9 @@ def scan_commands(
         is how a line continues; none inside single quotes, a comment or a heredoc body;
       * `;`, `|`, `|&`, `&`, `&&`, `||` and newlines end a command only outside every context (`2>&1` is no `&`);
       * a `#` that starts a word outside quotes and `${...}` starts a comment to the end of the line - not right
-        after an escaped character or a closing `$(...)` / `$((...))`, where the word goes on; in PowerShell a word
-        also starts after `{ } , =`, and `<# ... #>` is a comment;
+        after an escaped character or a closing `$(...)` / `$((...))`, where the word goes on (a continuation after
+        a word start leaves the next line at a word start); in PowerShell a word also starts after `{ } ,`, a `#`
+        after an assignment's `=` (ps_assigns) starts a comment, and `<# ... #>` is a comment;
       * `$(...)`, and in bash `<(...)` / `>(...)` - inside double quotes too, where quotes nest afresh - are cut
         out: their text goes beside the command and PLACEHOLDER stays in its place;
       * bash `$((...))` and a `((...))` command are arithmetic when bash reads them so (arithmetic_at): no command,
@@ -579,7 +577,8 @@ def scan_commands(
         if ch == escape and i + 1 < n:
             pair = 3 if powershell and text.startswith("\r\n", i + 1) else 2
             emit(text[i : i + pair])
-            if not (text[i + 1] in "\r\n" and (i == 0 or text[i - 1] in word_start)):
+            before = i == 0 or (text[i - 1] in word_start and i not in (escaped_until, glued_at))
+            if not (text[i + 1] in "\r\n" and before):
                 escaped_until = i + pair  # the word goes on after an escaped character
             i += pair
             continue
@@ -781,9 +780,10 @@ def scan_commands(
 
 
 def ps_assigns(text: str, i: int, powershell: bool) -> bool:
-    """Whether the `#` at `i` follows a PowerShell assignment's `=` (`$x=#note`), where a comment may start - in an
-    argument (`--grep=#12`) the `=` is part of the word (checked in Windows PowerShell 5.1, 2026-09-26)."""
-    return powershell and bool(re.search(r"(?:\$[\w:]+|[)\]])\s*=$", text[max(0, i - 80) : i]))
+    """Whether the `#` at `i` follows a PowerShell assignment's `=` (`$x=#note`, `$x+=#note`), where a comment may
+    start - in an argument (`--grep=#12`) the `=` is part of the word (checked in Windows PowerShell 5.1,
+    2026-09-26)."""
+    return powershell and bool(re.search(r"(?:\$\{[^}]*\}|\$[\w:.]+|[)\]])\s*[-+*/%]?=$", text[max(0, i - 80) : i]))
 
 
 def cd_breaks(word: str) -> bool:
@@ -947,11 +947,14 @@ def unclear(command: str, powershell: bool = False) -> str | None:
 
 
 def naive_segments(command: str) -> list[list[str]]:
-    """The call cut at every separator, bracket and substitution, quotes ignored: the fallback for an unclear()
-    call, where the careful scan may have hidden a command. It finds anything hidden, at the price of false holds."""
+    """The call cut at every separator, bracket and substitution, quotes ignored - once as written and once with
+    its line continuations joined: the fallback for an unclear() call, where the careful scan may have hidden a
+    command. A command that starts any chunk is found, at the price of false holds."""
     out: list[list[str]] = []
-    command = re.sub(r"[\\`]\r?\n", " ", command)
-    for chunk in re.split(r"&&|\|\||\$\(|[;|&\n()`{}]", command):
+    joined = re.sub(r"[\\`]\r?\n", " ", command)
+    separators = r"&&|\|\||\$\(|[;|&\n()`{}]"
+    chunks = re.split(separators, command) + (re.split(separators, joined) if joined != command else [])
+    for chunk in chunks:
         chunk = chunk.replace("\\", "/")
         try:
             tokens = shlex.split(chunk, posix=True)
@@ -1069,8 +1072,8 @@ def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None
         if tokens[1:3] == ["pr", "merge"] and deletes and not remote:
             hint = (
                 " Or merge without `-d` / `--delete-branch`, or run the merge from your own worktree, where gh"
-                " leaves the checkout alone: with the PR's branch checked out here, gh would check out the base"
-                " branch and pull."
+                " leaves the checkout alone (if it then reports a failed local-branch cleanup, the merge itself went"
+                " through): with the PR's branch checked out here, gh would check out the base branch and pull."
             )
             return Call(current, label, True, hint)
         if tokens[1:3] != ["pr", "checkout"]:
@@ -1385,7 +1388,14 @@ def harmless(tokens: list[str], powershell: bool = False) -> bool:
     """
     if value_only(tokens, powershell):
         return True
-    if powershell and tokens[0].startswith("$") and PS_OPERATORS & {t.lower() for t in tokens}:
+    if powershell and len(tokens) == 1 and tokens[0].lower() in ("try", "catch", "finally"):
+        return True  # the keyword left when split_blocks() cut off its block
+    if (
+        powershell
+        and tokens[0].startswith("$")
+        and PS_OPERATORS & {t.lower() for t in tokens}
+        and not any("(" in t or "{" in t for t in tokens[1:])
+    ):
         return True  # a PowerShell condition such as `$LASTEXITCODE -eq 0`: an expression, not a command
     exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if exe in CHAIN_OK:
