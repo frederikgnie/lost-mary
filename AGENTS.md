@@ -212,6 +212,12 @@ replays every `gh pr merge` in the local transcripts through
 call, beside what really happened (refused, blocked, ran, no-result). Like `usage.py` it is
 not installed and reads nothing but transcripts. Re-run it after changing the
 merge check: every `refused` row should be held, few `ran` rows should be.
+`python scripts/replay-commands.py` does the same for the shared-checkout
+check: every recorded command through this checkout's guard and the guard
+at `--baseline` (default `main`), printing each verdict that differs
+(`BLOCK->allow` is a check the change lost) and every call the scanner
+cannot read cleanly. Real commands are what a model writes; review rounds
+kept finding contrived shapes and missed a false hold this found.
 
 **Where the tokens go.** `python scripts/usage.py --since 2026-09-15` sums the
 per-message `usage` every transcript under `~/.claude/projects` carries, by

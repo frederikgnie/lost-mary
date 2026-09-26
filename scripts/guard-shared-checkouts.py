@@ -22,8 +22,10 @@ shared-checkouts.example.json in the library repository):
             a branch-changing `checkout` (file restores are fine), `stash`
             other than list/show, `reset --hard|--merge|--keep`, `rebase`,
             `pull --rebase|--autostash`, `clean` with a force flag,
-            `gh pr checkout`, and `gh pr merge -d|--delete-branch` (it
-            deletes the local branch, switching the checkout off it first).
+            `gh pr checkout`, and `gh pr merge -d|--delete-branch` (with the
+            PR's branch checked out there, gh checks out the base branch and
+            pulls; otherwise it deletes the local branch - the guard cannot
+            tell which without running git, so it holds both).
             Work on a branch in your own worktree.
   frozen  - trees only a deploy script may change. Blocked: every git command
             aimed there and every Edit/Write/MultiEdit/NotebookEdit inside.
@@ -262,6 +264,8 @@ MERGE_VALUE_FLAGS = (
     "--match-head-commit",
 )
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A `case WORD in` starting a command - not the word in a branch name (`kebab-case`) or in a grep pattern.
+CASE_COMMAND = re.compile(r"(?:^|[\n;&|(])\s*case\s+\S+\s+in(?:\s|$)")
 PLACEHOLDER = "$SUBST"  # where a command substitution stood: a `$` word, so it names no repository or PR
 ENV_REPO = "\x00GH_REPO="  # a word only pr_key() reads: the repository GH_REPO names (see simple_command)
 CD_FAILS = "\x00cd-fails"  # the operand of a cd that goes nowhere (see cd_breaks)
@@ -525,7 +529,7 @@ def scan_commands(
             emit(")")
             return
         inner = "".join(sub or [])
-        if re.search(r"\bcase\b", inner) and not re.search(r"\besac\b", inner):
+        if CASE_COMMAND.search(inner) and not re.search(r"\besac\b", inner):
             mark("a `case` inside a substitution")  # its `pattern)` may have closed the substitution early
         captured.append(inner)
         sub = None
@@ -1039,8 +1043,8 @@ def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None
         remote = any(a in ("-R", "--repo") or a.startswith(("--repo=", "-R")) for a in args)  # gh keeps them
         if tokens[1:3] == ["pr", "merge"] and deletes and not remote:
             hint = (
-                " Or merge without `-d` / `--delete-branch`: it deletes the local branch, switching this checkout"
-                " off it first."
+                " Or merge without `-d` / `--delete-branch` (delete the remote branch with `git push origin --delete"
+                " <branch>`): with the PR's branch checked out here, gh would check out the base branch and pull."
             )
             return Call(current, label, True, hint)
         if tokens[1:3] != ["pr", "checkout"]:

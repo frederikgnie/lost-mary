@@ -3364,6 +3364,29 @@ expect_true(
     str((guard.unclear("$a = @'\nx", True), guard.unclear('$a = @"\nx', True), guard.unclear("<# x", True))),
 )
 
+# The `case` heuristic reads a `case WORD in` command, not the word: a real 2026-09-23 commit whose substitution held
+# a branch name like `kebab-case` was held as an unclear merge before (found by replaying 27,595 real commands).
+expect_true(
+    "unclear(): `case` in a branch name or a grep pattern inside a substitution is no case command",
+    guard.unclear('echo "$(git rev-parse origin/rename-skill-to-kebab-case)"') is None
+    and guard.unclear('n=$(grep -n "case SpreadLeg.IDA1 | SpreadLeg.IDA2:" f.py | head -1)') is None,
+    str(guard.unclear('echo "$(git rev-parse origin/rename-skill-to-kebab-case)"')),
+)
+expect_true(
+    "unclear(): a real `case ... in` inside a substitution without `esac` is unclear",
+    guard.unclear("X=$(case y in y) cd /c/else;; esac); git switch main") is not None,
+    str(guard.unclear("X=$(case y in y) cd /c/else;; esac); git switch main")),
+)
+rc, err = run_hook(
+    GUARD, shell_event("Bash", "X=$(case y in y) cd /c/else;; esac); git switch main", GS_SHARED), env=GS_ENV
+)
+expect("shared checkout: a `case` pattern closing a substitution early, then a switch -> exit 2", rc, BLOCK, err)
+rc, err = guard_merge(
+    'git commit -q -m "same logic; then gh pr merge it" -m "see $(git rev-parse origin/rename-skill-to-kebab-case)"',
+    t_none,
+)
+expect("merge guard: a commit naming a merge beside a `kebab-case` substitution -> exit 0", rc, ALLOW, err)
+
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
 expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)
@@ -5226,6 +5249,36 @@ expect_true(
     "ran but held" in out and "git push && gh pr merge 8" in out.split("ran but held", 1)[-1],
     out,
 )
+
+print("replay-commands.py - recorded commands through the guard, before and after a change")
+REPLAY_COMMANDS = ROOT / "scripts" / "replay-commands.py"
+RC = SCRATCH / "replay-commands" / "projects" / "c--repo-rc"
+RC.mkdir(parents=True)
+(RC / "s1.jsonl").write_text(
+    jsonl(
+        [
+            rp_call("c1", "2026-09-25T10:00:00Z", "Bash", {"command": "git switch main"}) | {"cwd": GS_SHARED},
+            rp_call("c2", "2026-09-25T10:01:00Z", "Bash", {"command": "git status"}) | {"cwd": GS_SHARED},
+            rp_call("c3", "2026-09-25T10:02:00Z", "Bash", {"command": "echo 'unclosed"}) | {"cwd": GS_SHARED},
+        ]
+    ),
+    encoding="utf-8",
+)
+proc = subprocess.run(
+    [sys.executable, str(REPLAY_COMMANDS), "--baseline", "HEAD", "--projects", str(RC.parent)],
+    capture_output=True,
+    env=GS_ENV,
+)
+out = proc.stdout.decode("utf-8", "replace")
+expect("replay-commands.py exits 0", proc.returncode, ALLOW, out + proc.stderr.decode("utf-8", "replace"))
+expect_true("... reads the three distinct commands", out.startswith("3 distinct commands"), out)
+expect_true("... reports the unclear call", "unclear calls: 1" in out and "an unclosed single quote" in out, out)
+proc = subprocess.run(
+    [sys.executable, str(REPLAY_COMMANDS), "--baseline", "no-such-ref-x", "--projects", str(RC.parent)],
+    capture_output=True,
+    env=GS_ENV,
+)
+expect("replay-commands.py with a baseline git cannot read -> exit 2", proc.returncode, 2, proc.stderr.decode())
 
 nuke(SCRATCH)
 
