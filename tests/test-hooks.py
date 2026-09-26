@@ -3197,6 +3197,173 @@ for label, shared_call, want in (
 rc, err = run_hook(GUARD, merge_event(f"GH_REPO=o/r {MERGE} -d", t_rev, cwd=GS_SHARED), env=GS_ENV)
 expect_true("... the block message carries no GH_REPO marker", rc == BLOCK and "\x00" not in err, repr(err))
 
+# Eighth review: misreads that ended balanced, so the fail-safe never saw them. Each shell behaviour was checked
+# live on 2026-09-26 (Git Bash; Windows PowerShell 5.1) before the fix.
+for label, tool, shell_line, cwd, want in (
+    (
+        "A1 a PowerShell comment ending in a backtick, then a switch",
+        "PowerShell",
+        "# Back to `main`\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A2 a bash comment ending in a backslash, then a checkout",
+        "Bash",
+        "# worktree C:\\repo\\EU\\OBF_ops_wt_x\\\ngit checkout -b x",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A3 a quoted heredoc whose last line ends in a backslash",
+        "Bash",
+        "cat <<'EOF' > a\nC:\\dir\\\nEOF\ngit switch main\ncat <<'EOF' > b\nx\nEOF",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A4 a here-string whose last line ends in a backtick",
+        "PowerShell",
+        "$a = @'\nrename `a`\n'@\ngit switch main\n$b = @'\nx\n'@",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A5 an escaped backslash at the end of a bash line",
+        "Bash",
+        "echo C:\\\\temp\\\\\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "A5 an escaped backtick at the end of a PowerShell line",
+        "PowerShell",
+        "Write-Host a``\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("B1 a `#` inside `${...}`", "Bash", "echo ${x:-none #}; git switch main", GS_SHARED, BLOCK),
+    (
+        "B2 a comment glued to an arithmetic command",
+        "Bash",
+        "(( n++ ))#it's\ngit switch main\n# that's all",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "B3 a PowerShell comment glued to `}`",
+        "PowerShell",
+        "if ($true) {Write-Output 1}#don't\ngit switch main\n# that's it",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "C1 an indented terminator is no terminator",
+        "Bash",
+        "cat <<EOF\n    EOF\nit's\nEOF\ngit switch main\n# it's done",
+        GS_SHARED,
+        BLOCK,
+    ),
+    (
+        "C2 a heredoc opener line with a quote spanning lines",
+        "Bash",
+        'cat <<EOF "a\nb"\nbody\nEOF\ngit switch main',
+        GS_SHARED,
+        BLOCK,
+    ),
+    ("C3 a heredoc terminator the guard cannot read", "Bash", "cat <<$X\nit's\n$X\ngit switch main", GS_SHARED, BLOCK),
+    ("D1 a quoted `$((` that bash runs as a subshell", "Bash", 'echo "$((true); git switch main))"', GS_SHARED, BLOCK),
+    ("D2 a `((` that bash re-reads as subshells", "Bash", "((true); git switch main #))\n)", GS_SHARED, BLOCK),
+    ("D3 an ANSI-C quote inside arithmetic", "Bash", "(( x = $'\\'' )); git switch main; # '))", GS_SHARED, BLOCK),
+    ("a quoted parenthesis in arithmetic", "Bash", "echo $(( '(' )); git switch main", GS_SHARED, BLOCK),
+    ("a `#` glued to arithmetic", "Bash", "echo $((1))#x; git switch main", GS_SHARED, BLOCK),
+    ("pushd and popd inside a substitution", "Bash", "X=$(pushd /c/other; popd); git switch main", GS_SHARED, BLOCK),
+    ("popd with nothing pushed", "Bash", "popd; git switch main", GS_SHARED, BLOCK),
+    ("a failing cd with a redirect first", "Bash", "cd 2>/dev/null C:\\repo\\other; git switch main", GS_SHARED, BLOCK),
+    (
+        "a working cd with a backslash redirect first",
+        "Bash",
+        "cd 2>C:\\tmp\\x.log /c/repo/EU/OBF_ops && git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("a function body", "Bash", "f() { git switch main; }; f", GS_SHARED, BLOCK),
+    ("a ForEach-Object block", "PowerShell", "1..2 | ForEach-Object { git switch main }", GS_SHARED, BLOCK),
+    ("a PowerShell if block", "PowerShell", "if ($x) { git checkout -b y }", GS_SHARED, BLOCK),
+    ("a cd after `|&`", "Bash", "true |& cd /c/else; git switch main", GS_SHARED, BLOCK),
+    ("a switch in a process substitution", "Bash", "cat <(git switch main)", GS_SHARED, BLOCK),
+    (
+        "an alias-dodging `\\cd` into a shared checkout",
+        "Bash",
+        "\\cd /c/repo/EU/OBF_ops; git switch main",
+        GS_ELSE,
+        BLOCK,
+    ),
+    ("`builtin cd` into a shared checkout", "Bash", "builtin cd /c/repo/EU/OBF_ops; git switch main", GS_ELSE, BLOCK),
+    ("`time -p` before a switch", "Bash", "time -p git switch main", GS_SHARED, BLOCK),
+    ("`timeout 5` before a switch", "Bash", "timeout 5 git switch main", GS_SHARED, BLOCK),
+    ("`nice -n 10` before a stash", "Bash", "nice -n 10 git stash", GS_SHARED, BLOCK),
+    ("`env -i` before a switch", "Bash", "env -i GIT_TRACE=1 git switch main", GS_SHARED, BLOCK),
+    ("curly quotes in PowerShell", "PowerShell", "Write-Output \u201cit's\u201d; git switch main", GS_SHARED, BLOCK),
+    (
+        "PowerShell `--%` holding an apostrophe",
+        "PowerShell",
+        "cmd /c echo --% it's here\ngit switch main",
+        GS_SHARED,
+        BLOCK,
+    ),
+):
+    rc, err = run_hook(GUARD, shell_event(tool, shell_line, cwd), env=GS_ENV)
+    expect(f"shared checkout: {label} -> exit {want}", rc, want, err)
+
+for label, shell_line, transcript, want, tool in (
+    (
+        "A1 a PowerShell comment ending in a backtick, then a merge",
+        "# Merge PR `29`\ngh pr merge 29 --squash",
+        t_none,
+        BLOCK,
+        "PowerShell",
+    ),
+    (
+        "a commit here-string whose body names `gh pr merge`",
+        "git commit -m @'\n- run `gh pr merge` alone\n- rename `a`\n'@",
+        t_none,
+        ALLOW,
+        "PowerShell",
+    ),
+    (
+        "an unclear call where `gh pr merge` only follows another word",
+        "cat <<EOF\necho run gh pr merge later",
+        t_none,
+        ALLOW,
+        "Bash",
+    ),
+):
+    rc, err = guard_merge(shell_line, transcript, tool=tool)
+    expect(f"merge guard: {label} -> exit {want}", rc, want, err)
+rc, err = guard_merge("cat <<EOF\ngh pr merge 29 --squash", t_rev)
+expect_true("... an unclear hold names what never closed", rc == BLOCK and "never reaches `EOF`" in err, err)
+
+CLEAR = ["git status", "cat <<'EOF'\nx\nEOF", 'echo "$((1<<4))"', "echo ${x:-a #b}", "f() { :; }"]
+UNCLEAR = ["echo 'x", "echo $(x", "cat <<EOF\nx", 'echo "x', "cat <<$X\nbody", DEEP]
+expect_true(
+    "unclear(): every clean call reads cleanly",
+    not any(guard.unclear(c) for c in CLEAR),
+    str([guard.unclear(c) for c in CLEAR]),
+)
+expect_true(
+    "unclear(): every broken call is unclear",
+    all(guard.unclear(c) for c in UNCLEAR),
+    str([guard.unclear(c) for c in UNCLEAR]),
+)
+expect_true(
+    "unclear(): PowerShell here-strings and block comments that never close",
+    bool(guard.unclear("$a = @'\nx", True))
+    and bool(guard.unclear('$a = @"\nx', True))
+    and bool(guard.unclear("<# x", True)),
+    str((guard.unclear("$a = @'\nx", True), guard.unclear('$a = @"\nx', True), guard.unclear("<# x", True))),
+)
+
 # Chains: one merge, not buried in another command, beside nothing but CHAIN_OK*.
 rc, err = guard_merge(f"git push -u origin x && gh pr create --fill && {MERGE}", t_rev)
 expect("merge guard: a merge chained with a push and a create -> exit 2", rc, BLOCK, err)

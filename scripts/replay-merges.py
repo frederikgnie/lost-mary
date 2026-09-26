@@ -101,7 +101,12 @@ def replay(guard: ModuleType, path: Path, scratch: Path, config: Any, slowest: l
                 tool_input = block.get("input")
                 command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
                 powershell = block.get("name") == "PowerShell"
-                if any(guard.is_merge(t) for t in guard.segments(command, powershell)):
+                careful = any(guard.is_merge(t) for t in guard.segments(command, powershell))
+                # A merge the careful scan may hide: one heading a naive chunk of a call it cannot read cleanly.
+                hidden = guard.unclear(command, powershell) and any(
+                    guard.merge_kind(t) for t in guard.naive_segments(command)
+                )
+                if careful or hidden:
                     when = str(record.get("timestamp", ""))[:16]
                     calls[str(block.get("id"))] = (i, command, when, str(record.get("cwd") or ""), powershell)
             elif block.get("type") == "tool_result" and str(block.get("tool_use_id")) in calls:
@@ -114,7 +119,7 @@ def replay(guard: ModuleType, path: Path, scratch: Path, config: Any, slowest: l
         started = time.perf_counter()
         held = guard.check_merge(command, str(cut), uid, cwd, powershell)
         slowest[0] = max(slowest[0], time.perf_counter() - started)
-        verdict = names.get(held, "other") if held else "allow"
+        verdict = ("unclear" if "does not parse cleanly" in held else names.get(held, "other")) if held else "allow"
         if verdict == "allow" and config is not None and guard.check_command(command, cwd, config, powershell):
             verdict = "checkout"
         flat = " ".join(command.split())
