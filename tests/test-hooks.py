@@ -1326,6 +1326,23 @@ expect_true(
     first is None and second is not None,
     f"{first} / {second}",
 )
+# 2026-09-28: a probe that ran its course without a newer failure means Fable is back - for every spawn, not one
+# per probe window forever.
+probe_state = json.loads((CS_STATE / "fable-out.json").read_text(encoding="utf-8"))
+probe_state["probe_until"] = time.time() - 1
+(CS_STATE / "fable-out.json").write_text(json.dumps(probe_state), encoding="utf-8")
+rc, first, _ = spawn_out(REVIEW)
+rc, second, _ = spawn_out(REVIEW)
+recovered = json.loads((CS_STATE / "fable-out.json").read_text(encoding="utf-8"))
+expect_true(
+    "probe window over, no newer failure -> both spawns of the next batch stay on fable and the state is cleared",
+    first is None and second is None and recovered.get("last_seen") == 0 and recovered.get("probe_until") == 0,
+    f"{first} / {second} / {recovered}",
+)
+with failed.open("a", encoding="utf-8") as handle:  # appended: the scan reads only bytes past its offset
+    handle.write(credit_429(iso(60)) + "\n")
+rc, out, _ = spawn_out(REVIEW)
+expect_true("after recovery a fresh failure arms the fallback again -> opus", out is not None, str(out))
 # Only appended bytes are read, and a failure appended after a scan is still found.
 reset_fable_state()
 failed.write_text('{"type":"user"}\n' * 3, encoding="utf-8")

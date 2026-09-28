@@ -258,6 +258,10 @@ def fable_out(now: float) -> bool:
         # Fable failed before and the window has passed: one spawn probes it; the rest stay on opus meanwhile.
         if state["probe_until"] > now:
             out = True
+        elif state["probe_until"] > 0:
+            # A probe ran its course and the scan found no newer failure: Fable is back for every spawn.
+            state["last_seen"] = 0.0
+            state["probe_until"] = 0.0
         else:
             state["probe_until"] = now + PROBE_SECONDS
     try:
@@ -289,7 +293,8 @@ def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> str | None:
     if not fable_out(time.time()):
         return None
     return (
-        f"Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h), so this spawn runs on "
+        f"Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h, or another spawn is probing whether "
+        f"it is back), so this spawn runs on "
         f"{FALLBACK_MODEL} (the newest Opus) instead of fable; it moves back on its own."
     )
 
