@@ -29,8 +29,8 @@ after its report, and hands the report back truncated. See unnamed().
 
 Fable fallback
 --------------
-`explore` and `review` run on fable. When the Fable allowance or the monthly
-spend limit runs out, their spawns fail with "You've hit your monthly spend
+A spawn can still run on fable (`model: fable`, or a role file naming it). When the Fable allowance or the monthly
+spend limit runs out, those spawns fail with "You've hit your monthly spend
 limit" - and nothing in Claude Code switches model: `fallbackModel` excludes
 billing and rate-limit errors by design (model-config docs), and no frontmatter
 key does it either. So this hook does: a spawn that would run on fable (its
