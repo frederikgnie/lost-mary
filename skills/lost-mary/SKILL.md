@@ -56,7 +56,7 @@ word", a `Remaining:` list - is bounced by the Stop hook and the turn continues.
 | Signal | Do |
 |---|---|
 | Small, local, or tightly coupled | Do it yourself. Spawn nothing. |
-| Need to understand code, history, or a library first | `explore` (cheap model, read-only, returns `path:line` anchors; ask it for a `PLAN` when the work must be split) |
+| Need to understand code, history, or a library first | `explore` (read-only, returns `path:line` anchors; ask it for a `PLAN` when the work must be split) |
 | A change you will not make yourself | `implement`, with the spawn block below |
 | A bug whose cause is unclear | `implement` with a reproduce-first brief: reproduce, find the root cause, smallest fix, keep the reproduction as the regression test |
 | Want an independent check before merge, or a trust boundary is touched | `review` - paste it the `git diff`; it cannot run anything |
@@ -76,13 +76,11 @@ Add an agent only to remove a risk you can name. Reassess after each result.
 their report. They end when they report; follow up with SendMessage to the
 agent id. Build an Agent Team from other roles.
 
-**Model per spawn.** Spend the strong model where errors compound and the cheap
-one where they are caught. `explore` (investigation and the `PLAN`) and `review`
-run on fable: a wrong plan multiplies into every implementer, and a missed defect
-ships. `implement` runs on opus - execution, already guarded by the spawn
-contract, the hooks and the tests. Pass `model:` only to move off a default, and
-say why. Never sonnet for code. A machine-wide policy, if present, is shown at
-session start (`~/.claude/agent-library/model-policy.md`) and wins over these.
+**Model per spawn.** All three roles run on opus: Opus 5.5 scores above Fable
+5.1 on Anthropic's launch benchmarks at a lower price, and Fable bills to usage
+credits. Pass `model: fable` only for a long unsupervised run or a problem opus
+has failed twice, and say why. Never sonnet for code. A machine-wide policy, if
+present, is shown at session start (`~/.claude/agent-library/model-policy.md`) and wins over these.
 
 ## 3. Every `implement` spawn carries these
 

@@ -26,9 +26,9 @@ verified commands, invariants and danger zones. Read them before editing.
   else handed to its own `implement` (worktree) or pinned by a failing test on
   a branch - reported fixed or in flight, never "I'll leave that for you".
 - Smallest mode that works: do it yourself; `explore` to understand and to plan
-  (read-only, fable); `implement` for a change you delegate (opus) (give it OWNED / OFF-LIMITS /
+  (read-only, opus); `implement` for a change you delegate (opus) (give it OWNED / OFF-LIMITS /
   DONE MEANS / VALIDATION - it returns `MISSING: <field>` otherwise); `review`
-  for an independent check (fable - judgment; paste it the `git diff`; it cannot
+  for an independent check (opus; paste it the `git diff`; it cannot
   run anything). The session-start model policy, if shown, wins over these.
   Several `implement` only for disjoint scopes, each `isolation: worktree` -
   which needs the session cwd inside a git repo and branches from the default
