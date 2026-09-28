@@ -4,10 +4,11 @@ Copy to `~/.claude/agent-library/model-policy.md` and edit. The SessionStart hoo
 example settings prints it into every session, where it wins over the roles'
 frontmatter defaults - so keep it short: it is re-injected on every compaction.
 
-Routing: all three roles on opus (since 2026-09-28): Opus 5.5 scores above Fable 5.1 on Anthropic's launch benchmarks at a lower price,
-and Fable bills to usage credits. Pass `model: fable` on a spawn only for a
-long unsupervised run or a problem opus has failed twice. Never sonnet for code. Pass `model:` on a
-spawn only to move off those defaults, and say why.
+Routing: all three roles on opus (since 2026-09-28) - Opus 5.5 scores above
+Fable 5.1 on Anthropic's launch benchmarks at a lower price, and Fable bills
+to usage credits. Never sonnet for code. Pass `model:` on a spawn only to move
+off that default, and say why - `model: fable` for a long unsupervised run or
+a problem opus has failed twice.
 
 The lead runs on opus (`/model opus`, persists). Measured 2026-09-15/16 over
 2,174 messages: a fable lead was 90-97% of all fable tokens - 302 messages at

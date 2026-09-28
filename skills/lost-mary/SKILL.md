@@ -76,10 +76,11 @@ Add an agent only to remove a risk you can name. Reassess after each result.
 their report. They end when they report; follow up with SendMessage to the
 agent id. Build an Agent Team from other roles.
 
-**Model per spawn.** All three roles run on opus: Opus 5.5 scores above Fable 5.1 on Anthropic's launch benchmarks at a lower price,
-and Fable bills to usage credits. Pass `model: fable` only for a long
-unsupervised run or a problem opus has failed twice, and say why. Never sonnet for code. A machine-wide policy, if present, is shown at
-session start (`~/.claude/agent-library/model-policy.md`) and wins over these.
+**Model per spawn.** All three roles run on opus: Opus 5.5 scores above Fable
+5.1 on Anthropic's launch benchmarks at a lower price, and Fable bills to usage
+credits. Pass `model: fable` only for a long unsupervised run or a problem opus
+has failed twice, and say why. Never sonnet for code. A machine-wide policy, if
+present, is shown at session start (`~/.claude/agent-library/model-policy.md`) and wins over these.
 
 ## 3. Every `implement` spawn carries these
 
