@@ -45,7 +45,9 @@ applies without a permission decision). The model is told in
 429 a Fable spawn gets at the limit; only Fable bills to usage credits) seen
 within the last FABLE_RETRY_HOURS. While one is, no scan runs at all. After
 the window the first fable spawn takes a PROBE_SECONDS lease and tries Fable;
-spawns started meanwhile stay on opus; a fresh 429 re-arms the fallback. The
+spawns started meanwhile stay on opus; a fresh 429 re-arms the fallback, and a
+lease that expires with no newer failure clears the state, so every spawn is
+back on fable (the cleared failure is never counted again). The
 spawns already in flight when the limit first hits fail - nothing can see the
 limit before it - and are respawned unchanged. The scan reads only bytes
 appended since the last one (per-file offsets, newest files first, a 64 KB
@@ -162,7 +164,7 @@ def read_state(path: Path, now: float) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"last_seen": 0.0, "probe_until": 0.0, "offsets": {}}
+        return {"last_seen": 0.0, "probe_until": 0.0, "cleared": 0.0, "offsets": {}}
     raw = raw if isinstance(raw, dict) else {}
 
     def stamp(name: str, limit: float) -> float:
@@ -178,6 +180,7 @@ def read_state(path: Path, now: float) -> dict[str, Any]:
     return {
         "last_seen": stamp("last_seen", now + 60),
         "probe_until": stamp("probe_until", now + PROBE_SECONDS + 60),
+        "cleared": stamp("cleared", now + 60),
         "offsets": clean,
     }
 
@@ -226,7 +229,8 @@ def scan(projects: Path, state: dict[str, Any], now: float) -> None:
                     if not chunk:
                         break
                     when = failures_in(chunk)
-                    if when is not None and when > state["last_seen"]:
+                    # A failure a finished probe already outlived (re-read through OVERLAP) stays cleared.
+                    if when is not None and when > max(state["last_seen"], state["cleared"]):
                         state["last_seen"] = min(when, now)
                     done = handle.tell()
                     offsets[name] = done
@@ -258,6 +262,11 @@ def fable_out(now: float) -> bool:
         # Fable failed before and the window has passed: one spawn probes it; the rest stay on opus meanwhile.
         if state["probe_until"] > now:
             out = True
+        elif state["probe_until"] > 0:
+            # A probe ran its course and the scan found no newer failure: Fable is back for every spawn.
+            state["cleared"] = state["last_seen"]
+            state["last_seen"] = 0.0
+            state["probe_until"] = 0.0
         else:
             state["probe_until"] = now + PROBE_SECONDS
     try:
@@ -289,7 +298,8 @@ def fallback(payload: dict[str, Any], tool_input: dict[str, Any]) -> str | None:
     if not fable_out(time.time()):
         return None
     return (
-        f"Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h), so this spawn runs on "
+        f"Fable is out (a usage-credit 429 within {FABLE_RETRY_HOURS:g} h, or another spawn is probing whether "
+        f"it is back), so this spawn runs on "
         f"{FALLBACK_MODEL} (the newest Opus) instead of fable; it moves back on its own."
     )
 
