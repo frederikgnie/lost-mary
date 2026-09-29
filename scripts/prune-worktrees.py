@@ -31,7 +31,18 @@ A worktree is REMOVABLE only when all of these hold:
   4. idle      - no file under it (outside .git, .venv and tool caches) and none
                  of git's own records for it (index, HEAD, logs/HEAD in its gitdir,
                  touched by a session's `git status` or commit) changed within
-                 --idle-hours (default 24).
+                 --idle-hours (default 24);
+  5. no session - no Claude Code transcript under ~/.claude/projects
+                 ($LOST_MARY_PROJECTS_DIR) changed within --idle-hours names it,
+                 as a record's `cwd` or inside a tool call's input, in its last
+                 SESSION_TAIL bytes: a session left open in a worktree writes
+                 nothing while it waits, and removing the directory under it (on
+                 Windows its handle stops the remove halfway) strands it. Tool
+                 results are not read, so a listing that merely prints the path
+                 (`git worktree list`, a dry run of this CLI) does not count.
+"pushed" trusts the local remote-tracking refs (no fetch); a stale ref can only
+say "pushed" for a commit the remote had when last fetched - the branch is kept
+either way.
 Never considered: the main worktree, a detached HEAD, a locked or missing
 worktree, anything at or under a `frozen` root. Every KEPT line names the first
 reason that failed.
@@ -59,6 +70,7 @@ continues.
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
@@ -77,6 +89,56 @@ DISPOSABLE = frozenset({".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_
 DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
 DEFAULT_IDLE_HOURS = 24.0
 GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}  # a scan must not take index locks other sessions contend for
+SESSION_TAIL = 512 * 1024  # bytes read from the end of each recent transcript
+
+
+def norm_path(text: str) -> str:
+    """A path or text with every slash form folded to `/` and lower-cased, so mentions compare as substrings."""
+    return text.replace("\\\\", "/").replace("\\", "/").lower()
+
+
+@functools.cache
+def session_mentions(idle_hours: float) -> tuple[str, ...]:
+    """The `cwd` values and tool-call inputs of every transcript changed within the window, normalised, once per run."""
+    root = Path(os.environ.get("LOST_MARY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
+    since = time.time() - idle_hours * 3600
+    found: list[str] = []
+    for path in root.glob("**/*.jsonl") if root.is_dir() else []:
+        try:
+            if path.stat().st_mtime < since:
+                continue
+            with path.open("rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, size - SESSION_TAIL))
+                lines = handle.read().decode("utf-8", errors="replace").splitlines()
+            if size > SESSION_TAIL:
+                lines = lines[1:]  # the read began mid-record
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if isinstance(cwd := record.get("cwd"), str):
+                found.append(norm_path(cwd))
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    found.append(norm_path(json.dumps(block.get("input"), ensure_ascii=False)))
+    return tuple(found)
+
+
+def in_session(path: Path, idle_hours: float) -> bool:
+    """Whether a recent session names this worktree (a false match only keeps more)."""
+    p = norm_path(str(path)).rstrip("/")
+    forms = {p}
+    if len(p) > 2 and p[1] == ":":  # C:/repo/x as Git Bash writes it: /c/repo/x
+        forms.add(f"/{p[0]}{p[2:]}")
+    return any(form in text for text in session_mentions(idle_hours) for form in forms)
 
 
 def notice(text: str) -> None:
@@ -360,6 +422,8 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
     age = time.time() - max(newest_mtime(wt.path), git_activity(wt.path))
     if age < idle_hours * 3600:
         return f"active {fmt_age(max(age, 0.0))} ago"
+    if in_session(wt.path, idle_hours):
+        return f"a Claude session worked here within {idle_hours:g} h"
     return None
 
 

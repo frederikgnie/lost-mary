@@ -309,6 +309,7 @@ PYEOF
   if grep -q 'permit.py' "$SETTINGS"; then echo "OK permit.py referenced"; else echo "DRIFT permit.py not referenced"; fi
   if grep -q 'witness.py' "$SETTINGS"; then echo "OK witness.py referenced"; else echo "DRIFT witness.py not referenced"; fi
   if grep -q 'guard-shared-checkouts.py' "$SETTINGS"; then echo "OK guard-shared-checkouts.py referenced"; else echo "DRIFT guard-shared-checkouts.py not referenced"; fi
+  if grep -q 'prune-worktrees.py' "$SETTINGS"; then echo "OK prune-worktrees.py referenced"; else echo "DRIFT prune-worktrees.py not referenced"; fi
   if grep -q 'ABSOLUTE/PATH/TO' "$SETTINGS"; then echo "DRIFT placeholder interpreter path"; fi
 }
 

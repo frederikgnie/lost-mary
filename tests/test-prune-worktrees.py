@@ -292,6 +292,34 @@ cases = [
 for label, prs, want in cases:
     got = mod.judge(wt, False, [], 6.0, lambda _cwd, _branch, prs=prs: prs)
     check(f"judge: {label}", got == want, repr(got))
+# Review 2026-09-29: a session left open in a worktree writes nothing while it waits; the async SessionStart
+# run must not remove the directory under it. Named in a tool call or a record's cwd -> kept; printed only
+# in a tool result (a `git worktree list`) -> not a session in it. The transcripts live in the sandbox HOME.
+merged_here = [mod.PR(7, "MERGED", head_open)]
+session_dir = HOME / ".claude" / "projects" / "sandbox"
+session_dir.mkdir(parents=True, exist_ok=True)
+transcript = session_dir / "s.jsonl"
+open_path = str(wt_open)
+bash_form = "/" + open_path[0].lower() + open_path[2:].replace(chr(92), "/") if open_path[1:2] == ":" else open_path
+use = {"type": "tool_use", "name": "Bash", "input": {"command": f"cd {open_path} && git status"}}
+listing = {"type": "tool_result", "content": f"{open_path}  abc123 [x]"}
+for label, records, want in (
+    ("a recent session ran a command in it -> kept", [{"message": {"content": [use]}}], "session"),
+    ("a recent session's cwd is it -> kept", [{"cwd": open_path, "message": {"content": []}}], "session"),
+    (
+        "a recent session named it in Git Bash form -> kept",
+        [{"message": {"content": [{"type": "tool_use", "input": {"command": f"git -C {bash_form} log"}}]}}],
+        "session",
+    ),
+    ("the path only in a tool result -> removable", [{"message": {"content": [listing]}}], None),
+):
+    transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")  # first line counts
+    mod.session_mentions.cache_clear()
+    got = mod.judge(wt, False, [], 6.0, lambda _cwd, _branch: merged_here)
+    ok = got is None if want is None else "session" in str(got)
+    check(f"judge: {label}", ok, repr(got))
+transcript.unlink()
+mod.session_mentions.cache_clear()
 wt_m = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_merged.name)
 got = mod.judge(wt_m, False, [], 6.0, lambda _cwd, _branch: [mod.PR(9, "OPEN", "x")])
 check("judge: an open PR keeps even an ancestor of origin/HEAD", got == "open PR #9", repr(got))
