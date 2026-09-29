@@ -149,6 +149,14 @@ from typing import Any, NamedTuple
 
 ENV_VAR = "LOST_MARY_SHARED_CHECKOUTS"
 HOME_VAR = "LOST_MARY_GUARD_RETURN_HOME"
+GIT_LOCATORS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+)
 GIT_TIMEOUT, HOME_BUDGET = 2.0, 5.0  # seconds per git call, and for all of them: well inside the hook's 10 s
 SHELL_TOOLS = ("Bash", "PowerShell")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -1162,12 +1170,11 @@ def plain_switch(command: str) -> bool:
 def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
     """`git -C <target> <args>`'s stripped stdout, or None when git fails, cannot run, or the deadline passes.
 
-    Runs without the session's GIT_* variables (a GIT_DIR or GIT_INDEX_FILE would point it at another repository)
-    and without optional locks, so a check never holds index.lock against another session's write."""
+    Runs without optional locks, so a check never holds index.lock against another session's write."""
     left = min(GIT_TIMEOUT, deadline - time.monotonic())
     if left <= 0:
         return None
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")} | {"GIT_OPTIONAL_LOCKS": "0"}
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
     try:
         proc = subprocess.run(
             ["git", "-C", target.as_posix(), *args],
@@ -1190,10 +1197,12 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
     or not, submodules included), and either the local <default> already holds HEAD, or HEAD is a branch whose
     tree is exactly <default>'s (a squash merge - the commits stay on that branch). The caller also requires
     plain_switch(). `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Every failure, timeout or surprise reads
-    as no: on this path failing open would let through the very command the guard blocks.
+    as no: on this path failing open would let through the very command the guard blocks. So does a GIT_DIR-style
+    variable in the environment: the switch would act on the repository it names, not the one checked. Not
+    seen: edits in files marked assume-unchanged or skip-worktree (git status hides them).
     """
     try:
-        if os.environ.get(HOME_VAR, "").lower() == "off":
+        if os.environ.get(HOME_VAR, "").lower() == "off" or any(os.environ.get(v) for v in GIT_LOCATORS):
             return False
         if target is None or len(args) != 2 or args[0] not in ("switch", "checkout") or args[1].startswith("-"):
             return False

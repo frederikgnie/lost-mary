@@ -1913,6 +1913,10 @@ reason = rh("git switch main")
 expect_true("home: no origin/HEAD -> block", reason is not None, str(reason))
 expect_true("... naming `git remote set-head origin -a`", "set-head origin -a" in str(reason), str(reason))
 git(RH_REPO, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+os.environ["GIT_INDEX_FILE"] = str(RH / "other-index")
+reason = rh("git switch main")
+expect_true("home: GIT_INDEX_FILE set (the switch would use another index) -> block", reason is not None, str(reason))
+os.environ.pop("GIT_INDEX_FILE")
 RH_TIMEOUT = guard.GIT_TIMEOUT
 guard.GIT_TIMEOUT = 0.0
 reason = rh("git switch main")
