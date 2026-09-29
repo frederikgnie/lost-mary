@@ -281,7 +281,8 @@ head_merged = git(wt_merged, "rev-parse", "HEAD").strip()
 wt = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_open.name)
 cases = [
     ("merged PR at HEAD -> removable", [mod.PR(7, "MERGED", head_open)], None),
-    ("merged PR at HEAD into another base -> not merged", [mod.PR(7, "MERGED", head_open, "stack")], "not merged"),
+    # 2026-09-29: EU work merges into feature branches; the branch is kept, so its worktree is done.
+    ("merged PR at HEAD into a feature branch -> removable", [mod.PR(7, "MERGED", head_open, "feature/x")], None),
     ("merged PR at HEAD from a fork -> not merged", [mod.PR(7, "MERGED", head_open, "main", True)], "not merged"),
     ("merged PR at HEAD into main -> removable", [mod.PR(7, "MERGED", head_open, "main")], None),
     ("merged PR at another commit -> not merged", [mod.PR(7, "MERGED", head_merged)], "not merged"),

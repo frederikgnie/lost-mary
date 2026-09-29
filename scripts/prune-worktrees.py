@@ -46,7 +46,8 @@ that are not registered worktrees, re-listed just before the sweep - the
 leftovers of a remove a Windows file lock interrupted. A dry run reports them.
 
 "merged" through gh means a PR from the same repository (not a fork), merged
-into the default branch, whose head is HEAD. Tracked files marked
+into any branch, whose head is HEAD - a feature or integration branch counts,
+since the branch itself is kept. Tracked files marked
 skip-worktree or assume-unchanged keep the worktree, since status cannot see
 edits to them.
 
@@ -287,12 +288,6 @@ def disposable(path: str) -> bool:
     return any(x in DISPOSABLE for x in parts) or path.strip().rstrip("/").endswith(DISPOSABLE_SUFFIXES)
 
 
-def default_branch(wt: Path) -> str:
-    """origin's default branch name ("main"), or "" when origin/HEAD is not set."""
-    r = git(wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    return r.stdout.strip().removeprefix("origin/") if r.returncode == 0 else ""
-
-
 def hidden_edits(wt: Path) -> str | None:
     """A tracked file whose edits status cannot see: skip-worktree (S) or assume-unchanged (lowercase tag)."""
     r = git(wt, "ls-files", "-v")
@@ -351,10 +346,10 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
     found = prs(wt.path, wt.branch)
     if found and (open_pr := next((p for p in found if p.state.upper() == "OPEN"), None)):
         return f"open PR #{open_pr.number}"
-    base = default_branch(wt.path)
+    # Any base counts - a feature or integration branch too: the branch itself is kept, so removing its worktree
+    # loses nothing, and the EU repos merge into feature branches (a default-branch rule held all six, 2026-09-29).
     merged = found is not None and any(
-        p.state.upper() == "MERGED" and p.head_oid == wt.head and not p.cross_repo and p.base in ("", base)
-        for p in found
+        p.state.upper() == "MERGED" and p.head_oid == wt.head and not p.cross_repo for p in found
     )
     if not merged:
         ancestor = git(wt.path, "merge-base", "--is-ancestor", wt.head, "origin/HEAD")
