@@ -1612,6 +1612,9 @@ GS_HOME = GS / "home"  # the default config location resolves under this, never 
 GS_HOME.mkdir()
 GS_CONFIG = GS / "shared-checkouts.json"
 GS_CONFIG.write_text((ROOT / "shared-checkouts.example.json").read_text(encoding="utf-8"), encoding="utf-8")
+# The tables below name real EU paths; on a machine that has them, whether `git switch main` may go home would
+# depend on their branch state. Off here; the sandbox clone further down tests the exemption itself.
+os.environ["LOST_MARY_GUARD_RETURN_HOME"] = "off"
 GS_ENV = {**os.environ, "HOME": str(GS_HOME), "USERPROFILE": str(GS_HOME), "LOST_MARY_SHARED_CHECKOUTS": str(GS_CONFIG)}
 guard = load_module(GUARD, "guard_shared_checkouts")
 GS_CFG = guard.parse_config(json.loads(GS_CONFIG.read_text(encoding="utf-8")))
@@ -1801,6 +1804,140 @@ expect("hook: BOM-prefixed payload still blocks (exit 2)", rc, BLOCK, err)
 proc = subprocess.run([sys.executable, str(GUARD)], input=b"not json", capture_output=True, env=GS_ENV)
 expect("hook: garbage payload -> exit 0", proc.returncode, ALLOW, proc.stderr.decode())
 expect_true("... with a notice", "guard-shared-checkouts:" in proc.stderr.decode(), proc.stderr.decode())
+
+# returns_home: the one switch a shared checkout allows - back to its default branch once the branch shown is merged
+RH = GS / "rh"
+RH.mkdir()
+RH_ORIGIN = RH / "origin.git"
+RH_SEED = RH / "seed"
+RH_REPO = RH / "shared"
+git(RH, "init", "-q", "--bare", "-b", "main", str(RH_ORIGIN))
+git(RH, "init", "-q", "-b", "main", str(RH_SEED))
+(RH_SEED / "a.txt").write_text("a\n", encoding="utf-8")
+(RH_SEED / "\u00c1.txt").write_text("x\n", encoding="utf-8")  # a name cp1252 cannot decode as UTF-8 bytes
+git(RH_SEED, "add", "a.txt", "\u00c1.txt")
+git(RH_SEED, "commit", "-q", "-m", "a")
+git(RH_SEED, "push", "-q", str(RH_ORIGIN), "main")
+git(RH, "clone", "-q", str(RH_ORIGIN), str(RH_REPO))
+git(RH_REPO, "switch", "-q", "-c", "feat")
+(RH_REPO / "b.txt").write_text("b\n", encoding="utf-8")
+git(RH_REPO, "add", "b.txt")
+git(RH_REPO, "commit", "-q", "-m", "b")
+git(RH_REPO, "push", "-q", "origin", "feat:main")  # merged upstream; the local main is behind
+git(RH_REPO, "fetch", "-q")
+RH_CFG = guard.parse_config({"shared": [str(RH_REPO)]})
+RH_CWD = str(RH_REPO)
+os.environ.pop("LOST_MARY_GUARD_RETURN_HOME")
+
+
+def rh(cmd: str, cwd: str = RH_CWD) -> str | None:
+    return guard.check_command(cmd, cwd, RH_CFG)
+
+
+reason = rh("git switch main")
+expect_true("home: merged upstream, local main behind -> block", reason is not None, str(reason))
+expect_true("... naming the fetch that brings main up", "fetch origin main:main" in str(reason), str(reason))
+git(RH_REPO, "fetch", "-q", "origin", "main:main")
+expect_true(
+    "home: local main holds HEAD -> `git switch main` allowed",
+    rh("git switch main") is None,
+    str(rh("git switch main")),
+)
+expect_true("home: ... and `git checkout main`", rh("git checkout main") is None, str(rh("git checkout main")))
+reason = rh(f"git -C {RH_REPO.as_posix()} switch main", GS_ELSE)
+expect_true("home: ... and through `git -C` from elsewhere", reason is None, str(reason))
+for cmd in ("git switch -f main", "git checkout main --", "git switch --discard-changes main", "git switch -c main2"):
+    reason = rh(cmd)
+    expect_true(f"home: {cmd!r} -> block (not the bare switch home)", reason is not None, str(reason))
+git(RH_REPO, "branch", "other")
+reason = rh("git switch other")
+expect_true("home: a branch other than origin/HEAD's, even one holding HEAD -> block", reason is not None, str(reason))
+(RH_REPO / "a.txt").write_text("edited\n", encoding="utf-8")
+reason = rh("git switch main")
+expect_true("home: a changed tracked file -> block", reason is not None, str(reason))
+git(RH_REPO, "checkout", "--", "a.txt")
+(RH_REPO / "u.txt").write_text("u\n", encoding="utf-8")
+expect_true("home: an untracked file only -> allowed", rh("git switch main") is None, str(rh("git switch main")))
+(RH_REPO / "u.txt").unlink()
+os.environ["LOST_MARY_GUARD_RETURN_HOME"] = "off"
+reason = rh("git switch main")
+expect_true("home: LOST_MARY_GUARD_RETURN_HOME=off -> block", reason is not None, str(reason))
+os.environ.pop("LOST_MARY_GUARD_RETURN_HOME")
+(RH_REPO / "c.txt").write_text("c\n", encoding="utf-8")
+git(RH_REPO, "add", "c.txt")
+git(RH_REPO, "commit", "-q", "-m", "c")
+reason = rh("git switch main")
+expect_true("home: a commit main does not hold -> block", reason is not None, str(reason))
+RH_TREE = sh(["git", "rev-parse", "HEAD^{tree}"], RH_REPO).stdout.strip()
+RH_SQUASH = sh(["git", "commit-tree", RH_TREE, "-p", "main", "-m", "squash"], RH_REPO).stdout.strip()
+git(RH_REPO, "update-ref", "refs/heads/main", RH_SQUASH)
+expect_true(
+    "home: main holds HEAD's tree (a squash merge) -> allowed",
+    rh("git switch main") is None,
+    str(rh("git switch main")),
+)
+for cmd in (
+    "git update-ref refs/heads/main HEAD~2; git switch main",  # the check sees main before the call moves it
+    "git fetch origin main:main && git switch main",
+    "git -c core.hooksPath=x switch main",
+    "git --work-tree=C:/elsewhere switch main",
+    "GIT_WORK_TREE=C:/elsewhere git switch main",
+    "git switch main | cat",
+    "git switch main &",
+    "git switch main\ngit status",
+):
+    reason = rh(cmd)
+    expect_true(f"home: not alone or not bare: {cmd!r} -> block", reason is not None, str(reason))
+reason = rh(f"cd {RH_REPO.as_posix()} && git switch main", GS_ELSE)
+expect_true("home: one cd, then the switch -> allowed", reason is None, str(reason))
+(RH_REPO / "a.txt").write_text("staged\n", encoding="utf-8")
+git(RH_REPO, "add", "a.txt")
+(RH_REPO / "a.txt").write_text("a\n", encoding="utf-8")
+reason = rh("git switch main")
+expect_true("home: a staged-only change -> block", reason is not None, str(reason))
+git(RH_REPO, "reset", "-q", "--", "a.txt")
+git(RH_REPO, "checkout", "-q", "--detach")
+reason = rh("git switch main")
+expect_true(
+    "home: detached, main holds only HEAD's tree -> block (the reflog alone would keep it)",
+    reason is not None,
+    str(reason),
+)
+git(RH_REPO, "checkout", "-q", "--detach", "main~1")
+expect_true(
+    "home: detached at a commit main holds -> allowed", rh("git switch main") is None, str(rh("git switch main"))
+)
+git(RH_REPO, "switch", "-q", "feat")
+git(RH_REPO, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+reason = rh("git switch main")
+expect_true("home: no origin/HEAD -> block", reason is not None, str(reason))
+expect_true("... naming `git remote set-head origin -a`", "set-head origin -a" in str(reason), str(reason))
+git(RH_REPO, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+os.environ["GIT_NAMESPACE"] = "x"  # leaves status empty: only the GIT_LOCATORS refusal can block this
+reason = rh("git switch main")
+expect_true("home: GIT_NAMESPACE set (the switch would act elsewhere) -> block", reason is not None, str(reason))
+os.environ.pop("GIT_NAMESPACE")
+RH_TIMEOUT = guard.GIT_TIMEOUT
+guard.GIT_TIMEOUT = 0.0
+reason = rh("git switch main")
+expect_true("home: git out of time -> block", reason is not None, str(reason))
+guard.GIT_TIMEOUT = RH_TIMEOUT
+reason = rh("git checkout -b x")
+expect_true("home: the hint stays off a `checkout -b`", reason is not None and "set-head" not in reason, str(reason))
+RH_CONFIG = RH / "shared-checkouts.json"
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
+RH_ENV = {k: str(v) for k, v in GS_ENV.items() if k != "LOST_MARY_GUARD_RETURN_HOME"}
+RH_ENV["LOST_MARY_SHARED_CHECKOUTS"] = str(RH_CONFIG)
+RH_EVENT = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git switch main"}}
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
+expect("hook: the switch home in a shared checkout -> exit 0", rc, ALLOW, err)
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
+expect("hook: a switch elsewhere in it -> exit 2", rc, BLOCK, err)
+(RH_REPO / "\u00c1.txt").write_text("changed\n", encoding="utf-8")
+git(RH_REPO, "config", "core.quotePath", "false")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
+expect("hook: a changed file with a non-ASCII name -> exit 2, not a decode crash", rc, BLOCK, err)
+os.environ["LOST_MARY_GUARD_RETURN_HOME"] = "off"
 GS_CRASH = (
     "import runpy, sys\n"
     "class Boom:\n"

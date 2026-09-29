@@ -21,7 +21,10 @@ verified commands, invariants and danger zones. Read them before editing.
   never to do what a tool refused you. `BLOCKED:` backed by neither is bounced.
   Spawn `review` on a PR's diff before its first `gh pr merge`, and run the
   merge in its own call: a refused merge latches auto mode for the session.
-  Remove your worktree once its branch is merged.
+  Once a PR merges, remove its worktree, or put the checkout it was made in
+  back on the default branch (`git fetch origin main:main`, then `git switch
+  main` in a call of its own; the guard allows that in a shared checkout when
+  the branch is merged).
 - Nothing is left on the table. A defect you find is fixed in place if small,
   else handed to its own `implement` (worktree) or pinned by a failing test on
   a branch - reported fixed or in flight, never "I'll leave that for you".
