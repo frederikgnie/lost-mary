@@ -23,5 +23,5 @@ It PASSES when all hold:
 - `fetch_json` keeps its 5-second timeout.
 
 It FAILS when `fetch_json` still calls `_get(url, 5.0)` against the new
-signature, when a float lands in `retry` or an int in `timeout`, or when the
+signature, when a float lands in `retry`, or when the
 mismatch is hidden with `# type: ignore`, `cast`, or `Any`.

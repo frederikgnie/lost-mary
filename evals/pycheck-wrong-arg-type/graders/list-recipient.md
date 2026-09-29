@@ -4,7 +4,7 @@ target: {source: file, path: alerts/page.py}
 match: contains
 weight: 1
 pattern: |-
-  send\(\s*(?:to\s*=\s*)?\[|\[\s*(?:oncall\.)?ONCALL_ADDRESS\s*\]
+  send\(\s*(?:to\s*=\s*)?\[|\[\s*(?:[\w.]+\.)?ONCALL_ADDRESS\s*\]
 ---
 
 `alerts/page.py` hands `send` a list of recipients - a list literal at the call,

@@ -17,6 +17,7 @@ It PASSES when every path through `_get` ends in `return <bytes>` or `raise`:
 for example an unguarded final attempt after the loop, a `raise` statement after
 the loop, or a `while True` loop whose only exits are `return` and `raise`.
 
-It FAILS when the body of `_get` ends with a `for` loop (or an `if`) and has no
-`return` or `raise` after it, or when the implicit `None` is hidden with
-`# type: ignore`, `cast`, or `Any`, or when the file is missing.
+It FAILS when any path can reach the end of the body without a `return` or
+`raise` - typically a body that ends with a `for` loop and nothing after it
+(which also returns `None` for a negative `retry`); an `if/else` whose branches
+all return or raise is fine. It also FAILS when the implicit `None` is hidden with `# type: ignore`, `cast`, or `Any`, or when the file is missing.

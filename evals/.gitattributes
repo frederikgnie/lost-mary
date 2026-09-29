@@ -1,0 +1,6 @@
+# Scaffolds run under bash and write .py files through heredocs: a CR would
+# break `set -euo pipefail` and leak into the staged sources. Keep case files LF
+# whatever core.autocrlf says (the checkout this was written from had it on).
+*.sh text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
