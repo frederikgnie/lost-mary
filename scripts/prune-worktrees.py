@@ -31,7 +31,22 @@ A worktree is REMOVABLE only when all of these hold:
   4. idle      - no file under it (outside .git, .venv and tool caches) and none
                  of git's own records for it (index, HEAD, logs/HEAD in its gitdir,
                  touched by a session's `git status` or commit) changed within
-                 --idle-hours (default 24).
+                 --idle-hours (default 24);
+  5. no session - no transcript under ~/.claude/projects ($LOST_MARY_PROJECTS_DIR)
+                 names it in its last SESSION_TAIL bytes - as a record's `cwd` or
+                 inside a tool call's input, by absolute path (either slash form)
+                 or by folder name after `/`, a space or a quote - counting every
+                 transcript changed within --idle-hours AND, at any age, those of
+                 a RUNNING session (~/.claude/sessions/<pid>.json with a live
+                 pid, $LOST_MARY_SESSIONS_DIR; observed 2.1.283), whose own `cwd`
+                 counts too: a session left open in a worktree writes nothing
+                 while it waits, and removing the directory under it (on Windows
+                 its handle stops the remove halfway) strands it. Tool results
+                 are not read, so a listing that merely prints the path (`git
+                 worktree list`, a dry run of this CLI) does not count.
+"pushed" trusts the local remote-tracking refs (no fetch); a stale ref can only
+say "pushed" for a commit the remote had when last fetched - the branch is kept
+either way.
 Never considered: the main worktree, a detached HEAD, a locked or missing
 worktree, anything at or under a `frozen` root. Every KEPT line names the first
 reason that failed.
@@ -46,7 +61,8 @@ that are not registered worktrees, re-listed just before the sweep - the
 leftovers of a remove a Windows file lock interrupted. A dry run reports them.
 
 "merged" through gh means a PR from the same repository (not a fork), merged
-into the default branch, whose head is HEAD. Tracked files marked
+into any branch, whose head is HEAD - a feature or integration branch counts,
+since the branch itself is kept. Tracked files marked
 skip-worktree or assume-unchanged keep the worktree, since status cannot see
 edits to them.
 
@@ -58,6 +74,7 @@ continues.
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import os
@@ -76,6 +93,121 @@ DISPOSABLE = frozenset({".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_
 DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
 DEFAULT_IDLE_HOURS = 24.0
 GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}  # a scan must not take index locks other sessions contend for
+SESSION_TAIL = 512 * 1024  # bytes read from the end of each recent transcript
+
+
+def norm_path(text: str) -> str:
+    """A path or text with every slash form folded to `/` and lower-cased, so mentions compare as substrings."""
+    return text.replace("\\\\", "/").replace("\\", "/").lower()
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process runs with this pid; an answer it cannot get reads as alive (that only keeps more).
+
+    Never os.kill on Windows: signal 0 is CTRL_C_EVENT there (Ctrl+C to the console), any other value terminates.
+    """
+    if pid <= 0:
+        return False
+    if pid > 0xFFFFFFFF:
+        return True  # not a pid any platform hands out; a malformed registry file must not abort the scan
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists, owned by someone else
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return True
+    return True
+
+
+def live_sessions() -> tuple[set[str], list[str]]:
+    """(sessionIds, cwds) of running Claude Code sessions, from `~/.claude/sessions/<pid>.json` (observed, 2.1.283)."""
+    root = Path(os.environ.get("LOST_MARY_SESSIONS_DIR") or Path.home() / ".claude" / "sessions")
+    ids: set[str] = set()
+    cwds: list[str] = []
+    for path in root.glob("*.json") if root.is_dir() else []:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid, sid = data.get("pid"), data.get("sessionId")
+        if isinstance(pid, int) and isinstance(sid, str) and pid_alive(pid):
+            ids.add(sid)
+            if isinstance(cwd := data.get("cwd"), str):
+                cwds.append(norm_path(cwd))
+    return ids, cwds
+
+
+@functools.cache
+def session_mentions(idle_hours: float) -> tuple[str, ...]:
+    """The `cwd` values and tool-call inputs, normalised, of every transcript changed within the window and of
+    every running session's transcripts at any age - a session left open writes nothing while it waits. Once per run.
+    """
+    root = Path(os.environ.get("LOST_MARY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
+    since = time.time() - idle_hours * 3600
+    live, found = live_sessions()
+    for path in root.glob("**/*.jsonl") if root.is_dir() else []:
+        try:
+            # <project>/<sessionId>.jsonl, and a subagent's <project>/<sessionId>/subagents/agent-<id>.jsonl
+            running = path.stem in live or (path.parent.name == "subagents" and path.parent.parent.name in live)
+            if not running and path.stat().st_mtime < since:
+                continue
+            with path.open("rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, size - SESSION_TAIL))
+                lines = handle.read().decode("utf-8", errors="replace").splitlines()
+            if size > SESSION_TAIL:
+                lines = lines[1:]  # the read began mid-record
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if isinstance(cwd := record.get("cwd"), str):
+                found.append(norm_path(cwd))
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    found.append(norm_path(json.dumps(block.get("input"), ensure_ascii=False)))
+    return tuple(found)
+
+
+def in_session(path: Path, idle_hours: float) -> bool:
+    """Whether a recent session names this worktree (a false match only keeps more)."""
+    p = norm_path(str(path)).rstrip("/")
+    forms = {p}
+    if len(p) > 2 and p[1] == ":":  # C:/repo/x as Git Bash writes it: /c/repo/x
+        forms.add(f"/{p[0]}{p[2:]}")
+    base = p.rsplit("/", 1)[-1]
+    forms |= {f"/{base}", f" {base}", f'"{base}', f"'{base}"}  # relative: `cd ../x`, `cd x`, `cd "x"`, `cd 'x'`
+    return any(form in text for text in session_mentions(idle_hours) for form in forms)
 
 
 def notice(text: str) -> None:
@@ -287,12 +419,6 @@ def disposable(path: str) -> bool:
     return any(x in DISPOSABLE for x in parts) or path.strip().rstrip("/").endswith(DISPOSABLE_SUFFIXES)
 
 
-def default_branch(wt: Path) -> str:
-    """origin's default branch name ("main"), or "" when origin/HEAD is not set."""
-    r = git(wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    return r.stdout.strip().removeprefix("origin/") if r.returncode == 0 else ""
-
-
 def hidden_edits(wt: Path) -> str | None:
     """A tracked file whose edits status cannot see: skip-worktree (S) or assume-unchanged (lowercase tag)."""
     r = git(wt, "ls-files", "-v")
@@ -351,10 +477,10 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
     found = prs(wt.path, wt.branch)
     if found and (open_pr := next((p for p in found if p.state.upper() == "OPEN"), None)):
         return f"open PR #{open_pr.number}"
-    base = default_branch(wt.path)
+    # Any base counts - a feature or integration branch too: the branch itself is kept, so removing its worktree
+    # loses nothing, and the EU repos merge into feature branches (a default-branch rule held all six, 2026-09-29).
     merged = found is not None and any(
-        p.state.upper() == "MERGED" and p.head_oid == wt.head and not p.cross_repo and p.base in ("", base)
-        for p in found
+        p.state.upper() == "MERGED" and p.head_oid == wt.head and not p.cross_repo for p in found
     )
     if not merged:
         ancestor = git(wt.path, "merge-base", "--is-ancestor", wt.head, "origin/HEAD")
@@ -365,6 +491,8 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
     age = time.time() - max(newest_mtime(wt.path), git_activity(wt.path))
     if age < idle_hours * 3600:
         return f"active {fmt_age(max(age, 0.0))} ago"
+    if in_session(wt.path, idle_hours):
+        return f"a Claude session worked here within {idle_hours:g} h"
     return None
 
 

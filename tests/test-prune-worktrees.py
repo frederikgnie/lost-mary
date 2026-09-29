@@ -42,6 +42,9 @@ ENV = {
     "USERPROFILE": str(HOME),
     "LOST_MARY_SHARED_CHECKOUTS": str(CONFIG),
     "LOST_MARY_NO_GH": "1",
+    # A developer's own values would point the session gate at real transcripts and sessions.
+    "LOST_MARY_PROJECTS_DIR": str(HOME / ".claude" / "projects"),
+    "LOST_MARY_SESSIONS_DIR": str(HOME / ".claude" / "sessions"),
     "GIT_AUTHOR_NAME": "t",
     "GIT_AUTHOR_EMAIL": "t@t",
     "GIT_COMMITTER_NAME": "t",
@@ -281,7 +284,8 @@ head_merged = git(wt_merged, "rev-parse", "HEAD").strip()
 wt = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_open.name)
 cases = [
     ("merged PR at HEAD -> removable", [mod.PR(7, "MERGED", head_open)], None),
-    ("merged PR at HEAD into another base -> not merged", [mod.PR(7, "MERGED", head_open, "stack")], "not merged"),
+    # 2026-09-29: EU work merges into feature branches; the branch is kept, so its worktree is done.
+    ("merged PR at HEAD into a feature branch -> removable", [mod.PR(7, "MERGED", head_open, "feature/x")], None),
     ("merged PR at HEAD from a fork -> not merged", [mod.PR(7, "MERGED", head_open, "main", True)], "not merged"),
     ("merged PR at HEAD into main -> removable", [mod.PR(7, "MERGED", head_open, "main")], None),
     ("merged PR at another commit -> not merged", [mod.PR(7, "MERGED", head_merged)], "not merged"),
@@ -291,6 +295,78 @@ cases = [
 for label, prs, want in cases:
     got = mod.judge(wt, False, [], 6.0, lambda _cwd, _branch, prs=prs: prs)
     check(f"judge: {label}", got == want, repr(got))
+# Review 2026-09-29: a session left open in a worktree writes nothing while it waits; the async SessionStart
+# run must not remove the directory under it. Named in a tool call or a record's cwd -> kept; printed only
+# in a tool result (a `git worktree list`) -> not a session in it. The transcripts live in the sandbox HOME.
+merged_here = [mod.PR(7, "MERGED", head_open)]
+session_dir = HOME / ".claude" / "projects" / "sandbox"
+session_dir.mkdir(parents=True, exist_ok=True)
+transcript = session_dir / "s.jsonl"
+open_path = str(wt_open)
+bash_form = "/" + open_path[0].lower() + open_path[2:].replace(chr(92), "/") if open_path[1:2] == ":" else open_path
+use = {"type": "tool_use", "name": "Bash", "input": {"command": f"cd {open_path} && git status"}}
+listing = {"type": "tool_result", "content": f"{open_path}  abc123 [x]"}
+for label, records, want in (
+    ("a recent session ran a command in it -> kept", [{"message": {"content": [use]}}], "session"),
+    ("a recent session's cwd is it -> kept", [{"cwd": open_path, "message": {"content": []}}], "session"),
+    (
+        "a recent session named it in Git Bash form -> kept",
+        [{"message": {"content": [{"type": "tool_use", "input": {"command": f"git -C {bash_form} log"}}]}}],
+        "session",
+    ),
+    ("the path only in a tool result -> removable", [{"message": {"content": [listing]}}], None),
+    (
+        "a recent session named it by folder name (`cd ../<name>`) -> kept",
+        [{"message": {"content": [{"type": "tool_use", "input": {"command": f"cd ../{wt_open.name} && ls"}}]}}],
+        "session",
+    ),
+    (
+        "a recent session named it in single quotes (`Set-Location '<name>'`) -> kept",
+        [{"message": {"content": [{"type": "tool_use", "input": {"command": f"Set-Location '{wt_open.name}'"}}]}}],
+        "session",
+    ),
+):
+    transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")  # first line counts
+    mod.session_mentions.cache_clear()
+    got = mod.judge(wt, False, [], 6.0, lambda _cwd, _branch: merged_here)
+    ok = got is None if want is None else "session" in str(got)
+    check(f"judge: {label}", ok, repr(got))
+
+
+def judge_with_transcript(lines: list[str], age_seconds: float) -> str | None:
+    transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    old = time.time() - age_seconds
+    os.utime(transcript, (old, old))
+    mod.session_mentions.cache_clear()
+    return mod.judge(wt, False, [], 6.0, lambda _cwd, _branch: merged_here)
+
+
+# Second review: a session quiet for longer than the idle window has an old transcript too. A RUNNING session
+# (a ~/.claude/sessions/<pid>.json whose pid is alive - this test's own) counts at any age; an exited one does not.
+used = [json.dumps({"message": {"content": [use]}})]
+got = judge_with_transcript(used, 3 * 86400)
+check("judge: an old transcript of no running session -> removable", got is None, repr(got))
+sessions_dir = HOME / ".claude" / "sessions"
+sessions_dir.mkdir(parents=True, exist_ok=True)
+registry = sessions_dir / f"{os.getpid()}.json"
+registry.write_text(json.dumps({"pid": os.getpid(), "sessionId": "s", "cwd": str(TMP)}), encoding="utf-8")
+got = judge_with_transcript(used, 3 * 86400)
+check("judge: a running session's transcript, quiet for three days -> kept", "session" in str(got), repr(got))
+registry.write_text(json.dumps({"pid": os.getpid(), "sessionId": "other", "cwd": open_path}), encoding="utf-8")
+got = judge_with_transcript([json.dumps({"type": "summary"})], 3 * 86400)
+check("judge: a running session whose own cwd is the worktree -> kept", "session" in str(got), repr(got))
+registry.write_text(json.dumps({"pid": 2**70, "sessionId": "s", "cwd": str(TMP)}), encoding="utf-8")
+got = judge_with_transcript(used, 3 * 86400)
+check("judge: a registry pid out of range reads as running, never aborts -> kept", "session" in str(got), repr(got))
+registry.unlink()
+# A transcript larger than the tail read: the partial first line is dropped, a later record is still found.
+saved_tail = mod.SESSION_TAIL
+setattr(mod, "SESSION_TAIL", 400)  # noqa: B010 - a module loaded by path: ty cannot see its attributes
+got = judge_with_transcript([json.dumps({"pad": "x" * 2000}), *used], 0)
+check("judge: past the tail size, a later record still names it -> kept", "session" in str(got), repr(got))
+setattr(mod, "SESSION_TAIL", saved_tail)  # noqa: B010
+transcript.unlink()
+mod.session_mentions.cache_clear()
 wt_m = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_merged.name)
 got = mod.judge(wt_m, False, [], 6.0, lambda _cwd, _branch: [mod.PR(9, "OPEN", "x")])
 check("judge: an open PR keeps even an ancestor of origin/HEAD", got == "open PR #9", repr(got))

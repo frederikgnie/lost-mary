@@ -266,7 +266,7 @@ def commands(event):
     for entry in hooks.get(event) or []:
         for h in entry.get("hooks") or []:
             yield str(h.get("command", "")), str(entry.get("matcher", ""))
-for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py"), ("PreToolUse", "guard-shared-checkouts.py")):
+for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py"), ("PreToolUse", "guard-shared-checkouts.py"), ("SessionStart", "prune-worktrees.py")):
     found = [(c, m) for c, m in commands(event) if script in c]
     if not found:
         print(f"DRIFT {event} does not run {script} - merge the hooks block from settings.example.json")
@@ -309,6 +309,7 @@ PYEOF
   if grep -q 'permit.py' "$SETTINGS"; then echo "OK permit.py referenced"; else echo "DRIFT permit.py not referenced"; fi
   if grep -q 'witness.py' "$SETTINGS"; then echo "OK witness.py referenced"; else echo "DRIFT witness.py not referenced"; fi
   if grep -q 'guard-shared-checkouts.py' "$SETTINGS"; then echo "OK guard-shared-checkouts.py referenced"; else echo "DRIFT guard-shared-checkouts.py not referenced"; fi
+  if grep -q 'prune-worktrees.py' "$SETTINGS"; then echo "OK prune-worktrees.py referenced"; else echo "DRIFT prune-worktrees.py not referenced"; fi
   if grep -q 'ABSOLUTE/PATH/TO' "$SETTINGS"; then echo "DRIFT placeholder interpreter path"; fi
 }
 

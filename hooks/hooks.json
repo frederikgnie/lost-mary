@@ -14,6 +14,16 @@
     ],
     "SessionStart": [
       {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/prune-worktrees.py\" --apply",
+            "async": true
+          }
+        ]
+      },
+      {
         "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
