@@ -26,7 +26,11 @@ shared-checkouts.example.json in the library repository):
             PR's branch checked out there, gh checks out the base branch and
             pulls; otherwise it deletes the local branch - the guard cannot
             tell which without running git, so it holds both).
-            Work on a branch in your own worktree.
+            Work on a branch in your own worktree. One switch passes: back
+            to the default branch once the branch shown is merged - exactly
+            `git switch|checkout <default>`, no tracked file changed, and the
+            local <default> already holding HEAD or its tree (returns_home;
+            `git fetch origin <default>:<default>` first when it is behind).
   frozen  - trees only a deploy script may change. Blocked: every git command
             aimed there and every Edit/Write/MultiEdit/NotebookEdit inside.
             Running the deploy script is fine - only `git` invocations are
@@ -134,6 +138,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import uuid
 from collections.abc import Iterator
@@ -141,6 +146,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, NamedTuple
 
 ENV_VAR = "LOST_MARY_SHARED_CHECKOUTS"
+HOME_VAR = "LOST_MARY_GUARD_RETURN_HOME"
 SHELL_TOOLS = ("Bash", "PowerShell")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CD_COMMANDS = ("cd", "chdir", "pushd", "set-location", "sl", "push-location")
@@ -1057,6 +1063,7 @@ class Call(NamedTuple):
     label: str
     changes_shared: bool
     hint: str
+    args: tuple[str, ...] = ()
 
 
 def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None:
@@ -1093,7 +1100,7 @@ def repo_call(tokens: list[str], current: PureWindowsPath | None) -> Call | None
         else:
             args = args[1:]
     hint = " For a file restore use `git checkout -- <path>`." if args[:1] == ["checkout"] else ""
-    return Call(target, " ".join(["git", *args]), changes_shared_state(args), hint)
+    return Call(target, " ".join(["git", *args]), changes_shared_state(args), hint, tuple(args))
 
 
 def changes_shared_state(args: list[str]) -> bool:
@@ -1125,6 +1132,39 @@ def changes_shared_state(args: list[str]) -> bool:
     return False
 
 
+def git_out(target: PureWindowsPath, *args: str) -> str | None:
+    """`git -C <target> <args>`'s stripped stdout, or None when git fails or cannot run."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", target.as_posix(), *args], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
+    """Whether `git <args>` puts a finished branch's checkout back on its default branch and moves nothing else.
+
+    Exactly `git switch <default>` or `git checkout <default>`, where <default> is what origin/HEAD names, no
+    tracked file is changed, and the local <default> already holds HEAD (or HEAD's exact tree, a squash merge):
+    every commit the checkout showed stays reachable from the branch it now shows, and no session's edit moves.
+    `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Any git failure reads as no.
+    """
+    if os.environ.get(HOME_VAR, "").lower() == "off":
+        return False
+    if target is None or len(args) != 2 or args[0] not in ("switch", "checkout") or args[1].startswith("-"):
+        return False
+    if git_out(target, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}":
+        return False
+    if git_out(target, "status", "--porcelain", "--untracked-files=no") != "":
+        return False
+    ref = f"refs/heads/{args[1]}"
+    if git_out(target, "merge-base", "--is-ancestor", "HEAD", ref) is not None:
+        return True
+    return git_out(target, "diff", "--quiet", "HEAD", ref) is not None
+
+
 def frozen_reason(what: str, where: Dir, config: Config) -> str:
     via = f" only {config.frozen_by} may change it" if config.frozen_by else " only its deploy script may change it"
     return f"guard-shared-checkouts: blocked {what} - {where.shown} is a frozen tree the live jobs run;{via}."
@@ -1145,13 +1185,24 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         reason = None
         if where := match(call.target, config.frozen):
             reason = frozen_reason(f"`{call.label}` in {call.target}", where, config)
-        elif (where := match(call.target, config.shared)) and call.changes_shared:
+        elif (
+            (where := match(call.target, config.shared))
+            and call.changes_shared
+            and not returns_home(call.args, call.target)
+        ):
             base = where.shown.rstrip("/\\")
+            home = (
+                f" To put a merged branch's checkout back on the default branch (say main): git -C {base}"
+                f" fetch origin main:main, then git -C {base} switch main - allowed once no tracked file is"
+                " changed and main holds HEAD."
+                if call.args[:1] in (("switch",), ("checkout",))
+                else ""
+            )
             reason = (
                 f"guard-shared-checkouts: blocked `{call.label}` in {call.target} - {where.shown} is a checkout "
                 f"other sessions use at the same time, and changing its branch or stash moves their work too. "
                 f"Work on a branch in your own worktree: git -C {base} worktree add {base}_wt_<name> -b <branch>"
-                f"{call.hint}"
+                f"{call.hint}{home}"
             )
         if reason:
             return reason + (CD_HINT if any(CD_FAILS in t for t in segments(command, powershell)) else "")
