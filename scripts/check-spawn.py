@@ -35,7 +35,8 @@ spend limit runs out, those spawns fail with "You've hit your monthly spend
 limit" - and nothing in Claude Code switches model: `fallbackModel` excludes
 billing and rate-limit errors by design (model-config docs), and no frontmatter
 key does it either. So this hook does: a spawn that would run on fable (its
-`model` input, else its agent file's `model:` frontmatter) is rewritten to
+`model` input, else its agent file's `model:` frontmatter, else - with no line
+or `model: inherit` - CLAUDE_CODE_SUBAGENT_MODEL) is rewritten to
 `model: "opus"` - the alias resolves to the newest Opus - while Fable is out,
 through `hookSpecificOutput.updatedInput` (which replaces the whole input and
 applies without a permission decision). The model is told in
@@ -61,7 +62,7 @@ atomically; a malformed or future-dated field is dropped.
 goes unchanged.
 
 Not moved (known gaps): a plugin role (`plugin:role`, whose file is not read),
-a role without a `model:` line that inherits a fable LEAD (the payload does not
+a role without a `model:` line (or with `model: inherit`) that inherits a fable LEAD (the payload does not
 name the lead's model; `CLAUDE_CODE_SUBAGENT_MODEL` is honoured), and a project
 agent file under a directory other than the payload's `cwd`. A 429 on another
 model that also bills usage credits would arm it too - harmless, since that
