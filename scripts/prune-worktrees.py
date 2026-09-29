@@ -32,14 +32,18 @@ A worktree is REMOVABLE only when all of these hold:
                  of git's own records for it (index, HEAD, logs/HEAD in its gitdir,
                  touched by a session's `git status` or commit) changed within
                  --idle-hours (default 24);
-  5. no session - no Claude Code transcript under ~/.claude/projects
-                 ($LOST_MARY_PROJECTS_DIR) changed within --idle-hours names it,
-                 as a record's `cwd` or inside a tool call's input, in its last
-                 SESSION_TAIL bytes: a session left open in a worktree writes
-                 nothing while it waits, and removing the directory under it (on
-                 Windows its handle stops the remove halfway) strands it. Tool
-                 results are not read, so a listing that merely prints the path
-                 (`git worktree list`, a dry run of this CLI) does not count.
+  5. no session - no transcript under ~/.claude/projects ($LOST_MARY_PROJECTS_DIR)
+                 names it in its last SESSION_TAIL bytes - as a record's `cwd` or
+                 inside a tool call's input, by absolute path (either slash form)
+                 or by folder name after `/`, a space or a quote - counting every
+                 transcript changed within --idle-hours AND, at any age, those of
+                 a RUNNING session (~/.claude/sessions/<pid>.json with a live
+                 pid, $LOST_MARY_SESSIONS_DIR; observed 2.1.283), whose own `cwd`
+                 counts too: a session left open in a worktree writes nothing
+                 while it waits, and removing the directory under it (on Windows
+                 its handle stops the remove halfway) strands it. Tool results
+                 are not read, so a listing that merely prints the path (`git
+                 worktree list`, a dry run of this CLI) does not count.
 "pushed" trusts the local remote-tracking refs (no fetch); a stale ref can only
 say "pushed" for a commit the remote had when last fetched - the branch is kept
 either way.
@@ -97,15 +101,66 @@ def norm_path(text: str) -> str:
     return text.replace("\\\\", "/").replace("\\", "/").lower()
 
 
+def pid_alive(pid: int) -> bool:
+    """Whether a process runs with this pid. Never os.kill on Windows: there it terminates the process."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists, owned by someone else
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def live_sessions() -> tuple[set[str], list[str]]:
+    """(sessionIds, cwds) of running Claude Code sessions, from `~/.claude/sessions/<pid>.json` (observed, 2.1.283)."""
+    root = Path(os.environ.get("LOST_MARY_SESSIONS_DIR") or Path.home() / ".claude" / "sessions")
+    ids: set[str] = set()
+    cwds: list[str] = []
+    for path in root.glob("*.json") if root.is_dir() else []:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid, sid = data.get("pid"), data.get("sessionId")
+        if isinstance(pid, int) and isinstance(sid, str) and pid_alive(pid):
+            ids.add(sid)
+            if isinstance(cwd := data.get("cwd"), str):
+                cwds.append(norm_path(cwd))
+    return ids, cwds
+
+
 @functools.cache
 def session_mentions(idle_hours: float) -> tuple[str, ...]:
-    """The `cwd` values and tool-call inputs of every transcript changed within the window, normalised, once per run."""
+    """The `cwd` values and tool-call inputs, normalised, of every transcript changed within the window and of
+    every running session's transcripts at any age - a session left open writes nothing while it waits. Once per run.
+    """
     root = Path(os.environ.get("LOST_MARY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
     since = time.time() - idle_hours * 3600
-    found: list[str] = []
+    live, found = live_sessions()
     for path in root.glob("**/*.jsonl") if root.is_dir() else []:
         try:
-            if path.stat().st_mtime < since:
+            # <project>/<sessionId>.jsonl, and a subagent's <project>/<sessionId>/subagents/agent-<id>.jsonl
+            running = path.stem in live or (path.parent.name == "subagents" and path.parent.parent.name in live)
+            if not running and path.stat().st_mtime < since:
                 continue
             with path.open("rb") as handle:
                 size = handle.seek(0, os.SEEK_END)
@@ -118,7 +173,7 @@ def session_mentions(idle_hours: float) -> tuple[str, ...]:
         for line in lines:
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if not isinstance(record, dict):
                 continue
@@ -138,6 +193,8 @@ def in_session(path: Path, idle_hours: float) -> bool:
     forms = {p}
     if len(p) > 2 and p[1] == ":":  # C:/repo/x as Git Bash writes it: /c/repo/x
         forms.add(f"/{p[0]}{p[2:]}")
+    base = p.rsplit("/", 1)[-1]
+    forms |= {f"/{base}", f" {base}", f'"{base}'}  # relative: `cd ../x_wt`, `cd x_wt`, `Set-Location "x_wt"`
     return any(form in text for text in session_mentions(idle_hours) for form in forms)
 
 
