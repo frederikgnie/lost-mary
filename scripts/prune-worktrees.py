@@ -102,18 +102,30 @@ def norm_path(text: str) -> str:
 
 
 def pid_alive(pid: int) -> bool:
-    """Whether a process runs with this pid. Never os.kill on Windows: there it terminates the process."""
+    """Whether a process runs with this pid; an answer it cannot get reads as alive (that only keeps more).
+
+    Never os.kill on Windows: signal 0 is CTRL_C_EVENT there (Ctrl+C to the console), any other value terminates.
+    """
     if pid <= 0:
         return False
+    if pid > 0xFFFFFFFF:
+        return True  # not a pid any platform hands out; a malformed registry file must not abort the scan
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
             return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists, owned by someone else
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
         finally:
             kernel32.CloseHandle(handle)
@@ -123,8 +135,8 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    except OSError:
-        return False
+    except (OSError, OverflowError):
+        return True
     return True
 
 
@@ -194,7 +206,7 @@ def in_session(path: Path, idle_hours: float) -> bool:
     if len(p) > 2 and p[1] == ":":  # C:/repo/x as Git Bash writes it: /c/repo/x
         forms.add(f"/{p[0]}{p[2:]}")
     base = p.rsplit("/", 1)[-1]
-    forms |= {f"/{base}", f" {base}", f'"{base}'}  # relative: `cd ../x_wt`, `cd x_wt`, `Set-Location "x_wt"`
+    forms |= {f"/{base}", f" {base}", f'"{base}', f"'{base}"}  # relative: `cd ../x`, `cd x`, `cd "x"`, `cd 'x'`
     return any(form in text for text in session_mentions(idle_hours) for form in forms)
 
 

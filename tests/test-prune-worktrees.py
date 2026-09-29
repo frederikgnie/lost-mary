@@ -320,6 +320,11 @@ for label, records, want in (
         [{"message": {"content": [{"type": "tool_use", "input": {"command": f"cd ../{wt_open.name} && ls"}}]}}],
         "session",
     ),
+    (
+        "a recent session named it in single quotes (`Set-Location '<name>'`) -> kept",
+        [{"message": {"content": [{"type": "tool_use", "input": {"command": f"Set-Location '{wt_open.name}'"}}]}}],
+        "session",
+    ),
 ):
     transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")  # first line counts
     mod.session_mentions.cache_clear()
@@ -350,6 +355,9 @@ check("judge: a running session's transcript, quiet for three days -> kept", "se
 registry.write_text(json.dumps({"pid": os.getpid(), "sessionId": "other", "cwd": open_path}), encoding="utf-8")
 got = judge_with_transcript([json.dumps({"type": "summary"})], 3 * 86400)
 check("judge: a running session whose own cwd is the worktree -> kept", "session" in str(got), repr(got))
+registry.write_text(json.dumps({"pid": 2**70, "sessionId": "s", "cwd": str(TMP)}), encoding="utf-8")
+got = judge_with_transcript(used, 3 * 86400)
+check("judge: a registry pid out of range reads as running, never aborts -> kept", "session" in str(got), repr(got))
 registry.unlink()
 # A transcript larger than the tail read: the partial first line is dropped, a later record is still found.
 saved_tail = mod.SESSION_TAIL
