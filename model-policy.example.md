@@ -19,7 +19,9 @@ session where the framing itself is the hard part - it persists, so switch back.
 `fallbackModel` covers overload and unavailable only - never a usage or spend
 limit. The spawn hook covers that for spawns: once a Fable spawn has failed on
 usage credits, `check-spawn` runs every fable spawn (an explicit `model: fable`,
-or a role file that names fable) on `opus` - the newest Opus - for the next 6 hours, then
+a role file that names fable, or a role without a `model:` line under
+`CLAUDE_CODE_SUBAGENT_MODEL=fable`) on `opus` - the newest Opus - for the next
+6 hours, then
 lets one spawn try Fable again while the rest stay on Opus. The spawns already
 running when the limit first hits fail: spawn them again unchanged.
 `LOST_MARY_FABLE=off` forces Opus, `=on` disables the switch. A fable LEAD at
