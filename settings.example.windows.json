@@ -16,6 +16,16 @@
     ],
     "SessionStart": [
       {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply",
+            "async": true
+          }
+        ]
+      },
+      {
         "matcher": "startup|resume|clear|compact",
         "hooks": [
           {

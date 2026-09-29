@@ -191,7 +191,7 @@ function Test-Settings {
     }
     $hooks = $null
     if ($data.PSObject.Properties['hooks']) { $hooks = $data.hooks }
-    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'), @('PostToolUse', 'witness.py'), @('PostToolUseFailure', 'witness.py'), @('PreToolUse', 'guard-shared-checkouts.py'))
+    $wanted = @(@('PostToolUse', 'pycheck.py'), @('SubagentStop', 'check-evidence.py'), @('PreToolUse', 'no-ask.py'), @('Stop', 'no-punt.py'), @('SubagentStop', 'ledger.py'), @('SessionStart', 'ledger.py'), @('Stop', 'ledger.py'), @('PreToolUse', 'check-spawn.py'), @('PostToolUse', 'ledger.py'), @('PermissionRequest', 'permit.py'), @('SubagentStart', 'ledger.py'), @('Stop', 'check-evidence.py'), @('PostToolUse', 'witness.py'), @('PostToolUseFailure', 'witness.py'), @('PreToolUse', 'guard-shared-checkouts.py'), @('SessionStart', 'prune-worktrees.py'))
     foreach ($pair in $wanted) {
         $eventName = $pair[0]
         $scriptName = $pair[1]
