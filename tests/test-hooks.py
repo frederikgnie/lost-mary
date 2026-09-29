@@ -1913,10 +1913,10 @@ reason = rh("git switch main")
 expect_true("home: no origin/HEAD -> block", reason is not None, str(reason))
 expect_true("... naming `git remote set-head origin -a`", "set-head origin -a" in str(reason), str(reason))
 git(RH_REPO, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-os.environ["GIT_INDEX_FILE"] = str(RH / "other-index")
+os.environ["GIT_NAMESPACE"] = "x"  # leaves status empty: only the GIT_LOCATORS refusal can block this
 reason = rh("git switch main")
-expect_true("home: GIT_INDEX_FILE set (the switch would use another index) -> block", reason is not None, str(reason))
-os.environ.pop("GIT_INDEX_FILE")
+expect_true("home: GIT_NAMESPACE set (the switch would act elsewhere) -> block", reason is not None, str(reason))
+os.environ.pop("GIT_NAMESPACE")
 RH_TIMEOUT = guard.GIT_TIMEOUT
 guard.GIT_TIMEOUT = 0.0
 reason = rh("git switch main")
