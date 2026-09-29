@@ -28,7 +28,8 @@ shared-checkouts.example.json in the library repository):
             tell which without running git, so it holds both).
             Work on a branch in your own worktree. One switch passes: back
             to the default branch once the branch shown is merged - exactly
-            `git switch|checkout <default>`, no tracked file changed, and the
+            `git switch|checkout <default>` alone in its call (one cd before it
+            at most), no tracked file changed, and the
             local <default> already holding HEAD or its tree (returns_home;
             `git fetch origin <default>:<default>` first when it is behind).
   frozen  - trees only a deploy script may change. Blocked: every git command
@@ -140,6 +141,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
@@ -147,6 +149,7 @@ from typing import Any, NamedTuple
 
 ENV_VAR = "LOST_MARY_SHARED_CHECKOUTS"
 HOME_VAR = "LOST_MARY_GUARD_RETURN_HOME"
+GIT_TIMEOUT, HOME_BUDGET = 2.0, 5.0  # seconds per git call, and for all of them: well inside the hook's 10 s
 SHELL_TOOLS = ("Bash", "PowerShell")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CD_COMMANDS = ("cd", "chdir", "pushd", "set-location", "sl", "push-location")
@@ -1132,11 +1135,48 @@ def changes_shared_state(args: list[str]) -> bool:
     return False
 
 
-def git_out(target: PureWindowsPath, *args: str) -> str | None:
-    """`git -C <target> <args>`'s stripped stdout, or None when git fails or cannot run."""
+def plain_switch(command: str) -> bool:
+    """The call is one bare `git [-C <dir>] switch|checkout <name>`, at most behind one cd: no earlier command in
+    it can move a ref before the switch runs (the check sees the repository as it is before the call), and no git
+    option or `VAR=value` changes what the switch does. A whitelist - anything else in the call reads as no."""
+    if any(ch in command for ch in "\n|`$(){}<>@%*?!"):
+        return False
+    parts = re.split(r"\s*(?:&&|;)\s*", command.strip())
+    if len(parts) > 2 or any("&" in p for p in parts):
+        return False
+    try:
+        words = [shlex.split(p, posix=False) for p in parts]
+    except ValueError:
+        return False
+    if len(parts) == 2 and (len(words[0]) != 2 or words[0][0].lower() not in CD_COMMANDS):
+        return False
+    git = words[-1]
+    if not git or PureWindowsPath(git[0]).name.lower() not in ("git", "git.exe"):
+        return False
+    rest = git[3:] if git[1:2] == ["-C"] else git[1:]
+    return (
+        len(rest) == 2 and rest[0] in ("switch", "checkout") and re.fullmatch(r"[A-Za-z0-9._/]+", rest[1]) is not None
+    )
+
+
+def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
+    """`git -C <target> <args>`'s stripped stdout, or None when git fails, cannot run, or the deadline passes.
+
+    Runs without the session's GIT_* variables (a GIT_DIR or GIT_INDEX_FILE would point it at another repository)
+    and without optional locks, so a check never holds index.lock against another session's write."""
+    left = min(GIT_TIMEOUT, deadline - time.monotonic())
+    if left <= 0:
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")} | {"GIT_OPTIONAL_LOCKS": "0"}
     try:
         proc = subprocess.run(
-            ["git", "-C", target.as_posix(), *args], capture_output=True, text=True, timeout=10, check=False
+            ["git", "-C", target.as_posix(), *args],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=left,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1146,23 +1186,32 @@ def git_out(target: PureWindowsPath, *args: str) -> str | None:
 def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
     """Whether `git <args>` puts a finished branch's checkout back on its default branch and moves nothing else.
 
-    Exactly `git switch <default>` or `git checkout <default>`, where <default> is what origin/HEAD names, no
-    tracked file is changed, and the local <default> already holds HEAD (or HEAD's exact tree, a squash merge):
-    every commit the checkout showed stays reachable from the branch it now shows, and no session's edit moves.
-    `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Any git failure reads as no.
+    `switch|checkout <default>`, where <default> is what origin/HEAD names, no tracked file is changed (staged
+    or not, submodules included), and either the local <default> already holds HEAD, or HEAD is a branch whose
+    tree is exactly <default>'s (a squash merge - the commits stay on that branch). The caller also requires
+    plain_switch(). `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Every failure, timeout or surprise reads
+    as no: on this path failing open would let through the very command the guard blocks.
     """
-    if os.environ.get(HOME_VAR, "").lower() == "off":
+    try:
+        if os.environ.get(HOME_VAR, "").lower() == "off":
+            return False
+        if target is None or len(args) != 2 or args[0] not in ("switch", "checkout") or args[1].startswith("-"):
+            return False
+        deadline = time.monotonic() + HOME_BUDGET
+        if git_out(target, deadline, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}":
+            return False
+        status = ("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none")
+        if git_out(target, deadline, *status) != "":
+            return False
+        ref = f"refs/heads/{args[1]}"
+        if git_out(target, deadline, "merge-base", "--is-ancestor", "HEAD", ref) is not None:
+            return True
+        if git_out(target, deadline, "symbolic-ref", "-q", "HEAD") is None:
+            return False  # detached: nothing but the reflog would keep HEAD's commits
+        trees = git_out(target, deadline, "rev-parse", "HEAD^{tree}", f"{ref}^{{tree}}")
+        return trees is not None and len(set(trees.split())) == 1 and len(trees.split()) == 2
+    except Exception:
         return False
-    if target is None or len(args) != 2 or args[0] not in ("switch", "checkout") or args[1].startswith("-"):
-        return False
-    if git_out(target, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}":
-        return False
-    if git_out(target, "status", "--porcelain", "--untracked-files=no") != "":
-        return False
-    ref = f"refs/heads/{args[1]}"
-    if git_out(target, "merge-base", "--is-ancestor", "HEAD", ref) is not None:
-        return True
-    return git_out(target, "diff", "--quiet", "HEAD", ref) is not None
 
 
 def frozen_reason(what: str, where: Dir, config: Config) -> str:
@@ -1188,14 +1237,15 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         elif (
             (where := match(call.target, config.shared))
             and call.changes_shared
-            and not returns_home(call.args, call.target)
+            and not (plain_switch(command) and returns_home(call.args, call.target))
         ):
             base = where.shown.rstrip("/\\")
             home = (
-                f" To put a merged branch's checkout back on the default branch (say main): git -C {base}"
-                f" fetch origin main:main, then git -C {base} switch main - allowed once no tracked file is"
-                " changed and main holds HEAD."
-                if call.args[:1] in (("switch",), ("checkout",))
+                f" To put a merged branch's checkout back on its default branch (origin/HEAD's, say main): run"
+                f" `git -C {base} fetch origin main:main`, then `git -C {base} switch main` alone in a call of its"
+                " own - allowed once no tracked file is changed and main holds HEAD or its tree (no origin/HEAD:"
+                " `git remote set-head origin -a`)."
+                if len(call.args) == 2 and call.args[0] in ("switch", "checkout") and not call.args[1].startswith("-")
                 else ""
             )
             reason = (

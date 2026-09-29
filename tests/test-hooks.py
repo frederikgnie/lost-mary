@@ -1814,7 +1814,8 @@ RH_REPO = RH / "shared"
 git(RH, "init", "-q", "--bare", "-b", "main", str(RH_ORIGIN))
 git(RH, "init", "-q", "-b", "main", str(RH_SEED))
 (RH_SEED / "a.txt").write_text("a\n", encoding="utf-8")
-git(RH_SEED, "add", "a.txt")
+(RH_SEED / "\u00c1.txt").write_text("x\n", encoding="utf-8")  # a name cp1252 cannot decode as UTF-8 bytes
+git(RH_SEED, "add", "a.txt", "\u00c1.txt")
 git(RH_SEED, "commit", "-q", "-m", "a")
 git(RH_SEED, "push", "-q", str(RH_ORIGIN), "main")
 git(RH, "clone", "-q", str(RH_ORIGIN), str(RH_REPO))
@@ -1875,6 +1876,50 @@ expect_true(
     rh("git switch main") is None,
     str(rh("git switch main")),
 )
+for cmd in (
+    "git update-ref refs/heads/main HEAD~2; git switch main",  # the check sees main before the call moves it
+    "git fetch origin main:main && git switch main",
+    "git -c core.hooksPath=x switch main",
+    "git --work-tree=C:/elsewhere switch main",
+    "GIT_WORK_TREE=C:/elsewhere git switch main",
+    "git switch main | cat",
+    "git switch main &",
+    "git switch main\ngit status",
+):
+    reason = rh(cmd)
+    expect_true(f"home: not alone or not bare: {cmd!r} -> block", reason is not None, str(reason))
+reason = rh(f"cd {RH_REPO.as_posix()} && git switch main", GS_ELSE)
+expect_true("home: one cd, then the switch -> allowed", reason is None, str(reason))
+(RH_REPO / "a.txt").write_text("staged\n", encoding="utf-8")
+git(RH_REPO, "add", "a.txt")
+(RH_REPO / "a.txt").write_text("a\n", encoding="utf-8")
+reason = rh("git switch main")
+expect_true("home: a staged-only change -> block", reason is not None, str(reason))
+git(RH_REPO, "reset", "-q", "--", "a.txt")
+git(RH_REPO, "checkout", "-q", "--detach")
+reason = rh("git switch main")
+expect_true(
+    "home: detached, main holds only HEAD's tree -> block (the reflog alone would keep it)",
+    reason is not None,
+    str(reason),
+)
+git(RH_REPO, "checkout", "-q", "--detach", "main~1")
+expect_true(
+    "home: detached at a commit main holds -> allowed", rh("git switch main") is None, str(rh("git switch main"))
+)
+git(RH_REPO, "switch", "-q", "feat")
+git(RH_REPO, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+reason = rh("git switch main")
+expect_true("home: no origin/HEAD -> block", reason is not None, str(reason))
+expect_true("... naming `git remote set-head origin -a`", "set-head origin -a" in str(reason), str(reason))
+git(RH_REPO, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+RH_TIMEOUT = guard.GIT_TIMEOUT
+guard.GIT_TIMEOUT = 0.0
+reason = rh("git switch main")
+expect_true("home: git out of time -> block", reason is not None, str(reason))
+guard.GIT_TIMEOUT = RH_TIMEOUT
+reason = rh("git checkout -b x")
+expect_true("home: the hint stays off a `checkout -b`", reason is not None and "set-head" not in reason, str(reason))
 RH_CONFIG = RH / "shared-checkouts.json"
 RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
 RH_ENV = {k: str(v) for k, v in GS_ENV.items() if k != "LOST_MARY_GUARD_RETURN_HOME"}
@@ -1884,6 +1929,10 @@ rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
 expect("hook: the switch home in a shared checkout -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
 expect("hook: a switch elsewhere in it -> exit 2", rc, BLOCK, err)
+(RH_REPO / "\u00c1.txt").write_text("changed\n", encoding="utf-8")
+git(RH_REPO, "config", "core.quotePath", "false")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
+expect("hook: a changed file with a non-ASCII name -> exit 2, not a decode crash", rc, BLOCK, err)
 os.environ["LOST_MARY_GUARD_RETURN_HOME"] = "off"
 GS_CRASH = (
     "import runpy, sys\n"
