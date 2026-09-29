@@ -1,0 +1,7 @@
+# prompt.md cannot carry scaffold_script (unknown frontmatter key), so the
+# workspace is staged from here; see spawn-contract/case.yaml. Runs only under
+# --scaffold.
+schema_version: "1.1"
+name: pycheck-neg-question
+context:
+  scaffold_script: scaffold.sh
