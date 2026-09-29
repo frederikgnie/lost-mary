@@ -29,7 +29,8 @@ after its report, and hands the report back truncated. See unnamed().
 
 Fable fallback
 --------------
-A spawn can still run on fable (`model: fable`, or a role file naming it). When the Fable allowance or the monthly
+A spawn can still run on fable (`model: fable`, a role file naming it, or a role with no `model:` line or
+`model: inherit` under CLAUDE_CODE_SUBAGENT_MODEL=fable). When the Fable allowance or the monthly
 spend limit runs out, those spawns fail with "You've hit your monthly spend
 limit" - and nothing in Claude Code switches model: `fallbackModel` excludes
 billing and rate-limit errors by design (model-config docs), and no frontmatter
