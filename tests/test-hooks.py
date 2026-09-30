@@ -1836,7 +1836,7 @@ def rh(cmd: str, cwd: str = RH_CWD) -> str | None:
 
 reason = rh("git switch main")
 expect_true("home: merged upstream, local main behind -> block", reason is not None, str(reason))
-expect_true("... naming the fetch that brings main up", "fetch origin main:main" in str(reason), str(reason))
+expect_true("... naming the fetch that brings main up", "fetch origin <b>:<b>" in str(reason), str(reason))
 git(RH_REPO, "fetch", "-q", "origin", "main:main")
 expect_true(
     "home: local main holds HEAD -> `git switch main` allowed",
@@ -1924,6 +1924,48 @@ expect_true("home: git out of time -> block", reason is not None, str(reason))
 guard.GIT_TIMEOUT = RH_TIMEOUT
 reason = rh("git checkout -b x")
 expect_true("home: the hint stays off a `checkout -b`", reason is not None and "set-head" not in reason, str(reason))
+git(RH_REPO, "switch", "-q", "-c", "base", "main")
+git(RH_REPO, "switch", "-q", "-c", "sub")
+(RH_REPO / "d.txt").write_text("d\n", encoding="utf-8")
+git(RH_REPO, "add", "d.txt")
+git(RH_REPO, "commit", "-q", "-m", "d")
+git(RH_REPO, "branch", "-f", "base", "sub")  # the PR merged sub into base
+reason = rh("git switch base")
+expect_true("homes: base holds HEAD but no home declared -> block", reason is not None, str(reason))
+RH_HOMED = guard.parse_config({"shared": [RH_CWD], "homes": {RH_CWD: "base"}})
+expect_true("homes: parses", not isinstance(RH_HOMED, str), str(RH_HOMED))
+reason = guard.check_command("git switch base", RH_CWD, RH_HOMED)
+expect_true("homes: the declared home, holding HEAD -> allowed", reason is None, str(reason))
+reason = guard.check_command("git switch main", RH_CWD, RH_HOMED)
+expect_true("homes: origin/HEAD's branch not holding HEAD -> still block", reason is not None, str(reason))
+git(RH_REPO, "switch", "-q", "base")  # home; the reflog now says it came from sub, which holds HEAD
+reason = guard.check_command("git switch sub", RH_CWD, RH_HOMED)
+expect_true("homes: from home back onto the merged branch -> block", reason is not None, str(reason))
+git(RH_REPO, "switch", "-q", "sub")
+git(RH_REPO, "branch", "-f", "other", "sub")
+reason = guard.check_command("git switch other", RH_CWD, RH_HOMED)
+expect_true("homes: another branch holding HEAD -> block", reason is not None, str(reason))
+git(RH_REPO, "branch", "-f", "fix-x", "sub")
+RH_DASH = guard.parse_config({"shared": [RH_CWD], "homes": {RH_CWD: "fix-x"}})
+reason = guard.check_command("git switch fix-x", RH_CWD, RH_DASH)
+expect_true("homes: a home with a dash in its name -> allowed", reason is None, str(reason))
+reason = guard.check_command("git switch -fix", RH_CWD, RH_DASH)
+expect_true("homes: a leading dash is an option -> block", reason is not None, str(reason))
+for bad in (
+    [],
+    {"relative/dir": "x"},
+    {RH_CWD: 3},
+    {RH_CWD: ""},
+    {RH_CWD: ["base"]},
+    {str(RH / "not-shared"): "base"},
+):
+    cfg = guard.parse_config({"shared": [RH_CWD], "homes": bad})
+    expect_true(
+        f"homes: a bad entry is skipped, the rest of the config kept: {bad}",
+        not isinstance(cfg, str) and cfg.homes == {} and len(cfg.shared) == 1,
+        str(cfg),
+    )
+git(RH_REPO, "switch", "-q", "feat")
 RH_CONFIG = RH / "shared-checkouts.json"
 RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
 RH_ENV = {k: str(v) for k, v in GS_ENV.items() if k != "LOST_MARY_GUARD_RETURN_HOME"}
@@ -1933,6 +1975,15 @@ rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
 expect("hook: the switch home in a shared checkout -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
 expect("hook: a switch elsewhere in it -> exit 2", rc, BLOCK, err)
+git(RH_REPO, "branch", "-f", "base", "feat")
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD], "homes": {RH_CWD: "base"}}), encoding="utf-8")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch base"}}, env=RH_ENV)
+expect("hook: the declared home from the config file -> exit 0", rc, ALLOW, err)
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD], "homes": {RH_CWD: ["base"]}}), encoding="utf-8")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
+expect("hook: a malformed homes entry leaves the guard on -> exit 2", rc, BLOCK, err)
+expect_true("... with a notice naming it", "ignored" in err, err)
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
 (RH_REPO / "\u00c1.txt").write_text("changed\n", encoding="utf-8")
 git(RH_REPO, "config", "core.quotePath", "false")
 rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)

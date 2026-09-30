@@ -124,8 +124,10 @@ test committed for it. No agent transcripts. The last line is `DONE:`,
 `IN FLIGHT:` or `BLOCKED:`. If the branch is meant to become a pull request, `/pr` opens it
 with the account that owns the repository and carries those results into the
 body. Once it merges, leave nothing on the branch: remove the worktree, or
-return the checkout to the default branch (`git fetch origin main:main`, then
-`git switch main` in a call of its own - the guard lets that one switch through a shared checkout
+return the checkout to its home branch, the default one or the one the guard's
+`homes` declares
+(`git fetch origin <b>:<b>`, then `git switch <b>` in a call of its own - the
+guard lets that one switch through a shared checkout
 when the branch is merged and no tracked file is changed).
 
 ## Task
