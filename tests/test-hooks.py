@@ -1836,7 +1836,7 @@ def rh(cmd: str, cwd: str = RH_CWD) -> str | None:
 
 reason = rh("git switch main")
 expect_true("home: merged upstream, local main behind -> block", reason is not None, str(reason))
-expect_true("... naming the fetch that brings main up", "fetch origin main:main" in str(reason), str(reason))
+expect_true("... naming the fetch that brings main up", "fetch origin <b>:<b>" in str(reason), str(reason))
 git(RH_REPO, "fetch", "-q", "origin", "main:main")
 expect_true(
     "home: local main holds HEAD -> `git switch main` allowed",
@@ -1924,6 +1924,23 @@ expect_true("home: git out of time -> block", reason is not None, str(reason))
 guard.GIT_TIMEOUT = RH_TIMEOUT
 reason = rh("git checkout -b x")
 expect_true("home: the hint stays off a `checkout -b`", reason is not None and "set-head" not in reason, str(reason))
+git(RH_REPO, "switch", "-q", "-c", "base", "main")
+git(RH_REPO, "switch", "-q", "-c", "sub")
+(RH_REPO / "d.txt").write_text("d\n", encoding="utf-8")
+git(RH_REPO, "add", "d.txt")
+git(RH_REPO, "commit", "-q", "-m", "d")
+reason = rh("git switch base")
+expect_true("back: the branch it came from, not holding HEAD -> block", reason is not None, str(reason))
+git(RH_REPO, "branch", "-f", "base", "sub")  # the PR merged sub into base
+expect_true(
+    "back: the branch it came from, holding HEAD -> allowed", rh("git switch base") is None, str(rh("git switch base"))
+)
+git(RH_REPO, "branch", "-f", "other", "sub")
+reason = rh("git switch other")
+expect_true("back: another branch holding HEAD, never left for this one -> block", reason is not None, str(reason))
+git(RH_REPO, "switch", "-q", "feat")
+reason = rh("git switch base")
+expect_true("back: not the branch the last checkout came from -> block", reason is not None, str(reason))
 RH_CONFIG = RH / "shared-checkouts.json"
 RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
 RH_ENV = {k: str(v) for k, v in GS_ENV.items() if k != "LOST_MARY_GUARD_RETURN_HOME"}

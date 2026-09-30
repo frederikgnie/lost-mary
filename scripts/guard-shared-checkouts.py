@@ -27,7 +27,8 @@ shared-checkouts.example.json in the library repository):
             pulls; otherwise it deletes the local branch - the guard cannot
             tell which without running git, so it holds both).
             Work on a branch in your own worktree. One switch passes: back
-            to the default branch once the branch shown is merged - exactly
+            to the default branch, or to the branch the checkout came from
+            (its reflog), once the branch shown is merged into it - exactly
             `git switch|checkout <default>` alone in its call (one cd before it
             at most), no tracked file changed, and the
             local <default> already holding HEAD or its tree (returns_home;
@@ -1190,16 +1191,31 @@ def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
-def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
-    """Whether `git <args>` puts a finished branch's checkout back on its default branch and moves nothing else.
+def came_from(target: PureWindowsPath, deadline: float) -> str | None:
+    """The branch this checkout left to reach the branch it shows now, from HEAD's reflog: the newest
+    `checkout: moving from <a> to <b>` entry, when <b> is the current branch. None when detached or unclear."""
+    current = git_out(target, deadline, "symbolic-ref", "--short", "-q", "HEAD")
+    log = git_out(target, deadline, "reflog", "-n", "200", "--format=%gs", "HEAD")
+    if not current or log is None:
+        return None
+    for line in log.splitlines():
+        if moved := re.fullmatch(r"checkout: moving from (\S+) to (\S+)", line.strip()):
+            return moved.group(1) if moved.group(2) == current else None
+    return None
 
-    `switch|checkout <default>`, where <default> is what origin/HEAD names, no tracked file is changed (staged
-    or not, submodules included), and either the local <default> already holds HEAD, or HEAD is a branch whose
-    tree is exactly <default>'s (a squash merge - the commits stay on that branch). The caller also requires
-    plain_switch(). `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Every failure, timeout or surprise reads
-    as no: on this path failing open would let through the very command the guard blocks. So does a GIT_DIR-style
-    variable in the environment: the switch would act on the repository it names, not the one checked. Not
-    seen: edits in files marked assume-unchanged or skip-worktree (git status hides them).
+
+def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
+    """Whether `git <args>` puts a finished branch's checkout back where it belongs and moves nothing else.
+
+    `switch|checkout <home>`, where <home> is what origin/HEAD names or the branch the checkout came from (came_from
+    - a feature branch a PR merged back into, say), no tracked file is changed (staged or not, submodules included),
+    and either the local <home> already holds HEAD, or HEAD is a branch whose tree is exactly <home>'s (a squash
+    merge - the commits stay on that branch). Any other branch that holds HEAD stays blocked: `git branch x` then a
+    switch to x is the 2026-09-24 incident by another route. The caller also requires plain_switch().
+    `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Every failure, timeout or surprise reads as no: on this path
+    failing open would let through the very command the guard blocks. So does a GIT_DIR-style variable in the
+    environment: the switch would act on the repository it names, not the one checked. Not seen: edits in files
+    marked assume-unchanged or skip-worktree (git status hides them).
     """
     try:
         if os.environ.get(HOME_VAR, "").lower() == "off" or any(os.environ.get(v) for v in GIT_LOCATORS):
@@ -1208,7 +1224,8 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
             return False
         deadline = time.monotonic() + HOME_BUDGET
         if git_out(target, deadline, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}":
-            return False
+            if came_from(target, deadline) != args[1]:
+                return False
         status = ("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none")
         if git_out(target, deadline, *status) != "":
             return False
@@ -1250,10 +1267,10 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         ):
             base = where.shown.rstrip("/\\")
             home = (
-                f" To put a merged branch's checkout back on its default branch (origin/HEAD's, say main): run"
-                f" `git -C {base} fetch origin main:main`, then `git -C {base} switch main` alone in a call of its"
-                " own - allowed once no tracked file is changed and main holds HEAD or its tree (no origin/HEAD:"
-                " `git remote set-head origin -a`)."
+                f" To put a merged branch's checkout back on its default branch (origin/HEAD's, say main) or on"
+                f" the branch it came from: run `git -C {base} fetch origin <b>:<b>`, then"
+                f" `git -C {base} switch <b>` alone in a call of its own - allowed once no tracked file is"
+                " changed and <b> holds HEAD or its tree (no origin/HEAD: `git remote set-head origin -a`)."
                 if len(call.args) == 2 and call.args[0] in ("switch", "checkout") and not call.args[1].startswith("-")
                 else ""
             )
