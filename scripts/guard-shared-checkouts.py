@@ -402,16 +402,28 @@ def parse_config(raw: object) -> Config | str:
     frozen_by = raw.get("frozen_by")
     if frozen_by is not None and not isinstance(frozen_by, str):
         return '"frozen_by" is not a string'
-    homes_raw = raw.get("homes", {})
-    if not isinstance(homes_raw, dict):
-        return '"homes" is not an object of dir: branch'
+    return Config(
+        lists["shared"], lists["frozen"], frozen_by or None, parse_homes(raw.get("homes", {}), lists["shared"])
+    )
+
+
+def parse_homes(value: object, shared: list[Dir]) -> dict[tuple[str, ...], str]:
+    """The `homes` map, keyed like the `shared` entry each names. Optional and a convenience only, so a bad
+    entry - or all of it - is skipped with a notice instead of turning the whole guard off."""
+    if not isinstance(value, dict):
+        notice('"homes" is not an object of dir: branch - ignored')
+        return {}
+    keys = {d.key for d in shared}
     homes: dict[tuple[str, ...], str] = {}
-    for d, branch in homes_raw.items():
+    for d, branch in value.items():
         p = norm(d) if isinstance(d, str) else None
         if p is None or not isinstance(branch, str) or not branch:
-            return f'"homes" entry {d!r} is not an absolute path with a branch name'
-        homes[key_of(p)] = branch
-    return Config(lists["shared"], lists["frozen"], frozen_by or None, homes)
+            notice(f'"homes" entry {d!r} is not an absolute path with a branch name - ignored')
+        elif key_of(p) not in keys:
+            notice(f'"homes" entry {d!r} is not one of the "shared" checkouts - ignored')
+        else:
+            homes[key_of(p)] = branch
+    return homes
 
 
 def load_config() -> Config | None:

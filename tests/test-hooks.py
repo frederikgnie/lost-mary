@@ -1951,8 +1951,20 @@ reason = guard.check_command("git switch fix-x", RH_CWD, RH_DASH)
 expect_true("homes: a home with a dash in its name -> allowed", reason is None, str(reason))
 reason = guard.check_command("git switch -fix", RH_CWD, RH_DASH)
 expect_true("homes: a leading dash is an option -> block", reason is not None, str(reason))
-for bad in ({"homes": []}, {"homes": {"relative/dir": "x"}}, {"homes": {RH_CWD: 3}}, {"homes": {RH_CWD: ""}}):
-    expect_true(f"homes: config rejected: {bad}", isinstance(guard.parse_config(bad), str))
+for bad in (
+    [],
+    {"relative/dir": "x"},
+    {RH_CWD: 3},
+    {RH_CWD: ""},
+    {RH_CWD: ["base"]},
+    {str(RH / "not-shared"): "base"},
+):
+    cfg = guard.parse_config({"shared": [RH_CWD], "homes": bad})
+    expect_true(
+        f"homes: a bad entry is skipped, the rest of the config kept: {bad}",
+        not isinstance(cfg, str) and cfg.homes == {} and len(cfg.shared) == 1,
+        str(cfg),
+    )
 git(RH_REPO, "switch", "-q", "feat")
 RH_CONFIG = RH / "shared-checkouts.json"
 RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
@@ -1963,6 +1975,15 @@ rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
 expect("hook: the switch home in a shared checkout -> exit 0", rc, ALLOW, err)
 rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
 expect("hook: a switch elsewhere in it -> exit 2", rc, BLOCK, err)
+git(RH_REPO, "branch", "-f", "base", "feat")
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD], "homes": {RH_CWD: "base"}}), encoding="utf-8")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch base"}}, env=RH_ENV)
+expect("hook: the declared home from the config file -> exit 0", rc, ALLOW, err)
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD], "homes": {RH_CWD: ["base"]}}), encoding="utf-8")
+rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD, "tool_input": {"command": "git switch other"}}, env=RH_ENV)
+expect("hook: a malformed homes entry leaves the guard on -> exit 2", rc, BLOCK, err)
+expect_true("... with a notice naming it", "ignored" in err, err)
+RH_CONFIG.write_text(json.dumps({"shared": [RH_CWD]}), encoding="utf-8")
 (RH_REPO / "\u00c1.txt").write_text("changed\n", encoding="utf-8")
 git(RH_REPO, "config", "core.quotePath", "false")
 rc, err = run_hook(GUARD, RH_EVENT | {"cwd": RH_CWD}, env=RH_ENV)
