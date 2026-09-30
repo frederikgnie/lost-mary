@@ -16,7 +16,8 @@ Config, read on every call (no restart): `$LOST_MARY_SHARED_CHECKOUTS`, else
 `~/.claude/agent-library/shared-checkouts.json` (template:
 shared-checkouts.example.json in the library repository):
 
-  {"shared": [dirs], "frozen": [dirs], "frozen_by": "path, optional"}
+  {"shared": [dirs], "frozen": [dirs], "frozen_by": "path, optional",
+   "homes": {"dir": "branch", optional}}
 
   shared  - checkouts several sessions use at once. Blocked there: `switch`,
             a branch-changing `checkout` (file restores are fine), `stash`
@@ -27,12 +28,14 @@ shared-checkouts.example.json in the library repository):
             pulls; otherwise it deletes the local branch - the guard cannot
             tell which without running git, so it holds both).
             Work on a branch in your own worktree. One switch passes: back
-            to the default branch, or to the branch the checkout came from
-            (its reflog), once the branch shown is merged into it - exactly
-            `git switch|checkout <default>` alone in its call (one cd before it
-            at most), no tracked file changed, and the
-            local <default> already holding HEAD or its tree (returns_home;
-            `git fetch origin <default>:<default>` first when it is behind).
+            home once the branch shown is merged - exactly `git switch|checkout
+            <home>` alone in its call (one cd before it at most), where <home>
+            is origin/HEAD's branch or the one `homes` declares, no tracked
+            file changed, and the local <home> already holding HEAD or its
+            tree (returns_home; `git fetch origin <home>:<home>` first when it
+            is behind).
+  homes   - optional {dir: branch}: a shared checkout that lives on a branch
+            other than the default one, so the switch home may go there too.
   frozen  - trees only a deploy script may change. Blocked: every git command
             aimed there and every Edit/Write/MultiEdit/NotebookEdit inside.
             Running the deploy script is fine - only `git` invocations are
@@ -324,6 +327,7 @@ class Config(NamedTuple):
     shared: list[Dir]
     frozen: list[Dir]
     frozen_by: str | None
+    homes: dict[tuple[str, ...], str] = {}
 
 
 def notice(text: str) -> None:
@@ -398,7 +402,16 @@ def parse_config(raw: object) -> Config | str:
     frozen_by = raw.get("frozen_by")
     if frozen_by is not None and not isinstance(frozen_by, str):
         return '"frozen_by" is not a string'
-    return Config(lists["shared"], lists["frozen"], frozen_by or None)
+    homes_raw = raw.get("homes", {})
+    if not isinstance(homes_raw, dict):
+        return '"homes" is not an object of dir: branch'
+    homes: dict[tuple[str, ...], str] = {}
+    for d, branch in homes_raw.items():
+        p = norm(d) if isinstance(d, str) else None
+        if p is None or not isinstance(branch, str) or not branch:
+            return f'"homes" entry {d!r} is not an absolute path with a branch name'
+        homes[key_of(p)] = branch
+    return Config(lists["shared"], lists["frozen"], frozen_by or None, homes)
 
 
 def load_config() -> Config | None:
@@ -1164,7 +1177,9 @@ def plain_switch(command: str) -> bool:
         return False
     rest = git[3:] if git[1:2] == ["-C"] else git[1:]
     return (
-        len(rest) == 2 and rest[0] in ("switch", "checkout") and re.fullmatch(r"[A-Za-z0-9._/]+", rest[1]) is not None
+        len(rest) == 2
+        and rest[0] in ("switch", "checkout")
+        and re.fullmatch(r"[A-Za-z0-9._/][A-Za-z0-9._/-]*", rest[1]) is not None
     )
 
 
@@ -1191,27 +1206,16 @@ def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
-def came_from(target: PureWindowsPath, deadline: float) -> str | None:
-    """The branch this checkout left to reach the branch it shows now, from HEAD's reflog: the newest
-    `checkout: moving from <a> to <b>` entry, when <b> is the current branch. None when detached or unclear."""
-    current = git_out(target, deadline, "symbolic-ref", "--short", "-q", "HEAD")
-    log = git_out(target, deadline, "reflog", "-n", "200", "--format=%gs", "HEAD")
-    if not current or log is None:
-        return None
-    for line in log.splitlines():
-        if moved := re.fullmatch(r"checkout: moving from (\S+) to (\S+)", line.strip()):
-            return moved.group(1) if moved.group(2) == current else None
-    return None
-
-
-def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
+def returns_home(args: tuple[str, ...], target: PureWindowsPath | None, home: str | None = None) -> bool:
     """Whether `git <args>` puts a finished branch's checkout back where it belongs and moves nothing else.
 
-    `switch|checkout <home>`, where <home> is what origin/HEAD names or the branch the checkout came from (came_from
-    - a feature branch a PR merged back into, say), no tracked file is changed (staged or not, submodules included),
-    and either the local <home> already holds HEAD, or HEAD is a branch whose tree is exactly <home>'s (a squash
-    merge - the commits stay on that branch). Any other branch that holds HEAD stays blocked: `git branch x` then a
-    switch to x is the 2026-09-24 incident by another route. The caller also requires plain_switch().
+    `switch|checkout <home>`, where <home> is what origin/HEAD names or the branch the config declares home for
+    this checkout (`homes`: a checkout that lives on a feature branch), no tracked file is changed (staged or
+    not, submodules included), and either the local <home> already holds HEAD, or HEAD is a branch whose tree is
+    exactly <home>'s (a squash merge - the commits stay on that branch). Any other branch that holds HEAD stays
+    blocked: `git branch x` then a switch to x is the 2026-09-24 incident by another route, and a home read from
+    the reflog would point back at the merged branch the moment the checkout got home. The caller also requires
+    plain_switch().
     `LOST_MARY_GUARD_RETURN_HOME=off` turns this off. Every failure, timeout or surprise reads as no: on this path
     failing open would let through the very command the guard blocks. So does a GIT_DIR-style variable in the
     environment: the switch would act on the repository it names, not the one checked. Not seen: edits in files
@@ -1223,9 +1227,10 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None) -> bool:
         if target is None or len(args) != 2 or args[0] not in ("switch", "checkout") or args[1].startswith("-"):
             return False
         deadline = time.monotonic() + HOME_BUDGET
-        if git_out(target, deadline, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}":
-            if came_from(target, deadline) != args[1]:
-                return False
+        if args[1] != home and (
+            git_out(target, deadline, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") != f"origin/{args[1]}"
+        ):
+            return False
         status = ("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none")
         if git_out(target, deadline, *status) != "":
             return False
@@ -1263,12 +1268,13 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         elif (
             (where := match(call.target, config.shared))
             and call.changes_shared
-            and not (plain_switch(command) and returns_home(call.args, call.target))
+            and not (plain_switch(command) and returns_home(call.args, call.target, config.homes.get(where.key)))
         ):
             base = where.shown.rstrip("/\\")
             home = (
                 f" To put a merged branch's checkout back on its default branch (origin/HEAD's, say main) or on"
-                f" the branch it came from: run `git -C {base} fetch origin <b>:<b>`, then"
+                f" the home `homes` declares for it in the guard's config: run"
+                f" `git -C {base} fetch origin <b>:<b>`, then"
                 f" `git -C {base} switch <b>` alone in a call of its own - allowed once no tracked file is"
                 " changed and <b> holds HEAD or its tree (no origin/HEAD: `git remote set-head origin -a`)."
                 if len(call.args) == 2 and call.args[0] in ("switch", "checkout") and not call.args[1].startswith("-")
