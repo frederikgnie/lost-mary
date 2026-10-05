@@ -491,6 +491,36 @@ check(
     and not mod.disposable("runner_state.sqlite3"),
 )
 
+
+# --hook: the SessionStart payload's cwd is the starting session's own; whether that session is registered under
+# ~/.claude/sessions before its async hook reads the directory is not documented, so the payload counts as one.
+def cli_hook(payload: str) -> dict[str, dict[str, str]]:
+    r = subprocess.run(
+        [sys.executable, str(PRUNE), "--hook", "--json"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=ENV,
+        timeout=300,
+    )
+    return rows_by_path(r.stdout)
+
+
+got_row = cli_hook(json.dumps({"hook_event_name": "SessionStart", "cwd": str(wt_merged / "sub")})).get(
+    norm_key(wt_merged), {}
+)
+check(
+    "--hook: the starting session's cwd inside a merged worktree -> kept",
+    got_row.get("verdict") == "KEPT",
+    str(got_row),
+)
+got_row = cli_hook("not json").get(norm_key(wt_merged), {})
+check("--hook: an unreadable payload -> judged as before", got_row.get("verdict") == "REMOVABLE", str(got_row))
+got_row = cli_hook(chr(0xFEFF) + json.dumps({"cwd": str(wt_merged)})).get(norm_key(wt_merged), {})
+check("--hook: a payload with a BOM is read", got_row.get("verdict") == "KEPT", str(got_row))
+
 # --- apply ------------------------------------------------------------------------------------------
 r = cli("--apply")
 check("--apply exits 0", r.returncode == 0, r.stderr)

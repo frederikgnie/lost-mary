@@ -28,6 +28,10 @@ from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
 GUARD = HERE / "guard-shared-checkouts.py"
+# History, not today: a recorded `git worktree add` judged against today's worktree count, or a merge against
+# today's PR state, says nothing about the scanner. Both checks have their own tests.
+os.environ["LOST_MARY_GUARD_WORKTREE_CAP"] = "off"
+os.environ["LOST_MARY_NO_GH"] = "1"
 
 
 def load(path: Path, name: str) -> ModuleType:

@@ -152,11 +152,16 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+HOOK_CWDS: list[str] = []  # with --hook: the starting session's own cwd, from the SessionStart payload
+
+
 def live_sessions() -> tuple[set[str], list[str]]:
-    """(sessionIds, cwds) of running Claude Code sessions, from `~/.claude/sessions/<pid>.json` (observed, 2.1.283)."""
+    """(sessionIds, cwds) of running Claude Code sessions, from `~/.claude/sessions/<pid>.json` (observed, 2.1.283),
+    plus HOOK_CWDS: whether the starting session is registered before its async SessionStart hook reads the
+    directory is not documented, so the payload's cwd is counted either way."""
     root = Path(os.environ.get("LOST_MARY_SESSIONS_DIR") or Path.home() / ".claude" / "sessions")
     ids: set[str] = set()
-    cwds: list[str] = []
+    cwds: list[str] = [norm_path(c) for c in HOOK_CWDS]
     for path in root.glob("*.json") if root.is_dir() else []:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -595,11 +600,14 @@ def is_link(path: Path) -> bool:
 
 
 def empty_tree(root: Path) -> list[Path] | None:
-    """The directories of a tree that holds no file and no link, deepest first; None when it holds anything else."""
+    """The directories of a tree that holds no file and no link, deepest first; None when it holds anything else.
+    A mount point anywhere in it keeps it: an empty mounted volume is not a leftover."""
+    if os.path.ismount(root):
+        return None
     dirs = [root]
     for d in dirs:  # grows while it is walked: breadth-first
         for entry in d.iterdir():
-            if is_link(entry) or not entry.is_dir():
+            if is_link(entry) or not entry.is_dir() or os.path.ismount(entry):
                 return None
             dirs.append(entry)
     return dirs[::-1]  # a child always comes after its parent breadth-first, so before it reversed
@@ -733,6 +741,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="the same window when gh shows a merged PR whose head is HEAD (default 1)",
     )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument(
+        "--hook", action="store_true", help="read a SessionStart payload on stdin; its cwd counts as a running session"
+    )
     args = ap.parse_args(argv)
     if args.idle_hours < 0:
         ap.error("--idle-hours must be >= 0")
@@ -741,8 +752,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def payload_cwds() -> list[str]:
+    """The `cwd` of the hook payload on stdin, read as bytes and decoded utf-8-sig (a PowerShell pipe adds a BOM);
+    nothing when stdin is a terminal or holds no JSON object with one."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return []
+    try:
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")
+    except (OSError, ValueError):
+        return []
+    cwd = data.get("cwd") if isinstance(data, dict) else None
+    return [cwd] if isinstance(cwd, str) and cwd else []
+
+
 def main(argv: list[str] | None = None, prs: PrLookup | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.hook:
+        HOOK_CWDS.extend(payload_cwds())
     rows, repos, skipped = run(args.repos, args.idle_hours, args.merged_idle_hours, args.apply, prs or GhLookup())
     totals = summary(rows, repos, args.apply) | {"skipped": skipped}
     code = 1 if skipped or totals["failed"] else 0

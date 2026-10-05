@@ -29,12 +29,17 @@ commit. A push after the stamp voids it: the new commits are unreviewed.
   python pr-state.py show [-R owner/repo] [--limit N]
       The latest stamp per PR, newest first.
 
-A merged base. A PR whose base is a feature branch that was itself merged (a PR
-from it MERGED, none OPEN) lands its commits on a branch nothing will merge
-again - they never reach main. stale_base() names it; the guard holds such a
-merge and `gh pr create --base <that branch>`. The default branch and long-lived
-names (main, master, develop, dev, trunk, release/*) are never stale, nor any
-branch the caller passes as `keep` (the guard's `homes`).
+A merged base. A PR whose base is a feature branch that was itself merged lands
+its commits on a branch nothing will merge again - they never reach main.
+stale_branch() names one: a PR from it (same repository, not a fork) MERGED,
+none OPEN, and its tip - the local `origin/<b>` ref in a clone of that
+repository - is still the head that merged. A branch that took commits after
+its merge is in use; without a clone to read the tip from nothing is judged.
+origin/HEAD's branch, long-lived names (main, master, develop, dev, trunk,
+staging, qa, integration, release-*, hotfix-*) and any branch the caller passes
+as `keep` (the guard's `homes`) are never stale. The guard holds such a merge
+and `gh pr create --base <that branch>`. A stamp also names the base it was
+reviewed against; a retargeted PR needs a new one.
 
 gh is the only source of a PR's head and base. Without it (missing, failing, the
 wrong account active, or LOST_MARY_NO_GH=1) nothing is recorded and nothing is
@@ -51,6 +56,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,8 +68,9 @@ NO_GH_ENV = "LOST_MARY_NO_GH"
 GH_CMD_ENV = "LOST_MARY_GH"  # the gh command, shlex-split (tests point it at a fake)
 RECORDS = "reviews.jsonl"
 GH_TIMEOUT = 8.0
+DEADLINE: float | None = None  # time.monotonic() by which every gh / git call must end (the guard sets it)
 TIERS = ("quick", "full", "none")
-LONG_LIVED = re.compile(r"(?:main|master|develop|dev|trunk|release[/-].+)", re.IGNORECASE)
+LONG_LIVED = re.compile(r"(?:main|master|develop|dev|trunk|staging|qa|integration|(?:release|hotfix)[/-].+)", re.I)
 PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -87,9 +94,15 @@ def records_path() -> Path:
     return state_dir() / RECORDS
 
 
+def time_left(cap: float) -> float:
+    """Seconds the next call may take: `cap`, or less when DEADLINE is near. 0 or below means do not start."""
+    return cap if DEADLINE is None else min(cap, DEADLINE - time.monotonic())
+
+
 def gh_json(args: list[str], cwd: str | None = None) -> Any:
     """gh's JSON output, or None when gh is off, missing, failing or slow."""
-    if os.environ.get(NO_GH_ENV) == "1":
+    left = time_left(GH_TIMEOUT)
+    if os.environ.get(NO_GH_ENV) == "1" or left <= 0:
         return None
     try:
         done = subprocess.run(
@@ -99,7 +112,7 @@ def gh_json(args: list[str], cwd: str | None = None) -> Any:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=GH_TIMEOUT,
+            timeout=left,
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -136,23 +149,50 @@ def view(number: str, repo: str | None = None, cwd: str | None = None) -> Pr | N
     )
 
 
+def same_repo(cwd: Path, repo: str) -> bool:
+    """Whether the checkout at `cwd` has `repo` (owner/repo) as its origin."""
+    url = (git(cwd, "remote", "get-url", "origin") or "").lower().removesuffix(".git").rstrip("/")
+    return url.endswith(f"/{repo.lower()}") or url.endswith(f":{repo.lower()}")
+
+
 def stale_branch(branch: str, repo: str | None, cwd: str | None, keep: frozenset[str] = frozenset()) -> str | None:
-    """Why `branch` must not take merges - a PR from it already MERGED and none is OPEN - else None."""
-    if not branch or LONG_LIVED.fullmatch(branch) or branch in keep:
+    """Why `branch` must not take merges, else None: a PR from it (same repository, not a fork) MERGED, none is
+    OPEN, and the branch's tip on origin is still the head that merged - nothing new landed on it since, so a merge
+    into it reaches nothing. Long-lived names, `keep` and origin's default branch never are; a branch that kept
+    receiving commits after its merge is in use and is not either. The tip is the local `origin/<branch>` ref in
+    `cwd`, which must be a checkout of `repo`; without one nothing is judged."""
+    if not branch or LONG_LIVED.fullmatch(branch) or branch in keep or cwd is None:
         return None
-    args = ["pr", "list", "--head", branch, "--state", "all", "--limit", "30", "--json", "number,state,baseRefName"]
+    here = Path(cwd)
+    if repo and not same_repo(here, repo):
+        return None
+    if git(here, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") == f"origin/{branch}":
+        return None
+    tip = (git(here, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}") or "").lower()
+    if not SHA.fullmatch(tip):
+        return None
+    fields = "number,state,baseRefName,headRefOid,isCrossRepository"
+    args = ["pr", "list", "--head", branch, "--state", "all", "--limit", "30", "--json", fields]
     prs = GH([*args, "-R", repo] if repo else args, cwd)
     if not isinstance(prs, list):
         return None
-    rows = [p for p in prs if isinstance(p, dict)]
-    merged = [p for p in rows if p.get("state") == "MERGED"]
-    if not merged or any(p.get("state") == "OPEN" for p in rows):
+    rows = [p for p in prs if isinstance(p, dict) and not p.get("isCrossRepository")]
+    if any(p.get("state") == "OPEN" for p in rows):
+        return None
+    merged = [p for p in rows if p.get("state") == "MERGED" and str(p.get("headRefOid") or "").lower() == tip]
+    if not merged:
         return None
     into = str(merged[0].get("baseRefName") or "main")
     return (
-        f"`{branch}` was already merged (PR #{merged[0].get('number')} into {into}) and has no open PR, so commits "
-        f"merged into it never reach {into}"
+        f"`{branch}` was already merged (PR #{merged[0].get('number')} into {into}; origin/{branch} is still at "
+        f"{tip[:9]}, the head that merged - `git fetch` if it moved) and has no open PR, so commits merged into it "
+        f"never reach {into}"
     )
+
+
+def retarget(why: str) -> str:
+    """The branch a stale_branch() message says the merged branch went into."""
+    return why.rsplit(" ", 1)[-1]
 
 
 def stale_base(pr: Pr, cwd: str | None, keep: frozenset[str] = frozenset()) -> str | None:
@@ -160,8 +200,7 @@ def stale_base(pr: Pr, cwd: str | None, keep: frozenset[str] = frozenset()) -> s
     why = stale_branch(pr.base, pr.repo, cwd, keep)
     if why is None:
         return None
-    into = why.rsplit(" ", 1)[-1]
-    return f"{why}. Retarget the PR first: `gh pr edit {pr.number} -R {pr.repo} --base {into}`"
+    return f"{why}. Retarget the PR first: `gh pr edit {pr.number} -R {pr.repo} --base {retarget(why)}`"
 
 
 def read_records() -> dict[tuple[str, str], dict[str, str]]:
@@ -193,11 +232,19 @@ def review_status(pr: Pr) -> tuple[bool, str]:
             f"{pr.repo}#{pr.number} was reviewed at {sha[:9]}, but its head is now {pr.head[:9]}: review "
             f"`git diff {sha[:9]}..{pr.head[:9]}`, then stamp it again"
         )
+    if stamp.get("base", pr.base) != pr.base:
+        return False, (
+            f"{pr.repo}#{pr.number} was reviewed against {stamp.get('base')}, but it now targets {pr.base}: review "
+            f"its diff against {pr.base}, then stamp it again"
+        )
     tests = stamp.get("tests") or "none"
     return True, f"{pr.repo}#{pr.number} reviewed at {sha[:9]} ({tests} tests) on {stamp.get('at', '?')}"
 
 
 def git(cwd: Path, *args: str) -> str | None:
+    left = time_left(10.0)
+    if left <= 0:
+        return None
     try:
         done = subprocess.run(
             ["git", "-C", str(cwd), *args],
@@ -205,7 +252,7 @@ def git(cwd: Path, *args: str) -> str | None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=left,
         )
     except (OSError, subprocess.SubprocessError):
         return None

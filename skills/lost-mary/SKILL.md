@@ -130,7 +130,8 @@ A project's `CLAUDE.md` naming its own quick / full commands wins.
 implementer. Findings at HIGH or above are resolved before "done". Then, with
 the fixes pushed, record it from the PR branch's worktree:
 `python ~/.claude/agent-library/scripts/pr-state.py reviewed <n> --tests full`
-(the guard lets that run only after a review in this session). Any session
+(the guard lets that run only once a review in this session has finished;
+one review covers one PR). Any session
 may then merge the PR while its head is the commit stamped; a later push
 voids it. `pr-state.py status <n>` shows head, stamp and base. The merge runs
 in its own call: the guard holds back any other merge, because an auto-mode
