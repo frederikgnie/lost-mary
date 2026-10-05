@@ -77,8 +77,8 @@ works and tests in it, so all of them test against the same tree, and the
 pieces land there as commits, not as PRs of their own. A task too big for
 one PR makes its branch an integration branch: open its PR into main early as
 a draft; sub-PRs target it while that PR is open - never a branch whose PR
-has merged (the guard holds that merge). The guard caps worktrees per
-repository (`max_worktrees`, default 3): reuse one, or finish one.
+has merged (the guard holds that merge). The guard caps the worktrees one
+session holds per repository (`max_worktrees`, default 2): reuse, or finish one.
 
 Add an agent only to remove a risk you can name. Reassess after each result.
 `explore`, `review` and `implement` never join a team: the spawn hook drops

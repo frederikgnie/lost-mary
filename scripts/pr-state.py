@@ -69,6 +69,7 @@ GH_CMD_ENV = "LOST_MARY_GH"  # the gh command, shlex-split (tests point it at a 
 RECORDS = "reviews.jsonl"
 GH_TIMEOUT = 8.0
 DEADLINE: float | None = None  # time.monotonic() by which every gh / git call must end (the guard sets it)
+NOTES: list[str] = []  # why a lookup came back empty when that was not "no such thing" - the guard prints them
 TIERS = ("quick", "full", "none")
 LONG_LIVED = re.compile(r"(?:main|master|develop|dev|trunk|staging|qa|integration|(?:release|hotfix)[/-].+)", re.I)
 PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
@@ -102,7 +103,10 @@ def time_left(cap: float) -> float:
 def gh_json(args: list[str], cwd: str | None = None) -> Any:
     """gh's JSON output, or None when gh is off, missing, failing or slow."""
     left = time_left(GH_TIMEOUT)
-    if os.environ.get(NO_GH_ENV) == "1" or left <= 0:
+    if os.environ.get(NO_GH_ENV) == "1":
+        return None
+    if left <= 0:
+        NOTES.append(f"the gh time budget was spent before `gh {' '.join(args[:2])}` - that check was skipped")
         return None
     try:
         done = subprocess.run(
@@ -114,6 +118,9 @@ def gh_json(args: list[str], cwd: str | None = None) -> Any:
             errors="replace",
             timeout=left,
         )
+    except subprocess.TimeoutExpired:
+        NOTES.append(f"`gh {' '.join(args[:2])}` ran out of time ({left:.1f} s) - that check was skipped")
+        return None
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     if done.returncode != 0:
@@ -125,6 +132,13 @@ def gh_json(args: list[str], cwd: str | None = None) -> Any:
 
 
 GH: Callable[[list[str], str | None], Any] = gh_json  # tests replace this
+
+
+def drain_notes() -> list[str]:
+    """The notes gathered since the last call, each once."""
+    notes = list(dict.fromkeys(NOTES))
+    NOTES.clear()
+    return notes
 
 
 def view(number: str, repo: str | None = None, cwd: str | None = None) -> Pr | None:
@@ -169,8 +183,6 @@ def stale_branch(branch: str, repo: str | None, cwd: str | None, keep: frozenset
     if git(here, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") == f"origin/{branch}":
         return None
     tip = (git(here, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}") or "").lower()
-    if not SHA.fullmatch(tip):
-        return None
     fields = "number,state,baseRefName,headRefOid,isCrossRepository"
     args = ["pr", "list", "--head", branch, "--state", "all", "--limit", "30", "--json", fields]
     prs = GH([*args, "-R", repo] if repo else args, cwd)
@@ -178,6 +190,13 @@ def stale_branch(branch: str, repo: str | None, cwd: str | None, keep: frozenset
         return None
     rows = [p for p in prs if isinstance(p, dict) and not p.get("isCrossRepository")]
     if any(p.get("state") == "OPEN" for p in rows):
+        return None
+    if not SHA.fullmatch(tip):
+        if any(p.get("state") == "MERGED" for p in rows):
+            NOTES.append(
+                f"origin/{branch} is not in this clone, so whether `{branch}` already merged cannot be told - "
+                f"`git fetch origin {branch}`"
+            )
         return None
     merged = [p for p in rows if p.get("state") == "MERGED" and str(p.get("headRefOid") or "").lower() == tip]
     if not merged:

@@ -17,7 +17,7 @@ Config, read on every call (no restart): `$LOST_MARY_SHARED_CHECKOUTS`, else
 shared-checkouts.example.json in the library repository):
 
   {"shared": [dirs], "frozen": [dirs], "frozen_by": "path, optional",
-   "homes": {"dir": "branch", optional}, "max_worktrees": 3}
+   "homes": {"dir": "branch", optional}, "max_worktrees": 2}
 
   shared  - checkouts several sessions use at once. Blocked there: `switch`,
             a branch-changing `checkout` (file restores are fine), `stash`
@@ -41,11 +41,13 @@ shared-checkouts.example.json in the library repository):
             Running the deploy script is fine - only `git` invocations are
             inspected.
   frozen_by - the deploy script, named in the block message.
-  max_worktrees - optional, default 3: `git worktree add` is held in a
-            repository that already has that many linked worktrees in use -
-            git touched them within 7 days, detached ones included; frozen
-            ones and Claude's `.claude/worktrees/` ones do not count. One
-            task, one worktree: implementers share it.
+  max_worktrees - optional, default 2: `git worktree add` is held for a
+            session that already has that many worktrees of its own in the
+            repository - ones its transcript added that git still lists,
+            detached ones included; frozen ones and Claude's
+            `.claude/worktrees/` ones do not count. Per session, so one
+            session's worktrees never hold another's work. One task, one
+            worktree: implementers share it. No transcript_path: no cap.
             LOST_MARY_GUARD_WORKTREE_CAP=off lifts it.
 
 A target matches a configured dir when it is that dir or lies inside it by
@@ -136,23 +138,34 @@ A merge that names a literal PR asks gh for its head and base.
     hotfix-*, a `homes` branch, a branch that took commits after its merge.
   * A stamp in reviews.jsonl for the PR's current head and base stands in
     for a review in this session - whichever session reviewed it. Not for
-    `--auto` or `--admin`, which could merge later commits; a push or a
-    retarget after the stamp voids it. In auto mode (the payload's
-    permission_mode), for a merge alone in its call (a cd before it at most)
-    that ends the call, the hook then prints `permissionDecision: "allow"`
-    with `updatedInput` appending `--match-head-commit <stamped sha>`: the
-    decision takes precedence over the auto-mode classifier (docs,
-    hooks-guide) - the user's allow rule covers only a PR the session opened
-    - and GitHub refuses the merge if the head moved after this check.
+    `--auto` or `--admin` (`=true` too), which could merge later commits; a
+    push or a retarget after the stamp voids it - for other sessions: within
+    one session the review that covered the PR covers it again after a fix
+    is pushed, until a merge or stamp of another PR spends it.
+    In auto mode (the payload's permission_mode) a stamped merge alone in its
+    call (a cd before it at most) and ending it is answered with
+    `permissionDecision: "allow"` and `updatedInput` appending
+    `--match-head-commit <stamped sha>` - the rewritten call parsed again to
+    be sure the flag reaches gh. The decision takes precedence over the
+    auto-mode classifier (docs, hooks-guide) - the user's allow rule covers
+    only a PR the session opened - and GitHub refuses the merge if the head
+    moved after this check. Any other shape of a merge resting on a stamp
+    alone is held in auto mode: it would reach the classifier unpinned and be
+    refused, latching the session. Outside auto mode no allow is printed, and
+    such a merge must carry `--match-head-commit <stamped sha>` itself.
   * `pr-state.py reviewed <n>` is held unless it names one literal PR and a
-    `review` spawned in this session has FINISHED (a result that is neither
-    an error nor a background launch, or its completion notice) since the
-    session's last merge or stamp of another PR: a stamp spends the review as
-    a merge would - one review, one PR. No transcript: held.
+    `review` spawned in this session has FINISHED (its record's
+    `toolUseResult.status` is "completed", or its completion notice came)
+    since the session's last merge or stamp of another PR. A stamp spends
+    the review for every other PR number, wherever it ran; one that failed
+    (an error result) wrote nothing and spends nothing. No transcript: held.
   * A hand-made write to the stamp file (Edit/Write of that path, or a
     redirect / tee / Add-Content / copy onto it) is held - a speed bump.
 No gh answer, LOST_MARY_NO_GH=1 or LOST_MARY_GUARD_REVIEW_RECORD=off: no
-stamp is read and no base checked - the session's own review decides.
+stamp is read and no base checked - the session's own review decides; a
+lookup skipped for lack of time says so on stderr. On POSIX a cwd under a
+one-letter top-level directory (`/t/x`) reads as a drive, as in Git Bash:
+gh then runs where the hook runs and no merged base is judged.
 
 `python scripts/replay-merges.py` replays every merge call in the local
 transcripts through this check, each against its transcript cut at the call;
@@ -246,6 +259,18 @@ CREATE_STALE_BASE = (
 )
 GH_BUDGET = 4.0  # seconds for every gh call of one hook run: the hook's timeout is 10 s
 GH_DEADLINE: float | None = None  # set by main(); None (in-process callers, tests) = GH_TIMEOUT per call only
+STAMPED = "\x00stamp"  # the repository slot of a stamp event's key in reviewed_for: stamps spend by PR number
+STAMP_SHAPE = (
+    "guard-shared-checkouts: held - this merge rests on another session's review stamp ({reason}), and auto mode "
+    "lets it through only pinned to that head. Run the merge alone in its call - a `cd` before it at most, nothing "
+    "after it: no pipe, redirect, `&&` or comment - and the guard adds `--match-head-commit {sha}` and allows it. "
+    "Any other shape reaches the auto-mode classifier as an unreviewed merge of a PR this session did not open."
+)
+STAMP_PIN = (
+    "guard-shared-checkouts: held - this merge rests on another session's review stamp, and outside auto mode nothing "
+    "pins it to the reviewed head: add `--match-head-commit {sha}` to the `gh pr merge`, so a push after the review "
+    "makes GitHub refuse it instead of merging unreviewed commits."
+)
 STAMP_ONE = (
     "guard-shared-checkouts: held - record one review per call, by its literal PR number: "
     "`python ~/.claude/agent-library/scripts/pr-state.py reviewed <n>`. One review covers one PR."
@@ -260,14 +285,12 @@ RECORD_WRITE = (
     "after a review in this session. A hand-made line would let another session merge an unreviewed PR."
 )
 CAP_VAR = "LOST_MARY_GUARD_WORKTREE_CAP"  # "off": no limit on `git worktree add`
-MAX_WORKTREES = 3  # linked worktrees per repository, not counting detached, frozen or Claude-managed ones
-ACTIVE_DAYS = 7.0  # a worktree git has not touched for this long does not count against the cap
+MAX_WORKTREES = 2  # worktrees one session may hold per repository: its task's, and one for an unrelated fix
 WORKTREE_CAP = (
-    "guard-shared-checkouts: held `git worktree add` - {repo} already has {count} worktrees in use (max_worktrees "
-    "{cap}; used within 7 days):\n{listing}\nOne worktree per task, not per agent or per fix: reuse the one for "
-    "your task - implementers work inside it, on disjoint files. Never remove another session's worktree to make "
-    "room. Finish your own instead: once its PR merges, remove it; `python "
-    "~/.claude/agent-library/scripts/prune-worktrees.py {repo} --apply` removes every merged, clean, idle one."
+    "guard-shared-checkouts: held `git worktree add` - this session already has {count} worktrees of its own in "
+    "{repo} (max_worktrees {cap}):\n{listing}\nOne worktree per task, not per agent or per fix: do this work in the "
+    "one for your task - implementers share it, on disjoint files - or finish one: once its PR merges, `git -C "
+    "{repo} worktree remove <that path>`. Only this session's worktrees count; never touch another session's."
 )
 # What may share a call with a merge: moving into the checkout, trimming output, reading state, syncing
 # afterwards. Anything else - a push, a commit, `gh pr create`, a loop, an unknown program - holds it back.
@@ -1332,33 +1355,63 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None, home: st
         return False
 
 
-def active_worktree(path: str, days: float) -> bool:
-    """Whether git's own records for a linked worktree (HEAD, index, logs/HEAD in its gitdir) changed within
-    `days`: a worktree nobody has touched for a week is abandoned, not in use, and does not count."""
+WORKTREE_ADD_VALUE_FLAGS = ("-b", "-B", "--reason")
+
+
+def added_worktree(call: Call) -> PureWindowsPath | None:
+    """The path a `git worktree add` call creates, resolved against the directory it runs in, else None."""
+    if call.args[:2] != ("worktree", "add"):
+        return None
+    rest = list(call.args[2:])
+    i = 0
+    while i < len(rest):
+        if rest[i] in WORKTREE_ADD_VALUE_FLAGS:
+            i += 2
+        elif rest[i].startswith("-"):
+            i += 1
+        else:
+            return norm(rest[i], call.target)
+    return None
+
+
+def session_worktrees(transcript: str) -> set[tuple[str, ...]]:
+    """Every worktree path this session's transcript added with `git worktree add` (by key_of)."""
+    mine: set[tuple[str, ...]] = set()
     try:
-        text = (Path(path) / ".git").read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return False
-    gitdir = Path(text.removeprefix("gitdir:").strip())
-    newest = 0.0
-    for record in (gitdir / "HEAD", gitdir / "index", gitdir / "logs" / "HEAD"):
-        try:
-            newest = max(newest, record.stat().st_mtime)
-        except OSError:
-            continue
-    return time.time() - newest < days * 86400
+        with Path(transcript).open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if "worktree" not in line or '"tool_use"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = record.get("message") if isinstance(record, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict) or block.get("name") not in SHELL_TOOLS:
+                        continue
+                    text = str((block.get("input") or {}).get("command") or "")
+                    for tokens, here in located(text, str(record.get("cwd") or ""), block.get("name") == "PowerShell"):
+                        call = repo_call(tokens, here)
+                        if call is not None and (made := added_worktree(call)) is not None:
+                            mine.add(key_of(made))
+    except OSError as exc:
+        notice(f"cannot read the transcript {transcript} ({exc}) - no worktree cap")
+    return mine
 
 
-def worktrees_full(target: PureWindowsPath | None, config: Config) -> str | None:
-    """The block message for a `git worktree add` in a repository already holding `max_worktrees` worktrees in
-    use, else None. Counted: linked worktrees git touched within ACTIVE_DAYS, detached ones included; not frozen
-    ones (the deploy tree), nor Claude Code's own `.claude/worktrees/` ones (removed when they hold no work). Any
-    git failure counts as room."""
-    if target is None or os.environ.get(CAP_VAR, "").lower() == "off":
+def worktrees_full(target: PureWindowsPath | None, config: Config, transcript: str = "") -> str | None:
+    """The block message for a `git worktree add` by a session that already has `max_worktrees` worktrees of its
+    own in this repository - ones its transcript added that git still lists - else None. Per session, so one
+    session's worktrees never hold another's work. Frozen ones and Claude's `.claude/worktrees/` ones do not
+    count. No transcript, or any git failure: room."""
+    if target is None or not transcript or os.environ.get(CAP_VAR, "").lower() == "off":
         return None
     listing = git_out(target, time.monotonic() + HOME_BUDGET, "worktree", "list", "--porcelain")
     if listing is None:
         return None
+    mine = session_worktrees(transcript)
     entries = [block.splitlines() for block in listing.replace("\r\n", "\n").strip().split("\n\n") if block]
     counted: list[str] = []
     main = ""
@@ -1371,7 +1424,7 @@ def worktrees_full(target: PureWindowsPath | None, config: Config) -> str | None
         where = norm(path)
         if where is None or match(where, config.frozen) or ".claude" in key_of(where):
             continue
-        if active_worktree(path, ACTIVE_DAYS):
+        if key_of(where) in mine:
             counted.append(f"  {path}  [{branch or 'detached'}]")
     if len(counted) < config.max_worktrees:
         return None
@@ -1385,8 +1438,9 @@ def frozen_reason(what: str, where: Dir, config: Config) -> str:
     return f"guard-shared-checkouts: blocked {what} - {where.shown} is a frozen tree the live jobs run;{via}."
 
 
-def check_command(command: str, cwd: str, config: Config, powershell: bool = False) -> str | None:
-    """A block reason for a Bash/PowerShell command, or None to allow it.
+def check_command(command: str, cwd: str, config: Config, powershell: bool = False, transcript: str = "") -> str | None:
+    """A block reason for a Bash/PowerShell command, or None to allow it. `transcript` (the session's) is read
+    only for the worktree cap.
 
     An unclear() call is also read naively (naive_located), so a command the careful scan hid is still seen.
     """
@@ -1401,7 +1455,7 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         if where := match(call.target, config.frozen):
             reason = frozen_reason(f"`{call.label}` in {call.target}", where, config)
         elif call.args[:2] == ("worktree", "add"):
-            reason = worktrees_full(call.target, config)
+            reason = worktrees_full(call.target, config, transcript)
         elif (
             (where := match(call.target, config.shared))
             and call.changes_shared
@@ -1576,9 +1630,11 @@ def reviewed_for(
     call's tool_use_id; the transcript may already hold the call - without an id, the last merge call with this
     `command` and no result yet is taken to be it. A `gh repo set-default` changes what a bare number names, so a
     number before it and the same number after it are two PRs. `merges` are this call's, with their directories.
-    A `pr-state.py reviewed <n>` stamp spends the review as a merge of <n> does: one review, one PR. With
-    `finished`, a review counts only once it is done - a result that is not an error and not a background launch,
-    or a later `<task-notification>` naming its tool-use id with `<status>completed</status>`.
+    A `pr-state.py reviewed <n>` stamp spends the review for any PR but number <n> - by number, wherever it ran
+    and however the PR is named - unless it failed (an error result: pr-state wrote nothing): one review, one PR.
+    With `finished`, a review counts only once it is done - its record's `toolUseResult.status` is "completed"
+    (a background launch says "async_launched"), or a later `<task-notification>` names its tool-use id with
+    `<status>completed</status>`.
     None if the transcript cannot be read.
     """
     epoch = 0
@@ -1590,6 +1646,7 @@ def reviewed_for(
     never_ran: set[str] = set()
     answered: set[str] = set()  # merge calls with a result
     merge_ids: set[str] = set()
+    stamp_ids: set[str] = set()  # calls holding only stamps: any error result means the stamp was not written
     review_ids: set[str] = set()
     done: set[str] = set()  # reviews that finished
     try:
@@ -1622,15 +1679,17 @@ def reviewed_for(
                         continue
                     if block.get("type") == "tool_result":
                         uid = str(block.get("tool_use_id"))
-                        if uid in review_ids and block.get("is_error") is not True:
-                            raw = block.get("content")
-                            if isinstance(raw, list):
-                                raw = " ".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
-                            if not str(raw or "").lstrip().startswith("Async agent launched"):
-                                done.add(uid)
+                        result = record.get("toolUseResult")
+                        if (
+                            uid in review_ids
+                            and block.get("is_error") is not True
+                            and isinstance(result, dict)
+                            and result.get("status") == "completed"
+                        ):
+                            done.add(uid)
                         if uid in merge_ids:
                             answered.add(uid)
-                            if did_not_run(block):
+                            if did_not_run(block) or (uid in stamp_ids and block.get("is_error") is True):
                                 never_ran.add(uid)
                         continue
                     if block.get("type") != "tool_use" or (current and block.get("id") == current):
@@ -1646,10 +1705,14 @@ def reviewed_for(
                         text = str(tool_input.get("command") or "")
                         powershell = block.get("name") == "PowerShell"
                         found = merges_in(text, str(record.get("cwd") or ""), powershell)
-                        found += [(m, w) for m, w, _ in stamp_calls(text, str(record.get("cwd") or ""), powershell)]
-                        if found:
-                            events.append((uid, {pr_key(tokens, scoped(where)) for tokens, where in found}, text))
+                        stamps = stamp_calls(text, str(record.get("cwd") or ""), powershell)
+                        if found or stamps:
+                            spent = {pr_key(tokens, scoped(where)) for tokens, where in found}
+                            spent |= {(STAMPED, number.lstrip("#")) for _, _, number in stamps}
+                            events.append((uid, spent, text))
                             merge_ids.add(uid)
+                            if not found:
+                                stamp_ids.add(uid)
                         if any(
                             (gh_args(t) or [])[:2] == ["repo", "set-default"] and not {"-v", "--view"} & set(t)
                             for t in segments(text, powershell)
@@ -1663,12 +1726,13 @@ def reviewed_for(
         mine = [e for e in events if e[1] is not None and e[2] == command and e[0] not in answered]
         if mine:
             events.remove(mine[-1])
+    numbers = {number for _, number in keys}
     reviewed = False
     for uid, merged, _ in events:
         if merged is None:
             reviewed = reviewed or not finished or uid in done
-        elif uid not in never_ran and merged - keys:
-            reviewed = False  # another PR's merge may have run: this one needs a review of its own
+        elif uid not in never_ran and {k for k in merged if not (k[0] == STAMPED and k[1] in numbers)} - keys:
+            reviewed = False  # another PR's merge or stamp may have run: this one needs a review of its own
     return reviewed
 
 
@@ -1738,8 +1802,11 @@ def pr_target(tokens: list[str], where: str, native: str | None) -> tuple[str, s
 
 
 def native_dir(path: PureWindowsPath | None) -> str | None:
-    """A directory a subprocess can run in: `C:/x` on Windows, `/tmp/x` on POSIX (norm() keeps POSIX roots)."""
-    return path.as_posix() if path is not None else None
+    """A directory a subprocess can run in: `C:/x` on Windows, `/tmp/x` on POSIX (norm() keeps POSIX roots). None
+    on POSIX for a path norm() read as a Windows drive (`/t/x`, Git Bash's spelling of T:) - it names nothing."""
+    if path is None or (os.name != "nt" and path.drive):
+        return None
+    return path.as_posix()
 
 
 def homes_branches() -> frozenset[str]:
@@ -1757,26 +1824,48 @@ def merge_verdict(
     command: str, transcript: str, current: str = "", cwd: str = "", powershell: bool = False, mode: str = ""
 ) -> tuple[str | None, Allow | None]:
     """(block message, allow) for a call. A merge auto mode would refuse - unclear, chained, through the API, into
-    a merged base, or unreviewed - is held. A merge passing on another session's review stamp is answered with an
-    allow only in auto mode (`mode`, the payload's permission_mode), only when it stands alone (a `cd` before it
-    at most) and ends the call, and pinned to the stamped head: `--match-head-commit <sha>` is appended, so a
-    push between this check and the merge makes GitHub refuse it. Anywhere else the stamp only lifts the hold."""
+    a merged base, or unreviewed - is held. A merge whose PR carries a review stamp for its current head:
+      * in auto mode (`mode`, the payload's permission_mode) it is answered with an allow pinned to the stamped
+        head - `--match-head-commit <sha>` appended, so a push between this check and the merge makes GitHub
+        refuse it - when it stands alone (a `cd` before it at most) and ends the call. Any other shape would
+        reach the classifier as an unreviewed merge of a PR this session did not open, be refused, and latch
+        the session: held, with the shape to use - unless this session reviewed the PR itself, as before.
+      * in any other mode no allow is printed (a prompt, or none at all), so the call must carry the pin itself.
+    """
     stamped: list[tuple[str, str]] = []
     held = check_merge(command, transcript, current, cwd, powershell, stamped)
-    if held or not stamped or mode != "auto":
+    if held or not stamped:
         return held, None
     reason, sha = stamped[0]
+    allow = pinned_allow(command, powershell, sha, reason)
+    if mode == "auto" and allow is not None:
+        return None, allow
+    own = bool(transcript) and reviewed_for(Path(transcript), current, merges_in(command, cwd, powershell), command)
+    if own is True:
+        return None, None
+    if mode == "auto":
+        return STAMP_SHAPE.format(reason=reason.split(" - ", 1)[-1], sha=sha), None
+    merge = next(t for t in segments(command, powershell) if is_merge(t))
+    pinned = option_value(gh_args(merge) or [], "--match-head-commit")
+    return (None, None) if pinned is not None and pinned.lower() == sha else (STAMP_PIN.format(sha=sha), None)
+
+
+def pinned_allow(command: str, powershell: bool, sha: str, reason: str) -> Allow | None:
+    """The allow for a merge that stands alone and ends the call, as it will run: pinned to `sha`. None for any
+    other shape, for a call pinned to another head, and when appending the flag would not reach gh (a comment or
+    quote at the end) - the rewritten call is parsed again to make sure."""
     parts = segments(command, powershell)
     merge = next(t for t in parts if is_merge(t))
     if any(t is not merge and t[0].lower() not in CD_COMMANDS for t in parts) or parts[-1] is not merge:
-        return None, None
+        return None
     pinned = option_value(gh_args(merge) or [], "--match-head-commit")
     if pinned is not None:
-        return None, (Allow(reason, command) if pinned.lower() == sha else None)
-    body = command.rstrip()
-    if not body.endswith(merge[-1]):  # a quoted or commented tail: appending a flag would not reach gh
-        return None, None
-    return None, Allow(reason, f"{body} --match-head-commit {sha}")
+        return Allow(reason, command) if pinned.lower() == sha else None
+    rewritten = f"{command.rstrip()} --match-head-commit {sha}"
+    again = [t for t in segments(rewritten, powershell) if is_merge(t)]
+    if len(again) != 1 or option_value(gh_args(again[0]) or [], "--match-head-commit") != sha:
+        return None
+    return Allow(reason, rewritten)
 
 
 def check_merge(
@@ -1814,13 +1903,18 @@ def check_merge(
     module = pr_state() if target else None
     if module is not None and target is not None:
         pr = module.view(*target)
+        for note in module.drain_notes():
+            notice(note)
         if pr is None:
             notice(f"gh cannot read PR {target[0]} - no review stamp or merged-base check for this merge")
         elif pr.state == "OPEN":
-            if why := module.stale_base(pr, target[2], homes_branches()):
+            why = module.stale_base(pr, target[2], homes_branches())
+            for note in module.drain_notes():
+                notice(note)
+            if why:
                 return MERGE_STALE_BASE.format(number=pr.number, why=why)
             ok, status = module.review_status(pr)
-            if ok and {"--auto", "--admin"} & set(gh_args(only) or []):
+            if ok and {"--auto", "--admin"} & {a.split("=", 1)[0] for a in gh_args(only) or []}:
                 ok, status = False, f"{status} - not for `--auto` / `--admin`, which could merge later commits"
             if ok:
                 if stamped is not None:
@@ -1860,6 +1954,8 @@ def check_pr_create(command: str, cwd: str, powershell: bool = False) -> str | N
             continue
         repo = option_value(args[2:], "--repo", "-R")
         why = module.stale_branch(base, repo, native_dir(current), homes_branches())
+        for note in module.drain_notes():
+            notice(note)
         if why:
             return CREATE_STALE_BASE.format(base=base, why=why, into=module.retarget(why))
     return None
@@ -1997,7 +2093,8 @@ def main() -> int:
     cwd = str(event.get("cwd") or "")
     reason: str | None = None
     if tool in SHELL_TOOLS:
-        reason = check_command(str(tool_input.get("command") or ""), cwd, config, tool == "PowerShell")
+        command = str(tool_input.get("command") or "")
+        reason = check_command(command, cwd, config, tool == "PowerShell", str(event.get("transcript_path") or ""))
     elif tool in EDIT_TOOLS:
         reason = check_edit(str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""), cwd, config)
     if reason:

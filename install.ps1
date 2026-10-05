@@ -205,6 +205,9 @@ function Test-Settings {
             if ($f.Command -like '*ABSOLUTE/PATH/TO*') {
                 Write-Host "DRIFT: $eventName $scriptName still has the placeholder interpreter path [$Settings]"
                 $script:DriftCount++
+            } elseif ($scriptName -eq 'prune-worktrees.py' -and $f.Command -notlike '*--hook*') {
+                Write-Host "DRIFT: $eventName runs $scriptName without --hook - the starting session's own worktree is not protected [$Settings]"
+                $script:DriftCount++
             } else {
                 Write-Host "OK: $eventName runs $scriptName (matcher '$($f.Matcher)') [$Settings]"
             }

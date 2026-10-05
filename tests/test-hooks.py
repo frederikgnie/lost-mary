@@ -296,12 +296,14 @@ else:
     rc, out = cli("--changed", cwd=SCRATCH)
     expect_true("--changed outside a repo but inside the outer one still resolves a toplevel", rc in (0, 1), out)
 
-    # Venv discovery.
+    # Venv discovery. Outside the repository: under it, the climb would reach the developer's own .venv at the
+    # repository root (or, in a linked worktree, the main checkout's) - the CI checkout has none.
+    VENV_TMP = Path(tempfile.mkdtemp(prefix="pycheck-venvs-")).resolve()
     pycheck = load_module(PYCHECK, "_pycheck")
     saved = os.environ.pop("VIRTUAL_ENV", None)
     try:
-        t1_env = make_venv(SCRATCH / "t1" / "ws" / "env" / ".venv")
-        t1_src = make_pkg(SCRATCH / "t1" / "ws" / "pkg")
+        t1_env = make_venv(VENV_TMP / "t1" / "ws" / "env" / ".venv")
+        t1_src = make_pkg(VENV_TMP / "t1" / "ws" / "pkg")
         found, how = pycheck.find_venv(t1_src)
         expect_true("sibling venv without ownership evidence is NOT adopted", found is None, f"{found} ({how})")
         sp = t1_env / "Lib" / "site-packages"
@@ -312,18 +314,18 @@ else:
             "sibling venv that owns the project (editable .pth) IS adopted", found == t1_env, f"{found} ({how})"
         )
 
-        make_venv(SCRATCH / "t2" / ".venv")
-        t2_src = make_pkg(SCRATCH / "t2" / "ws" / "pkg")
+        make_venv(VENV_TMP / "t2" / ".venv")
+        t2_src = make_pkg(VENV_TMP / "t2" / "ws" / "pkg")
         found, how = pycheck.find_venv(t2_src)
         expect_true("does not climb above the workspace root", found is None, f"{found} ({how})")
-        os.environ["VIRTUAL_ENV"] = str(SCRATCH / "t2" / ".venv")
+        os.environ["VIRTUAL_ENV"] = str(VENV_TMP / "t2" / ".venv")
         found, how = pycheck.find_venv(t2_src)
         expect_true(
             "ambient VIRTUAL_ENV is the fallback",
-            found == SCRATCH / "t2" / ".venv" and "ambient" in how,
+            found == VENV_TMP / "t2" / ".venv" and "ambient" in how,
             f"{found} ({how})",
         )
-        local_env = make_venv(SCRATCH / "t2" / "ws" / "pkg" / ".venv")
+        local_env = make_venv(VENV_TMP / "t2" / "ws" / "pkg" / ".venv")
         found, how = pycheck.find_venv(t2_src)
         expect_true("the file's own .venv beats VIRTUAL_ENV", found == local_env, f"{found} ({how})")
         os.environ.pop("VIRTUAL_ENV", None)
@@ -349,6 +351,7 @@ else:
         os.environ.pop("VIRTUAL_ENV", None)
         if saved is not None:
             os.environ["VIRTUAL_ENV"] = saved
+        nuke(VENV_TMP)
 
 # --------------------------------------------------------------------- check-evidence
 print()
@@ -5693,9 +5696,11 @@ git(PS_GIT, "init", "-q", "-b", "main")
 git(PS_GIT, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "root")
 git(PS_GIT, "remote", "add", "origin", "https://github.com/o/r.git")
 OLD_TIP = subprocess.run(["git", "-C", str(PS_GIT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-for ref in ("main", "feat/old", "feat/busy"):
+for ref in ("main", "feat/old"):
     git(PS_GIT, "update-ref", f"refs/remotes/origin/{ref}", OLD_TIP)
 git(PS_GIT, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+PS_OTHER_DIR = PS / "elsewhere"  # the lead's own checkout, say: not where the stamp ran
+PS_OTHER_DIR.mkdir()
 
 
 def ps_gh(head: str = SHA_A, base: str = "main", base_prs: list[dict[str, object]] | None = None) -> None:
@@ -5729,8 +5734,9 @@ def ps_hook(
     env: dict[str, str] | None = None,
     mode: str = "auto",
     cwd: Path = PS_GIT,
+    tool: str = "Bash",
 ) -> tuple[int, str, str]:
-    event = merge_event(command, transcript, cwd=str(cwd)) | {"permission_mode": mode}
+    event = merge_event(command, transcript, tool=tool, cwd=str(cwd)) | {"permission_mode": mode}
     done = subprocess.run(
         [sys.executable, str(GUARD)], input=json.dumps(event).encode("utf-8"), capture_output=True, env=env or PS_ENV
     )
@@ -5744,7 +5750,26 @@ def ps_decision(out: str) -> dict[str, object]:
         return {}
 
 
+def ps_review_result(text: str, status: str = "completed", error: bool = False) -> dict[str, object]:
+    """A review's result as Claude Code records it: content as a list of text blocks, and toolUseResult.status."""
+    block = {"type": "tool_result", "tool_use_id": "t-review", "content": [{"type": "text", "text": text}]}
+    if error:
+        block["is_error"] = True
+    record: dict[str, object] = {
+        "type": "user",
+        "uuid": uuid.uuid4().hex,
+        "message": {"role": "user", "content": [block]},
+    }
+    record["toolUseResult"] = {"status": status, "agentId": "r1"}
+    return record
+
+
+REVIEW_DONE = ps_review_result("POSTURE: clean. No findings.")
+LAUNCHED = ps_review_result("Async agent launched successfully.\nagentId: a1 (internal ID)", status="async_launched")
+t_done_review = kg_transcript("stamp-reviewed.jsonl", [kg_prompt("ship"), kg_review(), REVIEW_DONE])
+
 MERGE41 = "gh pr merge 41 --squash"
+PINNED = f"{MERGE41} --match-head-commit {SHA_A}"
 ps_gh()
 rc, out, err = ps_hook(MERGE41, t_none)
 expect("stamp: no review here and none recorded -> exit 2", rc, BLOCK, err)
@@ -5757,8 +5782,14 @@ expect_true(
     "... with an allow for auto mode, naming the stamp, pinned to the stamped head",
     decision.get("permissionDecision") == "allow"
     and "o/r#41 reviewed at aaaaaaaaa" in str(decision.get("permissionDecisionReason"))
-    and decision.get("updatedInput") == {"command": f"{MERGE41} --match-head-commit {SHA_A}"},
+    and decision.get("updatedInput") == {"command": PINNED},
     out,
+)
+rc, out, err = ps_hook(MERGE41, t_none, tool="PowerShell")
+expect_true(
+    "stamp: the same from PowerShell -> the allow, pinned",
+    rc == ALLOW and ps_decision(out).get("updatedInput") == {"command": PINNED},
+    out + err,
 )
 rc, out, err = ps_hook(f"cd {PS_GIT.as_posix()} && {MERGE41}", t_none)
 expect_true(
@@ -5766,23 +5797,43 @@ expect_true(
     rc == ALLOW and str(ps_decision(out).get("updatedInput", {})).endswith(f"--match-head-commit {SHA_A}'}}"),
     out + err,
 )
-rc, out, err = ps_hook(f"{MERGE41} --match-head-commit {SHA_A}", t_none)
+rc, out, err = ps_hook(PINNED, t_none)
 expect_true(
     "stamp: already pinned to the stamped head -> the allow, the call unchanged",
-    rc == ALLOW and ps_decision(out).get("updatedInput") == {"command": f"{MERGE41} --match-head-commit {SHA_A}"},
+    rc == ALLOW and ps_decision(out).get("updatedInput") == {"command": PINNED},
     out + err,
 )
-rc, out, err = ps_hook(f"{MERGE41} --match-head-commit {SHA_B}", t_none)
-expect_true("stamp: pinned to another head -> exit 0, no allow", rc == ALLOW and not out, out + err)
+# In auto mode a stamped merge the guard cannot pin would reach the classifier as an unreviewed merge of a PR
+# this session did not open - refused, and the session latched. Held instead, with the shape that passes.
+for cmd in (
+    f"{MERGE41} --match-head-commit {SHA_B}",
+    f"{MERGE41} 2>&1 | tail -3",
+    f"{MERGE41} && git pull",
+    f"{MERGE41}  # 41",
+):
+    rc, out, err = ps_hook(cmd, t_none)
+    expect_true(
+        f"stamp: auto mode, no pin possible - {cmd[len(MERGE41) :]!r} -> exit 2, the shape named",
+        rc == BLOCK and not out and "alone in its call" in err and f"--match-head-commit {SHA_A}" in err,
+        out + err,
+    )
+rc, out, err = ps_hook(f"{MERGE41} 2>&1 | tail -3", t_rev)
+expect_true("stamp: ... unless this session reviewed it itself -> exit 0, no allow", rc == ALLOW and not out, out + err)
 rc, out, err = ps_hook(MERGE41, t_none, mode="default")
-expect_true("stamp: not in auto mode -> exit 0, no allow (the user's prompt stays)", rc == ALLOW and not out, out + err)
-rc, out, err = ps_hook(f"{MERGE41} 2>&1 | tail -3", t_none)
-expect_true("stamp: output trimmed after the merge -> exit 0, no allow", rc == ALLOW and not out, out + err)
-rc, out, err = ps_hook(f"{MERGE41} && git pull", t_none)
-expect_true("stamp: a git pull beside it -> exit 0, no allow", rc == ALLOW and not out, out + err)
-rc, out, err = ps_hook(MERGE41.replace("--squash", "--squash --auto"), t_none)
-expect("stamp: `--auto` could merge later commits -> the stamp does not count, exit 2", rc, BLOCK, err)
-expect_true("... saying why", "`--auto` / `--admin`" in err and not out, err)
+expect_true(
+    "stamp: not in auto mode, not pinned -> exit 2, told to pin it",
+    rc == BLOCK and not out and f"add `--match-head-commit {SHA_A}`" in err,
+    out + err,
+)
+rc, out, err = ps_hook(PINNED, t_none, mode="bypassPermissions")
+expect_true("stamp: not in auto mode, pinned -> exit 0, no allow printed", rc == ALLOW and not out, out + err)
+for flag in ("--auto", "--auto=true", "--admin"):
+    rc, out, err = ps_hook(f"{MERGE41} {flag}", t_none)
+    expect_true(
+        f"stamp: `{flag}` could merge later commits -> the stamp does not count, exit 2",
+        rc == BLOCK and "`--auto` / `--admin`" in err and not out,
+        out + err,
+    )
 rc, out, err = ps_hook(MERGE41, t_rev)
 expect_true("stamp: reviewed here as well -> exit 0 with the allow", rc == ALLOW and '"allow"' in out, err + out)
 PS_SHARED = PS / "shared-config.json"
@@ -5819,8 +5870,8 @@ rc, out, err = ps_hook(
 )
 took = time.monotonic() - started
 expect_true(
-    f"stamp: a hanging gh -> held well inside the hook's 10 s ({took:.1f} s)",
-    rc == BLOCK and took < 8,
+    f"stamp: a hanging gh -> held well inside the hook's 10 s ({took:.1f} s), saying time ran out",
+    rc == BLOCK and took < 8 and "ran out of time" in err,
     err,
 )
 PS_RECORDS.write_text("not json\n" + json.dumps({"repo": "o/r", "pr": "41"}) + "\n", encoding="utf-8")
@@ -5841,6 +5892,10 @@ expect_true(
 )
 rc, out, err = ps_hook(MERGE41, t_rev, cwd=NP)
 expect("merged base: no clone to read the branch tip from -> not judged, exit 0", rc, ALLOW, err)
+ps_gh(base="feat/gone", base_prs=[OLD[0]])
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect("merged base: origin/<b> never fetched here -> not judged, exit 0 ...", rc, ALLOW, err)
+expect_true("... with a notice to fetch it", "`git fetch origin feat/gone`" in err, err)
 ps_gh(base="feat/old", base_prs=[*OLD, {"number": 9, "state": "OPEN", "baseRefName": "main", "headRefOid": SHA_B}])
 rc, out, err = ps_hook(MERGE41, t_rev)
 expect("merged base: the base has an open PR again (an integration branch) -> exit 0", rc, ALLOW, err)
@@ -5880,12 +5935,11 @@ rc, out, err = ps_hook("gh pr create --base main --fill", t_rev)
 expect("merged base: `gh pr create --base main` -> exit 0", rc, ALLOW, err)
 rc, out, err = ps_hook("gh pr create --fill", t_rev)
 expect("merged base: `gh pr create` with no base -> exit 0", rc, ALLOW, err)
+ps_gh()
 
 # The stamp is written only after a FINISHED review, one PR per review: the guard gates the command with the
-# merge's own evidence, and a stamp spends the review as a merge of that PR would.
+# merge's own evidence, and a stamp spends the review for every other PR number.
 STAMP = "python ~/.claude/agent-library/scripts/pr-state.py reviewed 41 --tests full"
-REVIEW_DONE = kg_result("t-review", "POSTURE: clean. No findings.", False)
-t_done_review = kg_transcript("stamp-reviewed.jsonl", [kg_prompt("ship"), kg_review(), REVIEW_DONE])
 rc, out, err = ps_hook(STAMP, t_none)
 expect("stamp command: no review in this session -> exit 2", rc, BLOCK, err)
 expect_true("... told to spawn review first", "no `review` agent has finished" in err, err)
@@ -5893,7 +5947,6 @@ rc, out, err = ps_hook(STAMP, t_done_review)
 expect("stamp command: a finished review in this session -> exit 0", rc, ALLOW, err)
 rc, out, err = ps_hook(STAMP, t_rev)
 expect("stamp command: a review spawned, its result not in yet -> exit 2", rc, BLOCK, err)
-LAUNCHED = kg_result("t-review", "Async agent launched successfully.\nagentId: a1 (internal ID)", False)
 t_bg = kg_transcript("stamp-bg.jsonl", [kg_prompt("ship"), kg_review(), LAUNCHED])
 rc, out, err = ps_hook(STAMP, t_bg)
 expect("stamp command: a background review only launched -> exit 2", rc, BLOCK, err)
@@ -5906,21 +5959,53 @@ NOTICE = {
 t_bg_done = kg_transcript("stamp-bg-done.jsonl", [kg_prompt("ship"), kg_review(), LAUNCHED, NOTICE])
 rc, out, err = ps_hook(STAMP, t_bg_done)
 expect("stamp command: a background review whose completion notice arrived -> exit 0", rc, ALLOW, err)
-FAILED_REVIEW = kg_result("t-review", "Agent failed", True)
-t_bad = kg_transcript("stamp-bad.jsonl", [kg_prompt("ship"), kg_review(), FAILED_REVIEW])
+FAILED_NOTICE = NOTICE | {"content": str(NOTICE["content"]).replace("completed", "failed")}
+t_bg_failed = kg_transcript("stamp-bg-failed.jsonl", [kg_prompt("ship"), kg_review(), LAUNCHED, FAILED_NOTICE])
+rc, out, err = ps_hook(STAMP, t_bg_failed)
+expect("stamp command: a background review that failed -> exit 2", rc, BLOCK, err)
+t_bad = kg_transcript("stamp-bad.jsonl", [kg_prompt("ship"), kg_review(), ps_review_result("Agent failed", error=True)])
 rc, out, err = ps_hook(STAMP, t_bad)
 expect("stamp command: the review spawn failed -> exit 2", rc, BLOCK, err)
-stamp40 = kg_bash("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", "t-s40")
+
+
+def ps_stamp_call(number: str, uid: str, cwd: Path) -> dict[str, object]:
+    record = kg_bash(f"python ~/.claude/agent-library/scripts/pr-state.py reviewed {number}", uid)
+    return record | {"cwd": str(cwd)}
+
+
 t_two = kg_transcript(
-    "stamp-two.jsonl", [kg_prompt("ship"), kg_review(), REVIEW_DONE, stamp40, kg_result("t-s40", "recorded", False)]
+    "stamp-two.jsonl",
+    [
+        kg_prompt("ship"),
+        kg_review(),
+        REVIEW_DONE,
+        ps_stamp_call("40", "t-s40", PS_GIT),
+        kg_result("t-s40", "ok", False),
+    ],
 )
 rc, out, err = ps_hook(STAMP, t_two)
 expect("stamp command: the review already stamped PR 40 -> a second PR's stamp is held", rc, BLOCK, err)
 rc, out, err = ps_hook("gh pr merge 42 --squash", t_two, PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"})
 expect("stamp command: ... and so is a merge of a third PR in that session", rc, BLOCK, err)
-rc, out, err = ps_hook("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", t_two, cwd=NP)
-expect("stamp command: stamping the same PR again keeps the review -> exit 0", rc, ALLOW, err)
-held40 = kg_bash("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", "t-h40")
+rc, out, err = ps_hook("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", t_two, cwd=PS_OTHER_DIR)
+expect("stamp command: the same PR again, from another directory -> the review is kept, exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook(
+    "gh pr merge 40 --squash -R o/r", t_two, PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"}, cwd=PS_OTHER_DIR
+)
+expect("stamp command: then merging that PR from elsewhere, named with -R -> exit 0", rc, ALLOW, err)
+t_failed = kg_transcript(
+    "stamp-failed.jsonl",
+    [
+        kg_prompt("ship"),
+        kg_review(),
+        REVIEW_DONE,
+        ps_stamp_call("40", "t-f40", PS_OTHER_DIR),
+        kg_result("t-f40", "Exit code 2\npr-state: the local HEAD 1234567 is not the PR's head", True),
+    ],
+)
+rc, out, err = ps_hook(STAMP, t_failed)
+expect("stamp command: an earlier stamp that failed wrote nothing -> the review is not spent, exit 0", rc, ALLOW, err)
+held40 = ps_stamp_call("40", "t-h40", PS_GIT)
 t_held = kg_transcript(
     "stamp-held.jsonl",
     [kg_prompt("ship"), kg_review(), REVIEW_DONE, held40, kg_result("t-h40", "PreToolUse:Bash hook error: held", True)],
@@ -6012,56 +6097,81 @@ expect_true("pr-state show: lists the stamp", rc == 0 and "o/r#41" in out and "t
 rc, out = ps_cli("reviewed", "99")
 expect("pr-state: gh knows no such PR -> exit 1", rc, 1, out)
 
-# The worktree cap: one worktree per task. Frozen, Claude-managed and week-old ones do not count; detached ones do.
+# The worktree cap: per session - the worktrees this session's transcript added that git still lists. Another
+# session's never count, nor frozen or Claude-managed ones, nor one since removed.
 WT = PS / "wt-repo"
 WT.mkdir()
 git(WT, "init", "-q", "-b", "main")
 (WT / "a.txt").write_text("a\n", encoding="utf-8")
 git(WT, "add", "a.txt")
 git(WT, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a")
-for name in ("one", "two"):
-    git(WT, "worktree", "add", "-q", str(PS / f"wt-repo_{name}"), "-b", name)
+WT_ONE, WT_TWO, WT_GONE, WT_REVIEW = (PS / f"wt-repo_{n}" for n in ("one", "two", "gone", "review"))
+WT_CLAUDE = WT / ".claude" / "worktrees" / "agent-x"
+for path, branch in ((WT_ONE, "one"), (WT_TWO, "two"), (WT_GONE, "gone"), (WT_CLAUDE, "worktree-agent-x")):
+    git(WT, "worktree", "add", "-q", str(path), "-b", branch)
+git(WT, "worktree", "add", "-q", "--detach", str(WT_REVIEW))
 git(WT, "worktree", "add", "-q", "--detach", str(PS / "wt-deploy" / "repo"))
-git(WT, "worktree", "add", "-q", str(WT / ".claude" / "worktrees" / "agent-x"), "-b", "worktree-agent-x")
-git(WT, "worktree", "add", "-q", str(PS / "wt-repo_old"), "-b", "old")
-week_ago = time.time() - 8 * 86400
-for record in (WT / ".git" / "worktrees" / "wt-repo_old").rglob("*"):
-    os.utime(record, (week_ago, week_ago))
-os.utime(WT / ".git" / "worktrees" / "wt-repo_old", (week_ago, week_ago))
-WT_CFG = guard.parse_config({"shared": [str(WT)], "frozen": [str(PS / "wt-deploy")], "max_worktrees": 3})
+git(WT, "worktree", "remove", str(WT_GONE))
+ADDS = {
+    "one": kg_bash(f"git -C {WT.as_posix()} worktree add -q {WT_ONE.as_posix()} -b one", "w1"),
+    "two": kg_bash(f"cd {WT.as_posix()} && git worktree add ../wt-repo_two -b two", "w2"),
+    "gone": kg_bash(f"git -C {WT.as_posix()} worktree add {WT_GONE.as_posix()} -b gone", "w3"),
+    "review": kg_bash(f"git -C {WT.as_posix()} worktree add --detach {WT_REVIEW.as_posix()}", "w4"),
+    "claude": kg_bash(f"git -C {WT.as_posix()} worktree add {WT_CLAUDE.as_posix()} -b worktree-agent-x", "w5"),
+    "deploy": kg_bash(f"git -C {WT.as_posix()} worktree add --detach {(PS / 'wt-deploy' / 'repo').as_posix()}", "w6"),
+}
+
+
+def wt_session(*names: str) -> str:
+    return str(kg_transcript(f"wt-{'-'.join(names) or 'none'}.jsonl", [kg_prompt("work"), *(ADDS[n] for n in names)]))
+
+
+WT_CFG = guard.parse_config({"shared": [str(WT)], "frozen": [str(PS / "wt-deploy")], "max_worktrees": 2})
 ADD = f"git -C {WT.as_posix()} worktree add {(PS / 'wt-repo_three').as_posix()} -b three"
 os.environ.pop("LOST_MARY_GUARD_WORKTREE_CAP")
-reason = guard.check_command(ADD, str(NP), WT_CFG)
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one", "two"))
 expect_true(
-    "worktree cap: two in use, plus frozen, Claude-managed and week-old ones, cap 3 -> allowed",
-    reason is None,
-    str(reason),
-)
-git(WT, "worktree", "add", "-q", "--detach", str(PS / "wt-repo_review"))
-reason = guard.check_command(ADD, str(NP), WT_CFG)
-expect_true(
-    "worktree cap: a third, detached -> held, listing those in use",
+    "worktree cap: this session added two that git still lists, cap 2 -> held, listing only its own",
     reason is not None
-    and "already has 3 worktrees in use" in reason
-    and "wt-repo_review" in reason
-    and "wt-deploy" not in reason
-    and "wt-repo_old" not in reason
-    and "worktree remove <path>" not in reason
-    and "Never remove another session's worktree" in reason,
+    and "this session already has 2 worktrees of its own" in reason
+    and "wt-repo_one" in reason
+    and "wt-repo_two" in reason
+    and "wt-repo_review" not in reason
+    and "never touch another session's" in reason,
     str(reason),
 )
-reason = guard.check_command(f"cd {WT.as_posix()} && git worktree add ../x -b four", str(NP), WT_CFG)
-expect_true("worktree cap: the same after a cd -> held", reason is not None, str(reason))
-reason = guard.check_command(ADD, str(NP), guard.parse_config({"shared": [str(WT)], "max_worktrees": 5}))
-expect_true("worktree cap: max_worktrees 5 -> allowed", reason is None, str(reason))
-expect_true(
-    "worktree cap: a bad max_worktrees falls back to 3",
-    guard.parse_config({"shared": [], "max_worktrees": "many"}).max_worktrees == 3,
+reason = guard.check_command(
+    f"cd {WT.as_posix()} && git worktree add ../x -b four", str(NP), WT_CFG, False, wt_session("one", "two")
 )
-reason = guard.check_command(f"git -C {WT.as_posix()} worktree list", str(NP), WT_CFG)
-expect_true("worktree cap: `worktree list` is never held", reason is None, str(reason))
-os.environ["LOST_MARY_GUARD_WORKTREE_CAP"] = "off"
+expect_true("worktree cap: the same after a cd -> held", reason is not None, str(reason))
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one"))
+expect_true("worktree cap: one of its own, other sessions' worktrees beside it -> allowed", reason is None, str(reason))
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one", "gone"))
+expect_true("worktree cap: one since removed does not count -> allowed", reason is None, str(reason))
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one", "review"))
+expect_true("worktree cap: a detached one of its own counts -> held", reason is not None, str(reason))
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one", "claude", "deploy"))
+expect_true("worktree cap: Claude-managed and frozen ones do not count -> allowed", reason is None, str(reason))
+reason = guard.check_command(
+    ADD, str(NP), guard.parse_config({"shared": [str(WT)], "max_worktrees": 5}), False, wt_session("one", "two")
+)
+expect_true("worktree cap: max_worktrees 5 -> allowed", reason is None, str(reason))
 reason = guard.check_command(ADD, str(NP), WT_CFG)
+expect_true("worktree cap: no transcript -> allowed", reason is None, str(reason))
+expect_true(
+    "worktree cap: a bad max_worktrees falls back to 2",
+    guard.parse_config({"shared": [], "max_worktrees": "many"}).max_worktrees == 2,
+)
+reason = guard.check_command(f"git -C {WT.as_posix()} worktree list", str(NP), WT_CFG, False, wt_session("one", "two"))
+expect_true("worktree cap: `worktree list` is never held", reason is None, str(reason))
+WT_EVENT = merge_event(ADD, Path(wt_session("one", "two")))
+WT_ENV = {**NO_CONFIG, "LOST_MARY_SHARED_CHECKOUTS": str(PS / "wt-config.json")}
+(PS / "wt-config.json").write_text(json.dumps({"shared": [str(WT)], "max_worktrees": 2}), encoding="utf-8")
+WT_ENV.pop("LOST_MARY_GUARD_WORKTREE_CAP", None)
+rc, err = run_hook(GUARD, WT_EVENT, env=WT_ENV)
+expect("worktree cap: the hook reads the payload's transcript -> exit 2", rc, BLOCK, err)
+os.environ["LOST_MARY_GUARD_WORKTREE_CAP"] = "off"
+reason = guard.check_command(ADD, str(NP), WT_CFG, False, wt_session("one", "two"))
 expect_true("worktree cap: LOST_MARY_GUARD_WORKTREE_CAP=off -> allowed", reason is None, str(reason))
 expect_true(
     "check-evidence: the quick-tier selector is not a test run",

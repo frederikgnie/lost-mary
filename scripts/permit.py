@@ -25,7 +25,8 @@ deny and ask rules (documented).
      redirects only to relative paths or /dev/null. One foreign segment - no
      decision. Heredoc bodies are ignored, as in check-evidence.
   3. the library's own installers in verify mode.
-  4. the library's quick-tier selector, `python .../scripts/test-scope.py`
+  4. the library's quick-tier selector, `python .../agent-library/scripts/test-scope.py`
+     (or the lost-mary checkout's own copy)
      with no flags but --cmd, --base <ref> and -C <dir>: it only reads git.
 
 Output: {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
@@ -91,7 +92,7 @@ INSTALL_VERIFY = re.compile(
     re.IGNORECASE,
 )
 TEST_SCOPE = re.compile(
-    r"^[\"']?(?:\S*[\\/])?(?:python3?|py)(?:\.exe)?[\"']?\s+[\"']?\S*[\\/]scripts[\\/]test-scope\.py[\"']?"
+    r"^[\"']?(?:\S*[\\/])?(?:python3?|py)(?:\.exe)?[\"']?\s+[\"']?\S*(?:agent-library|lost-mary[^\s\\/]*)[\\/]scripts[\\/]test-scope\.py[\"']?"
     r"(?:\s+(?:--cmd|--base\s+[\w./-]+|-C\s+\S+))*$",
     re.IGNORECASE,
 )

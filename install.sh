@@ -276,6 +276,8 @@ for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evi
             print(f"DRIFT {event} {script} still has the placeholder interpreter path")
         elif "check-handoff-hook.py" in cmd or "guard-readonly-bash.py" in cmd:
             print(f"DRIFT {event} still references a v1 hook script")
+        elif script == "prune-worktrees.py" and "--hook" not in cmd:
+            print(f"DRIFT {event} runs {script} without --hook - the starting session's own worktree is not protected")
         else:
             print(f"OK {event} runs {script} (matcher {matcher!r})")
 for event in hooks:
