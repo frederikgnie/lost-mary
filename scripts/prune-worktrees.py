@@ -30,20 +30,23 @@ A worktree is REMOVABLE only when all of these hold:
                  an open PR for the branch keeps the worktree either way;
   4. idle      - no file under it (outside .git, .venv and tool caches) and none
                  of git's own records for it (index, HEAD, logs/HEAD in its gitdir,
-                 touched by a session's `git status` or commit) changed within
-                 --idle-hours (default 24);
+                 touched by a session's `git status` or commit) changed within the
+                 window: --merged-idle-hours (default 1) when gh found a merged PR
+                 whose head is HEAD, else --idle-hours (default 24);
   5. no session - no transcript under ~/.claude/projects ($LOST_MARY_PROJECTS_DIR)
-                 names it in its last SESSION_TAIL bytes - as a record's `cwd` or
-                 inside a tool call's input, by absolute path (either slash form)
-                 or by folder name after `/`, a space or a quote - counting every
-                 transcript changed within --idle-hours AND, at any age, those of
-                 a RUNNING session (~/.claude/sessions/<pid>.json with a live
-                 pid, $LOST_MARY_SESSIONS_DIR; observed 2.1.283), whose own `cwd`
-                 counts too: a session left open in a worktree writes nothing
-                 while it waits, and removing the directory under it (on Windows
-                 its handle stops the remove halfway) strands it. Tool results
-                 are not read, so a listing that merely prints the path (`git
-                 worktree list`, a dry run of this CLI) does not count.
+                 changed within the same window names it in its last SESSION_TAIL
+                 bytes - as a record's `cwd` or inside a tool call's input, by
+                 absolute path (either slash form) or by folder name after `/`, a
+                 space or a quote. A RUNNING session (~/.claude/sessions/<pid>.json
+                 with a live pid, $LOST_MARY_SESSIONS_DIR; observed 2.1.283) writes
+                 nothing while it waits, so on the ancestry route its transcripts
+                 count at any age and its own `cwd` counts too. On the gh route only
+                 its own `cwd` at or under the worktree keeps it: a session left
+                 open for days after its PR merged must not pin the worktree, but
+                 removing the directory under a live session's cwd (on Windows its
+                 handle stops the remove halfway) strands it. Tool results are not
+                 read, so a listing that merely prints the path (`git worktree
+                 list`, a dry run of this CLI) does not count.
 "pushed" trusts the local remote-tracking refs (no fetch); a stale ref can only
 say "pushed" for a commit the remote had when last fetched - the branch is kept
 either way.
@@ -55,10 +58,16 @@ reason that failed.
 REMOVABLE worktree, right after judging it, and keeps its branch (local and
 remote). It never runs `git worktree prune`: that clears the record of EVERY
 missing worktree at once, including one on an unmounted drive or one a session
-moved, which `git worktree repair` could relink. It also rmdirs EMPTY
-directories named `<repo>_wt_*` (the guard's convention) next to a scanned repo
-that are not registered worktrees, re-listed just before the sweep - the
-leftovers of a remove a Windows file lock interrupted. A dry run reports them.
+moved, which `git worktree repair` could relink. It also rmdirs, bottom-up,
+EMPTY directories - nothing under them but more empty directories, no file and
+no link (symlinks, junctions and other reparse points are never followed) -
+named `<repo>_*` next to a scanned repo (case-insensitive; the guard's
+`<repo>_wt_*` and any other suffix sessions pick) or directly under
+`<repo>/.claude/worktrees/` (Claude Code's own isolation worktrees), that are
+not registered worktrees of any scanned repo, re-listed just before the sweep,
+and whose directories are all older than LEFTOVER_MIN_AGE (10 minutes: `git
+worktree add` creates the directory before it registers it) - the leftovers of
+a remove a Windows file lock interrupted. A dry run reports them.
 
 "merged" through gh means a PR from the same repository (not a fork), merged
 into any branch, whose head is HEAD - a feature or integration branch counts,
@@ -78,6 +87,7 @@ import functools
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -92,6 +102,8 @@ SKIP_DIRS = frozenset({".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_c
 DISPOSABLE = frozenset({".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"})
 DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
 DEFAULT_IDLE_HOURS = 24.0
+DEFAULT_MERGED_IDLE_HOURS = 1.0  # the window when gh proves a PR at HEAD merged
+LEFTOVER_MIN_AGE = 600  # seconds; a younger empty dir may be a `git worktree add` in progress
 GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}  # a scan must not take index locks other sessions contend for
 SESSION_TAIL = 512 * 1024  # bytes read from the end of each recent transcript
 
@@ -161,13 +173,14 @@ def live_sessions() -> tuple[set[str], list[str]]:
 
 
 @functools.cache
-def session_mentions(idle_hours: float) -> tuple[str, ...]:
-    """The `cwd` values and tool-call inputs, normalised, of every transcript changed within the window and of
-    every running session's transcripts at any age - a session left open writes nothing while it waits. Once per run.
+def session_mentions(idle_hours: float, running_any_age: bool = True) -> tuple[str, ...]:
+    """The `cwd` values and tool-call inputs, normalised, of every transcript changed within the window and, with
+    `running_any_age`, the running sessions' cwds and their transcripts at any age - a session left open writes
+    nothing while it waits. Once per run and window.
     """
     root = Path(os.environ.get("LOST_MARY_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
     since = time.time() - idle_hours * 3600
-    live, found = live_sessions()
+    live, found = live_sessions() if running_any_age else (set(), [])
     for path in root.glob("**/*.jsonl") if root.is_dir() else []:
         try:
             # <project>/<sessionId>.jsonl, and a subagent's <project>/<sessionId>/subagents/agent-<id>.jsonl
@@ -199,15 +212,40 @@ def session_mentions(idle_hours: float) -> tuple[str, ...]:
     return tuple(found)
 
 
-def in_session(path: Path, idle_hours: float) -> bool:
-    """Whether a recent session names this worktree (a false match only keeps more)."""
+def absolute_forms(path: Path) -> set[str]:
+    """The worktree's absolute path, normalised, in both the Windows and the Git Bash (/c/repo/x) form."""
     p = norm_path(str(path)).rstrip("/")
     forms = {p}
     if len(p) > 2 and p[1] == ":":  # C:/repo/x as Git Bash writes it: /c/repo/x
         forms.add(f"/{p[0]}{p[2:]}")
-    base = p.rsplit("/", 1)[-1]
+    return forms
+
+
+def in_session(path: Path, idle_hours: float, running_any_age: bool = True) -> bool:
+    """Whether a recent session names this worktree (a false match only keeps more)."""
+    forms = absolute_forms(path)
+    base = norm_path(str(path)).rstrip("/").rsplit("/", 1)[-1]
     forms |= {f"/{base}", f" {base}", f'"{base}', f"'{base}"}  # relative: `cd ../x`, `cd x`, `cd "x"`, `cd 'x'`
-    return any(form in text for text in session_mentions(idle_hours) for form in forms)
+    return any(form in text for text in session_mentions(idle_hours, running_any_age) for form in forms)
+
+
+def running_inside(path: Path) -> bool:
+    """Whether a running session's own cwd is this worktree or under it - removing it would strand that session.
+
+    Both sides are compared as spelled and as resolved (short names, junctions): a miss here removes a live cwd.
+    """
+
+    def spellings(p: Path) -> set[str]:
+        out = absolute_forms(p)
+        try:
+            out |= absolute_forms(p.resolve())
+        except (OSError, RuntimeError):
+            pass
+        return out
+
+    forms = spellings(path)
+    cwds = {c.rstrip("/") for cwd in live_sessions()[1] for c in spellings(Path(cwd))}
+    return any(c == f or c.startswith(f"{f}/") for c in cwds for f in forms)
 
 
 def notice(text: str) -> None:
@@ -447,7 +485,14 @@ def first_line(r: subprocess.CompletedProcess[str]) -> str:
     return (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f"exit {r.returncode}"])[0]
 
 
-def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours: float, prs: PrLookup) -> str | None:
+def judge(
+    wt: Worktree,
+    is_main: bool,
+    frozen: list[tuple[str, ...]],
+    idle_hours: float,
+    prs: PrLookup,
+    merged_idle_hours: float = DEFAULT_MERGED_IDLE_HOURS,
+) -> str | None:
     """None when `wt` is REMOVABLE, else the first reason to keep it."""
     if is_main:
         return "main"
@@ -488,11 +533,15 @@ def judge(wt: Worktree, is_main: bool, frozen: list[tuple[str, ...]], idle_hours
             return "not merged"
         if not own_commits(wt):
             return "no commits of its own yet"
+    # A merged PR at HEAD is definitive: a short window, and a running session keeps it only from inside it.
+    window = merged_idle_hours if merged else idle_hours
     age = time.time() - max(newest_mtime(wt.path), git_activity(wt.path))
-    if age < idle_hours * 3600:
+    if age < window * 3600:
         return f"active {fmt_age(max(age, 0.0))} ago"
-    if in_session(wt.path, idle_hours):
-        return f"a Claude session worked here within {idle_hours:g} h"
+    if in_session(wt.path, window, running_any_age=not merged):
+        return f"a Claude session worked here within {window:g} h"
+    if merged and running_inside(wt.path):
+        return "a running Claude session's cwd is in it"
     return None
 
 
@@ -506,7 +555,9 @@ class Row:
     kind: str = "worktree"  # worktree | leftover
 
 
-def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLookup) -> tuple[list[Row], Path] | None:
+def scan_repo(
+    repo: Path, cfg: Config, idle_hours: float, merged_idle_hours: float, apply: bool, prs: PrLookup
+) -> tuple[list[Row], Path] | None:
     listed = list_worktrees(repo)
     if isinstance(listed, str):
         notice(f"{repo}: {listed} - skipped")
@@ -515,7 +566,7 @@ def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLo
     rows: list[Row] = []
     for i, wt in enumerate(listed):
         try:
-            reason = judge(wt, i == 0, cfg.frozen, idle_hours, prs)
+            reason = judge(wt, i == 0, cfg.frozen, idle_hours, prs, merged_idle_hours)
         except (OSError, subprocess.TimeoutExpired) as exc:
             reason = f"check failed ({exc!r})"
         row = Row(str(main), str(wt.path), wt.branch or "-", "KEPT" if reason else "REMOVABLE", reason or "")
@@ -534,34 +585,72 @@ def scan_repo(repo: Path, cfg: Config, idle_hours: float, apply: bool, prs: PrLo
     return rows, main
 
 
+def is_link(path: Path) -> bool:
+    """A symlink, junction or any other reparse point - never followed, never removed; unreadable reads as one."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return True
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)  # REPARSE_POINT
+
+
+def empty_tree(root: Path) -> list[Path] | None:
+    """The directories of a tree that holds no file and no link, deepest first; None when it holds anything else."""
+    dirs = [root]
+    for d in dirs:  # grows while it is walked: breadth-first
+        for entry in d.iterdir():
+            if is_link(entry) or not entry.is_dir():
+                return None
+            dirs.append(entry)
+    return dirs[::-1]  # a child always comes after its parent breadth-first, so before it reversed
+
+
+def leftover_candidates(main: Path) -> list[Path]:
+    """`<repo>_*` siblings of a main worktree and the entries of its `.claude/worktrees/`."""
+    out: list[Path] = []
+    prefix = main.name.lower() + "_"
+    try:
+        out += [e for e in sorted(main.parent.iterdir()) if e.name.lower().startswith(prefix)]
+    except OSError as exc:
+        notice(f"cannot list {main.parent} ({type(exc).__name__})")
+    isolation = main / ".claude" / "worktrees"  # Claude Code's own isolation worktrees
+    if isolation.is_dir() and not is_link(main / ".claude") and not is_link(isolation):
+        try:
+            out += sorted(isolation.iterdir())
+        except OSError as exc:
+            notice(f"cannot list {isolation} ({type(exc).__name__})")
+    return out
+
+
 def leftovers(mains: list[Path], registered: set[tuple[str, ...]], cfg: Config, apply: bool) -> list[Row]:
-    """Empty `<repo>_wt_*` directories next to a scanned repo that no scanned repo has registered."""
+    """Empty `<repo>_*` and `<repo>/.claude/worktrees/*` directories (no file, no link anywhere under them), older
+    than LEFTOVER_MIN_AGE, that no scanned repo has registered; removed bottom-up."""
     rows: list[Row] = []
     seen: set[tuple[str, ...]] = set(registered) | {key(p) for p in cfg.shared}
     for main in mains:
-        parent = main.parent
-        try:
-            entries = sorted(parent.iterdir())
-        except OSError as exc:
-            notice(f"cannot list {parent} ({type(exc).__name__})")
-            continue
-        for entry in entries:
+        for entry in leftover_candidates(main):
             k = key(entry)
-            if k in seen or not entry.name.lower().startswith(main.name.lower() + "_wt_"):
+            if k in seen:
                 continue
             seen.add(k)
-            junction = getattr(entry, "is_junction", lambda: False)()  # Path.is_junction is 3.12+; CI runs 3.11
-            if entry.is_symlink() or junction or not entry.is_dir() or under(entry, cfg.frozen):
+            if is_link(entry) or not entry.is_dir() or under(entry, cfg.frozen):
                 continue
             try:
-                if any(entry.iterdir()):
+                tree = empty_tree(entry)
+                # a younger dir anywhere in it may be a `git worktree add` that has not registered it yet
+                if (
+                    tree is None
+                    or any(key(d) in seen for d in tree[:-1])  # the root is last, and in `seen` already
+                    or time.time() - max(d.stat().st_mtime for d in tree) < LEFTOVER_MIN_AGE
+                ):
                     continue
             except OSError:
                 continue
             row = Row(str(main), str(entry), "-", "LEFTOVER", "empty, not a registered worktree", "leftover")
             if apply:
                 try:
-                    entry.rmdir()
+                    for d in tree:
+                        d.rmdir()
                     row.verdict = "REMOVED"
                 except OSError as exc:
                     row.verdict, row.reason = "FAILED", f"rmdir failed ({type(exc).__name__})"
@@ -578,7 +667,9 @@ def common_dir(repo: Path) -> tuple[str, ...] | None:
     return key(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
-def run(repos: list[Path], idle_hours: float, apply: bool, prs: PrLookup) -> tuple[list[Row], int, int]:
+def run(
+    repos: list[Path], idle_hours: float, merged_idle_hours: float, apply: bool, prs: PrLookup
+) -> tuple[list[Row], int, int]:
     """(rows, repos scanned, repos skipped)."""
     cfg = load_config()
     if not repos:
@@ -592,7 +683,7 @@ def run(repos: list[Path], idle_hours: float, apply: bool, prs: PrLookup) -> tup
         if common is not None and common in done:
             continue
         try:
-            result = scan_repo(repo, cfg, idle_hours, apply, prs)
+            result = scan_repo(repo, cfg, idle_hours, merged_idle_hours, apply, prs)
         except Exception as exc:  # one repo's failure never aborts the others
             notice(f"{repo}: scan failed ({exc!r}) - skipped")
             skipped += 1
@@ -635,16 +726,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_IDLE_HOURS,
         help="a file or git record changed more recently keeps it (default 24)",
     )
+    ap.add_argument(
+        "--merged-idle-hours",
+        type=float,
+        default=DEFAULT_MERGED_IDLE_HOURS,
+        help="the same window when gh shows a merged PR whose head is HEAD (default 1)",
+    )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
     if args.idle_hours < 0:
         ap.error("--idle-hours must be >= 0")
+    if args.merged_idle_hours < 0:
+        ap.error("--merged-idle-hours must be >= 0")
     return args
 
 
 def main(argv: list[str] | None = None, prs: PrLookup | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    rows, repos, skipped = run(args.repos, args.idle_hours, args.apply, prs or GhLookup())
+    rows, repos, skipped = run(args.repos, args.idle_hours, args.merged_idle_hours, args.apply, prs or GhLookup())
     totals = summary(rows, repos, args.apply) | {"skipped": skipped}
     code = 1 if skipped or totals["failed"] else 0
     if args.json:

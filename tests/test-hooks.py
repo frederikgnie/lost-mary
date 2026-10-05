@@ -36,6 +36,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The merge guard asks gh for a PR's head and base; the tests that need it use a fake, never the real gh.
+os.environ["LOST_MARY_NO_GH"] = "1"
 PYCHECK = ROOT / "scripts" / "pycheck.py"
 EVIDENCE = ROOT / "scripts" / "check-evidence.py"
 NOASK = ROOT / "scripts" / "no-ask.py"
@@ -1615,6 +1617,7 @@ GS_CONFIG.write_text((ROOT / "shared-checkouts.example.json").read_text(encoding
 # The tables below name real EU paths; on a machine that has them, whether `git switch main` may go home would
 # depend on their branch state. Off here; the sandbox clone further down tests the exemption itself.
 os.environ["LOST_MARY_GUARD_RETURN_HOME"] = "off"
+os.environ["LOST_MARY_GUARD_WORKTREE_CAP"] = "off"  # the same: the real EU repos' worktrees
 GS_ENV = {**os.environ, "HOME": str(GS_HOME), "USERPROFILE": str(GS_HOME), "LOST_MARY_SHARED_CHECKOUTS": str(GS_CONFIG)}
 guard = load_module(GUARD, "guard_shared_checkouts")
 GS_CFG = guard.parse_config(json.loads(GS_CONFIG.read_text(encoding="utf-8")))
@@ -5652,6 +5655,249 @@ proc = subprocess.run(
     env=GS_ENV,
 )
 expect("replay-commands.py with a baseline git cannot read -> exit 2", proc.returncode, 2, proc.stderr.decode())
+
+# pr-state: a review stamp for a PR's current head lets any session merge it (the guard answers auto mode with an
+# allow); a push after the stamp voids it; a PR into a feature branch that was already merged is held. gh is a fake.
+PS = SCRATCH / "pr-state"
+PS.mkdir()
+PS_DATA = PS / "gh.json"
+FAKE_GH = PS / "fake_gh.py"
+FAKE_GH.write_text(
+    "import json, os, sys\n"
+    'data = json.load(open(os.environ["FAKE_GH_DATA"], encoding="utf-8"))\n'
+    "args = sys.argv[1:]\n"
+    'with open(os.environ["FAKE_GH_DATA"] + ".calls", "a", encoding="utf-8") as log:\n'
+    '    log.write(" ".join(args) + "\\n")\n'
+    'if args[:2] == ["pr", "view"]:\n'
+    '    out = data["view"].get(args[2])\n'
+    'elif args[:2] == ["pr", "list"]:\n'
+    '    out = data["list"].get(args[args.index("--head") + 1], [])\n'
+    "else:\n"
+    "    out = None\n"
+    "if out is None:\n"
+    "    sys.exit(1)\n"
+    "print(json.dumps(out))\n",
+    encoding="utf-8",
+)
+SHA_A, SHA_B = "a" * 40, "b" * 40
+PS_STATE = PS / "state"
+PS_RECORDS = PS_STATE / "reviews.jsonl"
+PR_STATE_CLI = ROOT / "scripts" / "pr-state.py"
+
+
+def ps_gh(head: str = SHA_A, base: str = "main", base_prs: list[dict[str, object]] | None = None) -> None:
+    view = {
+        "number": 41,
+        "url": "https://github.com/o/r/pull/41",
+        "headRefOid": head,
+        "headRefName": "feat/x",
+        "baseRefName": base,
+        "state": "OPEN",
+    }
+    PS_DATA.write_text(json.dumps({"view": {"41": view}, "list": {base: base_prs or []}}), encoding="utf-8")
+
+
+def ps_stamp(sha: str) -> None:
+    PS_STATE.mkdir(parents=True, exist_ok=True)
+    row = {"v": "1", "repo": "o/r", "pr": "41", "sha": sha, "branch": "feat/x", "base": "main", "tests": "quick"}
+    PS_RECORDS.write_text(json.dumps(row | {"at": "2026-10-05T10:00Z"}) + "\n", encoding="utf-8")
+
+
+PS_ENV = {k: v for k, v in NO_CONFIG.items() if k != "LOST_MARY_NO_GH"} | {
+    "LOST_MARY_GH": f'"{Path(sys.executable).as_posix()}" "{FAKE_GH.as_posix()}"',
+    "FAKE_GH_DATA": str(PS_DATA),
+    "LOST_MARY_STATE_DIR": str(PS_STATE),
+}
+
+
+def ps_hook(command: str, transcript: Path | None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    done = subprocess.run(
+        [sys.executable, str(GUARD)],
+        input=json.dumps(merge_event(command, transcript)).encode("utf-8"),
+        capture_output=True,
+        env=env or PS_ENV,
+    )
+    return done.returncode, done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace")
+
+
+MERGE41 = "gh pr merge 41 --squash"
+ps_gh()
+rc, out, err = ps_hook(MERGE41, t_none)
+expect("stamp: no review here and none recorded -> exit 2", rc, BLOCK, err)
+expect_true("... the hold says none is recorded", "no review is recorded for o/r#41" in err, err)
+ps_stamp(SHA_A)
+rc, out, err = ps_hook(MERGE41, t_none)
+expect("stamp: another session's stamp for the PR's head -> exit 0", rc, ALLOW, err + out)
+decision = json.loads(out or "{}").get("hookSpecificOutput", {})
+expect_true(
+    "... with an allow for auto mode, naming the stamp",
+    decision.get("permissionDecision") == "allow"
+    and "o/r#41 reviewed at aaaaaaaaa" in decision.get("permissionDecisionReason", ""),
+    out,
+)
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect_true("stamp: reviewed here as well -> exit 0 with the allow", rc == ALLOW and '"allow"' in out, err + out)
+ps_gh(head=SHA_B)
+rc, out, err = ps_hook(MERGE41, t_none)
+expect("stamp: pushed after the stamp -> exit 2", rc, BLOCK, err)
+expect_true(
+    "... naming the unreviewed range", "reviewed at aaaaaaaaa, but its head is now bbbbbbbbb" in err and not out, err
+)
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect_true("stamp: pushed after the stamp, reviewed here -> exit 0, no allow", rc == ALLOW and not out, err + out)
+ps_gh()
+rc, out, err = ps_hook("gh pr merge 41 --squash -R o/r", t_none)
+expect("stamp: the same PR named with -R -> exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook("gh pr merge --squash", t_none)
+expect("stamp: a merge naming no PR never matches a stamp -> exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook(MERGE41, t_none, PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"})
+expect("stamp: LOST_MARY_GUARD_REVIEW_RECORD=off -> the stamp is not read, exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook(MERGE41, t_none, PS_ENV | {"LOST_MARY_GH": "no-such-gh-binary-x"})
+expect("stamp: gh cannot answer -> no stamp read, exit 2", rc, BLOCK, err)
+expect_true("... with a notice", "gh cannot read PR 41" in err, err)
+PS_RECORDS.write_text("not json\n" + json.dumps({"repo": "o/r", "pr": "41"}) + "\n", encoding="utf-8")
+rc, out, err = ps_hook(MERGE41, t_none)
+expect("stamp: unreadable stamp lines count as none -> exit 2", rc, BLOCK, err)
+ps_stamp(SHA_A)
+
+# A merged base. PR #7 merged feat/old into main; nothing from it is open: merging into it strands the commits.
+OLD = [{"number": 7, "state": "MERGED", "baseRefName": "main"}]
+ps_gh(base="feat/old", base_prs=OLD)
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect("merged base: reviewed and stamped, base already merged -> exit 2", rc, BLOCK, err)
+expect_true(
+    "... naming the merge and the retarget",
+    "`feat/old` was already merged (PR #7 into main)" in err and "gh pr edit 41 -R o/r --base main" in err,
+    err,
+)
+ps_gh(base="feat/old", base_prs=[*OLD, {"number": 9, "state": "OPEN", "baseRefName": "main"}])
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect("merged base: the base has an open PR again (an integration branch) -> exit 0", rc, ALLOW, err)
+ps_gh(base="develop", base_prs=OLD)
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect("merged base: develop is long-lived, never stale -> exit 0", rc, ALLOW, err)
+ps_gh(base="feat/old", base_prs=[{"number": 7, "state": "CLOSED", "baseRefName": "main"}])
+rc, out, err = ps_hook(MERGE41, t_rev)
+expect("merged base: only a closed PR from it -> exit 0", rc, ALLOW, err)
+PS_HOMES_DIR = PS / "home-checkout"
+PS_HOMES_DIR.mkdir()
+PS_CONFIG = PS / "shared-checkouts.json"
+PS_CONFIG.write_text(json.dumps({"shared": [str(PS_HOMES_DIR)], "homes": {str(PS_HOMES_DIR): "feat/old"}}), "utf-8")
+ps_gh(base="feat/old", base_prs=OLD)
+rc, out, err = ps_hook(MERGE41, t_rev, PS_ENV | {"LOST_MARY_SHARED_CHECKOUTS": str(PS_CONFIG)})
+expect("merged base: a branch `homes` declares is long-lived by the user's word -> exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook("gh pr create --base feat/old --fill", t_rev)
+expect("merged base: `gh pr create --base` a merged branch -> exit 2", rc, BLOCK, err)
+expect_true("... pointing at main", "Open the PR against main" in err, err)
+rc, out, err = ps_hook("gh pr create -B feat/old --fill", t_rev)
+expect("merged base: the same with -B -> exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook("gh pr create --base=feat/old --fill", t_rev)
+expect("merged base: the same with --base= -> exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook("gh pr create --base main --fill", t_rev)
+expect("merged base: `gh pr create --base main` -> exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook("gh pr create --fill", t_rev)
+expect("merged base: `gh pr create` with no base -> exit 0", rc, ALLOW, err)
+
+# The stamp is written only after a review: the guard gates the command with the merge's own evidence.
+STAMP = "python ~/.claude/agent-library/scripts/pr-state.py reviewed 41 --tests full"
+rc, out, err = ps_hook(STAMP, t_none)
+expect("stamp command: no review in this session -> exit 2", rc, BLOCK, err)
+expect_true("... told to spawn review first", "no `review` agent has run" in err, err)
+rc, out, err = ps_hook(STAMP, t_rev)
+expect("stamp command: reviewed in this session -> exit 0", rc, ALLOW, err)
+t_spent = kg_transcript(
+    "stamp-spent.jsonl",
+    [kg_prompt("ship"), kg_review(), kg_bash("gh pr merge 40 --squash", "t-m40"), kg_result("t-m40", "", False)],
+)
+rc, out, err = ps_hook(STAMP, t_spent)
+expect("stamp command: the review was spent on another PR's merge -> exit 2", rc, BLOCK, err)
+for tool, tool_input in (
+    ("Write", {"file_path": str(PS_RECORDS), "content": "{}"}),
+    ("Edit", {"file_path": str(PS_RECORDS).replace("\\", "/"), "old_string": "a", "new_string": "b"}),
+    ("Bash", {"command": f"echo '{{}}' >> {PS_RECORDS.as_posix()}"}),
+    ("PowerShell", {"command": f"Add-Content {PS_RECORDS} '{{}}'"}),
+):
+    event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "cwd": str(NP)}
+    rc, err = run_hook(GUARD, event, env=PS_ENV)
+    expect(f"stamp file: written by hand through {tool} -> exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook(f"cat {PS_RECORDS.as_posix()}", None)
+expect("stamp file: read -> exit 0", rc, ALLOW, err)
+
+# pr-state.py itself: the stamp names the tree the session holds - the PR's head, pushed and unchanged.
+PS_REPO = PS / "repo"
+PS_REPO.mkdir()
+git(PS_REPO, "init", "-q", "-b", "feat/x")
+(PS_REPO / "a.txt").write_text("a\n", encoding="utf-8")
+git(PS_REPO, "add", "a.txt")
+git(PS_REPO, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a")
+PS_HEAD = subprocess.run(
+    ["git", "-C", str(PS_REPO), "rev-parse", "HEAD"], capture_output=True, text=True
+).stdout.strip()
+PS_RECORDS.unlink()
+
+
+def ps_cli(*args: str) -> tuple[int, str]:
+    done = subprocess.run([sys.executable, str(PR_STATE_CLI), *args], cwd=PS_REPO, capture_output=True, env=PS_ENV)
+    return done.returncode, done.stdout.decode("utf-8", "replace") + done.stderr.decode("utf-8", "replace")
+
+
+ps_gh(head=SHA_B)
+rc, out = ps_cli("reviewed", "41")
+expect("pr-state: local HEAD is not the PR's head -> exit 2", rc, 2, out)
+expect_true("... and nothing is recorded", not PS_RECORDS.exists(), out)
+ps_gh(head=PS_HEAD)
+(PS_REPO / "a.txt").write_text("changed\n", encoding="utf-8")
+rc, out = ps_cli("reviewed", "41")
+expect("pr-state: a tracked file changed -> exit 2", rc, 2, out)
+git(PS_REPO, "checkout", "--", "a.txt")
+rc, out = ps_cli("reviewed", "#41", "--tests", "quick")
+expect("pr-state: HEAD is the PR's head, tree clean -> exit 0", rc, ALLOW, out)
+expect_true("... one stamp line for o/r#41 at that head", f'"sha":"{PS_HEAD}"' in PS_RECORDS.read_text("utf-8"), out)
+rc, out = ps_cli("status", "41")
+expect_true("pr-state status: the stamp covers the head", rc == 0 and "review: o/r#41 reviewed at" in out, out)
+rc, out = ps_cli("show")
+expect_true("pr-state show: lists the stamp", rc == 0 and "o/r#41" in out and "tests: quick" in out, out)
+rc, out = ps_cli("reviewed", "99")
+expect("pr-state: gh knows no such PR -> exit 1", rc, 1, out)
+
+# The worktree cap: one worktree per piece of work. Detached (deploy) and Claude-managed ones do not count.
+WT = PS / "wt-repo"
+WT.mkdir()
+git(WT, "init", "-q", "-b", "main")
+(WT / "a.txt").write_text("a\n", encoding="utf-8")
+git(WT, "add", "a.txt")
+git(WT, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a")
+for name in ("one", "two"):
+    git(WT, "worktree", "add", "-q", str(PS / f"wt-repo_{name}"), "-b", name)
+git(WT, "worktree", "add", "-q", "--detach", str(PS / "wt-repo_deploy"))
+git(WT, "worktree", "add", "-q", str(WT / ".claude" / "worktrees" / "agent-x"), "-b", "worktree-agent-x")
+WT_CFG = guard.parse_config({"shared": [str(WT)], "max_worktrees": 3})
+ADD = f"git -C {WT.as_posix()} worktree add {(PS / 'wt-repo_three').as_posix()} -b three"
+os.environ.pop("LOST_MARY_GUARD_WORKTREE_CAP")
+reason = guard.check_command(ADD, str(NP), WT_CFG)
+expect_true("worktree cap: two on branches, a detached and a Claude one, cap 3 -> allowed", reason is None, str(reason))
+git(WT, "worktree", "add", "-q", str(PS / "wt-repo_three"), "-b", "three")
+reason = guard.check_command(ADD.replace("three", "four"), str(NP), WT_CFG)
+expect_true(
+    "worktree cap: three on branches -> held, listing them",
+    reason is not None and "already has 3 worktrees" in reason and "wt-repo_two" in reason and "deploy" not in reason,
+    str(reason),
+)
+reason = guard.check_command(f"cd {WT.as_posix()} && git worktree add ../x -b four", str(NP), WT_CFG)
+expect_true("worktree cap: the same after a cd -> held", reason is not None, str(reason))
+reason = guard.check_command(
+    ADD.replace("three", "four"), str(NP), guard.parse_config({"shared": [str(WT)], "max_worktrees": 5})
+)
+expect_true("worktree cap: max_worktrees 5 -> allowed", reason is None, str(reason))
+expect_true(
+    "worktree cap: a bad max_worktrees falls back to 3",
+    guard.parse_config({"shared": [], "max_worktrees": "many"}).max_worktrees == 3,
+)
+reason = guard.check_command(f"git -C {WT.as_posix()} worktree list", str(NP), WT_CFG)
+expect_true("worktree cap: `worktree list` is never held", reason is None, str(reason))
+os.environ["LOST_MARY_GUARD_WORKTREE_CAP"] = "off"
+reason = guard.check_command(ADD.replace("three", "four"), str(NP), WT_CFG)
+expect_true("worktree cap: LOST_MARY_GUARD_WORKTREE_CAP=off -> allowed", reason is None, str(reason))
 
 nuke(SCRATCH)
 

@@ -31,8 +31,10 @@ missing, do not edit anything: make your whole final message
    not listed). Fix what it reports before continuing; do not argue with it in
    the report. If it says `no venv found` or a tool is missing, note that under
    `RISKS` instead of guessing.
-6. Run the checks named in `VALIDATION` (or the project's verified test command
-   for the packages you touched). Run them for real, in this session, and read
+6. Run the checks named in `VALIDATION` - the quick tier: the tests that cover
+   what you changed (`python ~/.claude/agent-library/scripts/test-scope.py
+   --cmd` prints them), never the whole suite unless `VALIDATION` says so; that
+   runs once, before the merge into main. Run them for real, in this session, and read
    the result - a piped `| tail` hides the exit code, not the failure text.
 7. Inspect `git diff` and remove anything not needed for the predicate.
 8. Report in the format below. Nothing after it.

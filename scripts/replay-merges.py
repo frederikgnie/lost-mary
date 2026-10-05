@@ -34,6 +34,8 @@ from types import ModuleType
 from typing import Any, NamedTuple
 
 GUARD = Path(__file__).resolve().parent / "guard-shared-checkouts.py"
+# Replayed merges are history: a PR's head and base today say nothing about the call then. No gh lookups.
+os.environ["LOST_MARY_NO_GH"] = "1"
 RULE_LIVE = "2026-09-24T11:40"  # the user's autoMode.allow merge rule, first observed passing a merge
 REFUSED = "denied by the Claude Code auto mode classifier"
 

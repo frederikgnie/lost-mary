@@ -35,7 +35,9 @@ Notes from the user (may be empty): $ARGUMENTS
 3. **Check the commit identity.** `git config user.email` should belong to the
    same account as the remote owner; warn if it does not. Do not rewrite
    history.
-4. **Push** the branch: `git push -u origin <branch>`.
+4. **Push** the branch: `git push -u origin <branch>`. The PR targets the
+   default branch, or an integration branch whose own PR is still open - never
+   a branch already merged (the guard holds `gh pr create --base` on one).
 5. **Create the PR** with `gh pr create --title "<title>" --body "<body>"`:
    - Title: imperative mood, under 70 characters; use the user's notes if given.
    - Body: `## Summary` (2-4 bullets), `## Validation` (exact commands and
