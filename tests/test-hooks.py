@@ -5699,8 +5699,12 @@ OLD_TIP = subprocess.run(["git", "-C", str(PS_GIT), "rev-parse", "HEAD"], captur
 for ref in ("main", "feat/old"):
     git(PS_GIT, "update-ref", f"refs/remotes/origin/{ref}", OLD_TIP)
 git(PS_GIT, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-PS_OTHER_DIR = PS / "elsewhere"  # the lead's own checkout, say: not where the stamp ran
-PS_OTHER_DIR.mkdir()
+PS_OTHER_DIR = PS / "elsewhere"  # the lead's own checkout of o/r, say: not where the stamp ran
+PS_FORK = PS / "other-repo"  # a clone of another repository, whose PR numbers overlap o/r's
+for clone, url in ((PS_OTHER_DIR, "https://github.com/o/r.git"), (PS_FORK, "git@github.com:x/y.git")):
+    clone.mkdir()
+    git(clone, "init", "-q")
+    git(clone, "remote", "add", "origin", url)
 
 
 def ps_gh(head: str = SHA_A, base: str = "main", base_prs: list[dict[str, object]] | None = None) -> None:
@@ -5980,7 +5984,7 @@ t_two = kg_transcript(
         kg_review(),
         REVIEW_DONE,
         ps_stamp_call("40", "t-s40", PS_GIT),
-        kg_result("t-s40", "ok", False),
+        kg_result("t-s40", "recorded: o/r#40 reviewed at aaaaaaaaa (feat/x -> main, none tests)", False),
     ],
 )
 rc, out, err = ps_hook(STAMP, t_two)
@@ -5993,6 +5997,34 @@ rc, out, err = ps_hook(
     "gh pr merge 40 --squash -R o/r", t_two, PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"}, cwd=PS_OTHER_DIR
 )
 expect("stamp command: then merging that PR from elsewhere, named with -R -> exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook(
+    "gh pr merge 40 --squash -R x/y", t_two, PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"}, cwd=PS_OTHER_DIR
+)
+expect("stamp command: PR 40 of ANOTHER repository after o/r#40 was stamped -> spent, exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", t_two, cwd=PS_FORK)
+expect("stamp command: #40 in a clone of another repository -> the review is spent, exit 2", rc, BLOCK, err)
+t_blind = kg_transcript(
+    "stamp-blind.jsonl",
+    [
+        kg_prompt("ship"),
+        kg_review(),
+        REVIEW_DONE,
+        ps_stamp_call("40", "t-b40", PS_GIT),
+        kg_result("t-b40", "ok", False),
+    ],
+)
+rc, out, err = ps_hook("python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", t_blind)
+expect("stamp command: an earlier stamp whose result names no repository spends the review -> exit 2", rc, BLOCK, err)
+STAMP_CMD = "python ~/.claude/agent-library/scripts/pr-state.py reviewed 41"
+for cmd in (f"{STAMP_CMD} && gh pr checks 41", f"{STAMP_CMD}; exit 1", f"{STAMP_CMD} | tail -1"):
+    rc, out, err = ps_hook(cmd, t_done_review)
+    expect_true(
+        f"stamp command: not alone in its call - {cmd[len(STAMP_CMD) :]!r} -> exit 2",
+        rc == BLOCK and "alone in its call" in err,
+        err,
+    )
+rc, out, err = ps_hook(f"cd {PS_GIT.as_posix()} && {STAMP_CMD}", t_done_review, cwd=NP)
+expect("stamp command: a cd, then the stamp -> exit 0", rc, ALLOW, err)
 t_failed = kg_transcript(
     "stamp-failed.jsonl",
     [

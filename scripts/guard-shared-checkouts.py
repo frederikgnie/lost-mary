@@ -156,9 +156,13 @@ A merge that names a literal PR asks gh for its head and base.
   * `pr-state.py reviewed <n>` is held unless it names one literal PR and a
     `review` spawned in this session has FINISHED (its record's
     `toolUseResult.status` is "completed", or its completion notice came)
-    since the session's last merge or stamp of another PR. A stamp spends
-    the review for every other PR number, wherever it ran; one that failed
-    (an error result) wrote nothing and spends nothing. No transcript: held.
+    since the session's last merge or stamp of another PR, and it stands
+    alone in its call (a cd before it at most), so its exit code is
+    pr-state's. A stamp spends the review for every PR but the one its
+    result names (`recorded: owner/repo#n`) - matched by repository, from gh,
+    `-R` or the clone's origin, wherever either ran; a result naming none
+    spends it for all; a failed one (an error result without that line)
+    wrote nothing and spends nothing. No transcript: held.
   * A hand-made write to the stamp file (Edit/Write of that path, or a
     redirect / tee / Add-Content / copy onto it) is held - a speed bump.
 No gh answer, LOST_MARY_NO_GH=1 or LOST_MARY_GUARD_REVIEW_RECORD=off: no
@@ -270,6 +274,11 @@ STAMP_PIN = (
     "guard-shared-checkouts: held - this merge rests on another session's review stamp, and outside auto mode nothing "
     "pins it to the reviewed head: add `--match-head-commit {sha}` to the `gh pr merge`, so a push after the review "
     "makes GitHub refuse it instead of merging unreviewed commits."
+)
+RECORDED = re.compile(r"recorded: ([^\s#]+/[^\s#]+)#(?P<n>\d+) reviewed at")  # pr-state's success line
+STAMP_ALONE = (
+    "guard-shared-checkouts: held - run `pr-state.py reviewed {number}` alone in its call (a `cd` before it at "
+    "most): its exit code is how the guard tells a written stamp from one that failed."
 )
 STAMP_ONE = (
     "guard-shared-checkouts: held - record one review per call, by its literal PR number: "
@@ -1380,7 +1389,7 @@ def session_worktrees(transcript: str) -> set[tuple[str, ...]]:
     try:
         with Path(transcript).open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if "worktree" not in line or '"tool_use"' not in line:
+                if "worktree add" not in line or '"tool_use"' not in line:
                     continue
                 try:
                     record = json.loads(line)
@@ -1617,7 +1626,12 @@ def merges_in(command: str, cwd: str, powershell: bool = False) -> list[tuple[li
 
 
 def reviewed_for(
-    transcript: Path, current: str, merges: list[tuple[list[str], str]], command: str = "", finished: bool = False
+    transcript: Path,
+    current: str,
+    merges: list[tuple[list[str], str]],
+    command: str = "",
+    finished: bool = False,
+    repo: str | None = None,
 ) -> bool | None:
     """Whether a `review` was spawned in the session after the last merge of another PR that may have run.
 
@@ -1630,8 +1644,11 @@ def reviewed_for(
     call's tool_use_id; the transcript may already hold the call - without an id, the last merge call with this
     `command` and no result yet is taken to be it. A `gh repo set-default` changes what a bare number names, so a
     number before it and the same number after it are two PRs. `merges` are this call's, with their directories.
-    A `pr-state.py reviewed <n>` stamp spends the review for any PR but number <n> - by number, wherever it ran
-    and however the PR is named - unless it failed (an error result: pr-state wrote nothing): one review, one PR.
+    A `pr-state.py reviewed <n>` stamp spends the review for every PR but the one it recorded - <n> of the
+    repository its result names (`recorded: owner/repo#n`), matched against `repo`, the current PR's (owner/repo,
+    lower case) - wherever either ran and however the PR is named. A stamp whose result names nothing spends it
+    for every PR; one that failed (an error result without that line: pr-state wrote nothing) spends nothing. It
+    runs alone in its call (check_stamp), so its exit code is pr-state's: one review, one PR.
     With `finished`, a review counts only once it is done - its record's `toolUseResult.status` is "completed"
     (a background launch says "async_launched"), or a later `<task-notification>` names its tool-use id with
     `<status>completed</status>`.
@@ -1646,7 +1663,8 @@ def reviewed_for(
     never_ran: set[str] = set()
     answered: set[str] = set()  # merge calls with a result
     merge_ids: set[str] = set()
-    stamp_ids: set[str] = set()  # calls holding only stamps: any error result means the stamp was not written
+    stamp_ids: set[str] = set()  # calls holding only stamps
+    stamped_repo: dict[str, str] = {}  # stamp call -> the repository its `recorded:` line names
     review_ids: set[str] = set()
     done: set[str] = set()  # reviews that finished
     try:
@@ -1659,6 +1677,7 @@ def reviewed_for(
                     or "merg" in line.lower()
                     or "set-default" in line
                     or "pr-state" in line
+                    or (stamp_ids and any(uid in line for uid in stamp_ids))
                     or (merge_ids and '"tool_result"' in line and any(uid in line for uid in merge_ids))
                     or (review_ids and any(uid in line for uid in review_ids))
                 ):
@@ -1687,9 +1706,17 @@ def reviewed_for(
                             and result.get("status") == "completed"
                         ):
                             done.add(uid)
+                        if uid in stamp_ids:
+                            raw = block.get("content")
+                            if isinstance(raw, list):
+                                raw = " ".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
+                            if wrote := RECORDED.search(str(raw or "")):
+                                stamped_repo[uid] = wrote.group(1).lower()
                         if uid in merge_ids:
                             answered.add(uid)
-                            if did_not_run(block) or (uid in stamp_ids and block.get("is_error") is True):
+                            if did_not_run(block) or (
+                                uid in stamp_ids and block.get("is_error") is True and uid not in stamped_repo
+                            ):
                                 never_ran.add(uid)
                         continue
                     if block.get("type") != "tool_use" or (current and block.get("id") == current):
@@ -1708,7 +1735,7 @@ def reviewed_for(
                         stamps = stamp_calls(text, str(record.get("cwd") or ""), powershell)
                         if found or stamps:
                             spent = {pr_key(tokens, scoped(where)) for tokens, where in found}
-                            spent |= {(STAMPED, number.lstrip("#")) for _, _, number in stamps}
+                            spent |= {(STAMPED, s.number.lstrip("#")) for s in stamps}
                             events.append((uid, spent, text))
                             merge_ids.add(uid)
                             if not found:
@@ -1731,7 +1758,15 @@ def reviewed_for(
     for uid, merged, _ in events:
         if merged is None:
             reviewed = reviewed or not finished or uid in done
-        elif uid not in never_ran and {k for k in merged if not (k[0] == STAMPED and k[1] in numbers)} - keys:
+        elif (
+            uid not in never_ran
+            and {
+                k
+                for k in merged
+                if not (k[0] == STAMPED and k[1] in numbers and repo and stamped_repo.get(uid) == repo)
+            }
+            - keys
+        ):
             reviewed = False  # another PR's merge or stamp may have run: this one needs a review of its own
     return reviewed
 
@@ -1832,15 +1867,16 @@ def merge_verdict(
         the session: held, with the shape to use - unless this session reviewed the PR itself, as before.
       * in any other mode no allow is printed (a prompt, or none at all), so the call must carry the pin itself.
     """
-    stamped: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str, str]] = []
     held = check_merge(command, transcript, current, cwd, powershell, stamped)
     if held or not stamped:
         return held, None
-    reason, sha = stamped[0]
+    reason, sha, repo = stamped[0]
     allow = pinned_allow(command, powershell, sha, reason)
     if mode == "auto" and allow is not None:
         return None, allow
-    own = bool(transcript) and reviewed_for(Path(transcript), current, merges_in(command, cwd, powershell), command)
+    found = merges_in(command, cwd, powershell)
+    own = bool(transcript) and reviewed_for(Path(transcript), current, found, command, False, repo)
     if own is True:
         return None, None
     if mode == "auto":
@@ -1874,7 +1910,7 @@ def check_merge(
     current: str = "",
     cwd: str = "",
     powershell: bool = False,
-    stamped: list[tuple[str, str]] | None = None,
+    stamped: list[tuple[str, str, str]] | None = None,
 ) -> str | None:
     """The block message for a merge auto mode would refuse - in a call that does not parse cleanly, chained,
     through the API, into a merged base, or unreviewed - else None. A review stamp for the PR's current head and
@@ -1900,6 +1936,9 @@ def check_merge(
     here = next((at for tokens, at in located(command, cwd, powershell) if is_merge(tokens)), None)
     status = ""
     target = pr_target(found[0][0], found[0][1], native_dir(here)) if found else None
+    if here is not None and native_dir(here) is None:
+        target = None  # a directory no subprocess can enter: gh would answer for wherever the hook runs
+    repo = target[1] if target else None
     module = pr_state() if target else None
     if module is not None and target is not None:
         pr = module.view(*target)
@@ -1908,6 +1947,7 @@ def check_merge(
         if pr is None:
             notice(f"gh cannot read PR {target[0]} - no review stamp or merged-base check for this merge")
         elif pr.state == "OPEN":
+            repo = pr.repo
             why = module.stale_base(pr, target[2], homes_branches())
             for note in module.drain_notes():
                 notice(note)
@@ -1918,12 +1958,12 @@ def check_merge(
                 ok, status = False, f"{status} - not for `--auto` / `--admin`, which could merge later commits"
             if ok:
                 if stamped is not None:
-                    stamped.append((f"guard-shared-checkouts: review stamp - {status}", pr.head))
+                    stamped.append((f"guard-shared-checkouts: review stamp - {status}", pr.head, pr.repo))
                 return None
     if not transcript:
         notice("no transcript_path in the payload - the merge goes unchecked")
         return None
-    if reviewed_for(Path(transcript), current, found, command) is False:
+    if reviewed_for(Path(transcript), current, found, command, False, repo) is False:
         return MERGE_UNREVIEWED + (f" Recorded: {status}." if status else "")
     return None
 
@@ -1964,10 +2004,22 @@ def check_pr_create(command: str, cwd: str, powershell: bool = False) -> str | N
 STAMP_VALUE_FLAGS = ("-R", "--repo", "--tests")
 
 
-def stamp_calls(command: str, cwd: str, powershell: bool = False) -> list[tuple[list[str], str, str]]:
-    """Each `pr-state.py reviewed <n>` in a call: (the `gh pr merge` it stands for, its directory key, <n> as
-    written). The stamp spends a review exactly as a merge of <n> would."""
-    found: list[tuple[list[str], str, str]] = []
+class Stamp(NamedTuple):
+    merge: list[str]  # the `gh pr merge` it stands for
+    where: str  # its directory, as pr_key() scopes it
+    number: str  # <n> as written
+    here: PureWindowsPath | None  # its directory
+    repo: str  # `-R owner/repo` as written, else ""
+
+
+def is_stamp(tokens: list[str]) -> bool:
+    at = next((i for i, t in enumerate(tokens) if t.replace("\\", "/").endswith("pr-state.py")), None)
+    return at is not None and tokens[at + 1 : at + 2] == ["reviewed"]
+
+
+def stamp_calls(command: str, cwd: str, powershell: bool = False) -> list[Stamp]:
+    """Each `pr-state.py reviewed <n>` in a call."""
+    found: list[Stamp] = []
     for tokens, here in located(command, cwd, powershell):
         at = next((i for i, t in enumerate(tokens) if t.replace("\\", "/").endswith("pr-state.py")), None)
         if at is None or tokens[at + 1 : at + 2] != ["reviewed"]:
@@ -1983,7 +2035,7 @@ def stamp_calls(command: str, cwd: str, powershell: bool = False) -> list[tuple[
             i += 1
         repo = option_value(rest, "-R", "--repo")
         merge = ["gh", "pr", "merge", number.lstrip("#"), *(["-R", repo] if repo else [])]
-        found.append((merge, str(here).lower() if here else "?", number))
+        found.append(Stamp(merge, str(here).lower() if here else "?", number, here, repo or ""))
     return found
 
 
@@ -1996,14 +2048,24 @@ def check_stamp(
     stamps = stamp_calls(command, cwd, powershell)
     if not stamps:
         return None
-    if len(stamps) > 1 or not re.fullmatch(r"#?\d+", stamps[0][2]):
+    if len(stamps) > 1 or not re.fullmatch(r"#?\d+", stamps[0].number):
         return STAMP_ONE
-    merge, where, number = stamps[0]
+    stamp = stamps[0]
+    if any(not is_stamp(t) and t[0].lower() not in CD_COMMANDS for t in segments(command, powershell)):
+        return STAMP_ALONE.format(number=stamp.number)
     if not transcript:
-        return STAMP_UNREVIEWED.format(number=number) + " (No transcript to read the review from.)"
-    if reviewed_for(Path(transcript), current, [(merge, where)], "", finished=True) is not True:
-        return STAMP_UNREVIEWED.format(number=number)
+        return STAMP_UNREVIEWED.format(number=stamp.number) + " (No transcript to read the review from.)"
+    repo = stamp.repo.lower() or origin_repo(stamp.here)
+    if reviewed_for(Path(transcript), current, [(stamp.merge, stamp.where)], "", True, repo) is not True:
+        return STAMP_UNREVIEWED.format(number=stamp.number)
     return None
+
+
+def origin_repo(here: PureWindowsPath | None) -> str | None:
+    """owner/repo (lower case) of the GitHub origin of the checkout at `here`, else None."""
+    url = git_out(here, time.monotonic() + GIT_TIMEOUT, "remote", "get-url", "origin") if here is not None else None
+    found = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url or "")
+    return found.group(1).lower() if found else None
 
 
 def records_path() -> Path:
