@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply",
+            "command": "python3 \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply --hook",
             "async": true
           }
         ]

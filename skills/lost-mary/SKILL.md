@@ -60,15 +60,25 @@ word", a `Remaining:` list - is bounced by the Stop hook and the turn continues.
 | A change you will not make yourself | `implement`, with the spawn block below |
 | A bug whose cause is unclear | `implement` with a reproduce-first brief: reproduce, find the root cause, smallest fix, keep the reproduction as the regression test |
 | Want an independent check before merge, or a trust boundary is touched | `review` - paste it the `git diff`; it cannot run anything |
-| Genuinely separable scopes with concurrent writes | several `implement`, disjoint `OWNED`, each `isolation: worktree` - see the caveat below |
+| Genuinely separable scopes with concurrent writes | several `implement` in the task's one worktree, disjoint `OWNED`, each brief naming that path; `isolation: worktree` only when two must run checks on overlapping files at once - see the caveat below |
 | Several implementers that must coordinate while running (a shared task list, messages between them) | an Agent Team; every teammate gets the spawn block below. Hooks cannot see a teammate's transcript (`TaskCompleted` / `TeammateIdle` carry names only), so the evidence gate is you re-running the decisive check - never a teammate's report |
-| A defect found along the way, outside the current scope | never park it: fix it in place if it is a few lines, otherwise a second `implement` with its own `OWNED` and `isolation: worktree`, gated like the main change |
+| A defect found along the way, outside the current scope | never park it: fix it in place if it is a few lines, otherwise a second `implement` with its own `OWNED` on the task's branch (its own branch only when it is unrelated to the task), gated like the main change |
 
 `isolation: worktree` needs the session cwd inside a git repository (at a
 multi-repo workspace root it fails: spawn with the package as cwd instead), and
 it branches from the repository's default branch unless `worktree.baseRef` is
 `head` - check which one the task needs. If neither works, run the
-implementers one at a time in the shared checkout.
+implementers one at a time in the task's worktree.
+
+**One task: one branch, one worktree, one PR.** Reuse the worktree the task
+already has (`git -C <repo> worktree list`), else add one
+(`git -C <repo> worktree add <repo>_wt_<task> -b <task>`). Every implementer
+works and tests in it, so all of them test against the same tree, and the
+pieces land there as commits, not as PRs of their own. A task too big for
+one PR makes its branch an integration branch: open its PR into main early as
+a draft; sub-PRs target it while that PR is open - never a branch whose PR
+has merged (the guard holds that merge). The guard caps the worktrees one
+session holds per repository (`max_worktrees`, default 2): reuse, or finish one.
 
 Add an agent only to remove a risk you can name. Reassess after each result.
 `explore`, `review` and `implement` never join a team: the spawn hook drops
@@ -89,7 +99,7 @@ present, is shown at session start
 OWNED:        globs this agent may change                     (required)
 OFF-LIMITS:   globs it must not touch                          (required)
 DONE MEANS:   <the predicate from step 1>                      (required)
-VALIDATION:   exact commands to run (from the project's CLAUDE.md)  (required)
+VALIDATION:   exact commands to run - the quick tier, step 4    (required)
 GOAL / SCOPE / DEPENDS ON:  when they add information beyond the task text
 REPORT:       CHANGED / RAN / DONE MEANS / RISKS
 ```
@@ -108,10 +118,23 @@ whether a truthful report means the predicate holds.
 A failed or partial second attempt means re-plan - smaller scope, `explore`
 first - never respawn the same prompt.
 
-Hand `review` the diff when the change is more than trivial or touches a
-boundary. Findings at HIGH or above are resolved before "done". A PR is
-reviewed before its first `gh pr merge`, and the merge runs in its own
-call: the guard hook holds back any other merge, because an auto-mode
+**Two test tiers.** After each step, the quick tier: lint and type check on
+the changed files plus the unit tests that cover them -
+`python ~/.claude/agent-library/scripts/test-scope.py --cmd` prints that
+pytest line (exit 3: none match, run the touched package's test root). The
+full suite runs once, on the finished branch, before its PR into main merges.
+A project's `CLAUDE.md` naming its own quick / full commands wins.
+
+**One review per PR.** Hand `review` the PR's whole diff
+(`git diff <base>...HEAD`) once, when the branch is complete - not after each
+implementer. Findings at HIGH or above are resolved before "done". Then, with
+the fixes pushed, record it from the PR branch's worktree:
+`python ~/.claude/agent-library/scripts/pr-state.py reviewed <n> --tests full`
+(the guard lets that run only once a review in this session has finished;
+one review covers one PR). Any session
+may then merge the PR while its head is the commit stamped; a later push
+voids it. `pr-state.py status <n>` shows head, stamp and base. The merge runs
+in its own call: the guard holds back any other merge, because an auto-mode
 refusal latches the session.
 
 ## 5. Close
@@ -123,7 +146,8 @@ finding is fixed, in flight under a named agent or branch, or has a failing
 test committed for it. No agent transcripts. The last line is `DONE:`,
 `IN FLIGHT:` or `BLOCKED:`. If the branch is meant to become a pull request, `/pr` opens it
 with the account that owns the repository and carries those results into the
-body. Once it merges, leave nothing on the branch: remove the worktree, or
+body. Handing a PR to another session to merge: stamp it first and name the
+PR number. Once it merges, leave nothing on the branch: remove the worktree, or
 return the checkout to its home branch, the default one or the one the guard's
 `homes` declares
 (`git fetch origin <b>:<b>`, then `git switch <b>` in a call of its own - the

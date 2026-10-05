@@ -55,6 +55,8 @@ jobs:
         run: python tests/test-hooks.py
       - name: Stale-worktree pruner keeps everything not provably safe
         run: python tests/test-prune-worktrees.py
+      - name: Quick-tier selector picks the tests that cover a change
+        run: python tests/test-test-scope.py
       - name: Hooks survive a Windows PowerShell 5.1 pipe (UTF-8 BOM)
         # Windows PowerShell 5.1 (the default shell on the maintainer's machine)
         # writes a BOM with -Encoding utf8 and prepends one when piping to a

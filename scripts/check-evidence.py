@@ -198,6 +198,8 @@ def classify(command: str) -> list[tuple[str, str]]:
         if m:
             tool, rest = m.group(1).lower(), m.group(2)
         elif m := PYTHON_SCRIPT.match(segment):
+            if m.group("script").lower().replace("\\", "/").rsplit("/", 1)[-1] == "test-scope.py":
+                continue  # the library's quick-tier selector only prints test paths: no test ran
             tool = "pycheck.py" if m.group("script").lower().endswith("pycheck.py") else "test-script"
             rest = m.group("rest")
         else:

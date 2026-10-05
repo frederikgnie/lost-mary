@@ -17,7 +17,7 @@ Config, read on every call (no restart): `$LOST_MARY_SHARED_CHECKOUTS`, else
 shared-checkouts.example.json in the library repository):
 
   {"shared": [dirs], "frozen": [dirs], "frozen_by": "path, optional",
-   "homes": {"dir": "branch", optional}}
+   "homes": {"dir": "branch", optional}, "max_worktrees": 2}
 
   shared  - checkouts several sessions use at once. Blocked there: `switch`,
             a branch-changing `checkout` (file restores are fine), `stash`
@@ -41,6 +41,14 @@ shared-checkouts.example.json in the library repository):
             Running the deploy script is fine - only `git` invocations are
             inspected.
   frozen_by - the deploy script, named in the block message.
+  max_worktrees - optional, default 2: `git worktree add` is held for a
+            session that already has that many worktrees of its own in the
+            repository - ones its transcript added that git still lists,
+            detached ones included; frozen ones and Claude's
+            `.claude/worktrees/` ones do not count. Per session, so one
+            session's worktrees never hold another's work. One task, one
+            worktree: implementers share it. No transcript_path: no cap.
+            LOST_MARY_GUARD_WORKTREE_CAP=off lifts it.
 
 A target matches a configured dir when it is that dir or lies inside it by
 path components (`X_wt_y` is not inside `X`). The working dir is tracked
@@ -118,6 +126,51 @@ subagent is
 judged against whatever transcript its hook is given. An unreadable
 transcript lets the merge through, with a notice.
 
+Review stamps and merged bases (scripts/pr-state.py, loaded by path; gh
+answers with the active account, every gh call of one run inside GH_BUDGET).
+A merge that names a literal PR asks gh for its head and base.
+  * A merged base holds the merge, and `gh pr create --base` it: a feature
+    branch with a MERGED PR (same repository), none OPEN, whose tip on origin
+    (the local `origin/<b>` ref of a clone of that repository) is still the
+    head that merged - so nothing will merge it again and the commits never
+    reach the default branch. Never: origin/HEAD's branch, main / master /
+    develop / dev / trunk / staging / qa / integration / release-* /
+    hotfix-*, a `homes` branch, a branch that took commits after its merge.
+  * A stamp in reviews.jsonl for the PR's current head and base stands in
+    for a review in this session - whichever session reviewed it. Not for
+    `--auto` or `--admin` (`=true` too), which could merge later commits; a
+    push or a retarget after the stamp voids it - for other sessions: within
+    one session the review that covered the PR covers it again after a fix
+    is pushed, until a merge or stamp of another PR spends it.
+    In auto mode (the payload's permission_mode) a stamped merge alone in its
+    call (a cd before it at most) and ending it is answered with
+    `permissionDecision: "allow"` and `updatedInput` appending
+    `--match-head-commit <stamped sha>` - the rewritten call parsed again to
+    be sure the flag reaches gh. The decision takes precedence over the
+    auto-mode classifier (docs, hooks-guide) - the user's allow rule covers
+    only a PR the session opened - and GitHub refuses the merge if the head
+    moved after this check. Any other shape of a merge resting on a stamp
+    alone is held in auto mode: it would reach the classifier unpinned and be
+    refused, latching the session. Outside auto mode no allow is printed, and
+    such a merge must carry `--match-head-commit <stamped sha>` itself.
+  * `pr-state.py reviewed <n>` is held unless it names one literal PR and a
+    `review` spawned in this session has FINISHED (its record's
+    `toolUseResult.status` is "completed", or its completion notice came)
+    since the session's last merge or stamp of another PR, and it stands
+    alone in its call (a cd before it at most), so its exit code is
+    pr-state's. A stamp spends the review for every PR but the one its
+    result names (`recorded: owner/repo#n`) - matched by repository, from gh,
+    `-R` or the clone's origin, wherever either ran; a result naming none
+    spends it for all; a failed one (an error result without that line)
+    wrote nothing and spends nothing. No transcript: held.
+  * A hand-made write to the stamp file (Edit/Write of that path, or a
+    redirect / tee / Add-Content / copy onto it) is held - a speed bump.
+No gh answer, LOST_MARY_NO_GH=1 or LOST_MARY_GUARD_REVIEW_RECORD=off: no
+stamp is read and no base checked - the session's own review decides; a
+lookup skipped for lack of time says so on stderr. On POSIX a cwd under a
+one-letter top-level directory (`/t/x`) reads as a drive, as in Git Bash:
+gh then runs where the hook runs and no merged base is judged.
+
 `python scripts/replay-merges.py` replays every merge call in the local
 transcripts through this check, each against its transcript cut at the call;
 the reading of 2026-09-25 is in capabilities.md.
@@ -138,6 +191,7 @@ Runtime dependencies (see capabilities.md): PreToolUse stdin fields
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import json
 import os
@@ -197,7 +251,55 @@ MERGE_UNREVIEWED = (
     "Auto mode refuses "
     "this merge as [Merge Without Review], and after that refusal it refuses the follow-ups as well - even "
     "`git diff` for the reviewer. So first: spawn `review` with the PR's `git diff`, fix what it finds, run the "
-    "project's checks. Then run the same `gh pr merge` again, in its own call."
+    "project's checks. Then run the same `gh pr merge` again, in its own call. Or, when another session reviewed "
+    "this PR, that session records it: `python ~/.claude/agent-library/scripts/pr-state.py reviewed <n>` in the "
+    "PR's worktree - then any session may merge it while the head is the one reviewed."
+)
+REVIEW_RECORD_VAR = "LOST_MARY_GUARD_REVIEW_RECORD"  # "off": no stamp lookup, no merged-base check (no gh call)
+MERGE_STALE_BASE = "guard-shared-checkouts: held `gh pr merge {number}` - its base {why}."
+CREATE_STALE_BASE = (
+    "guard-shared-checkouts: held `gh pr create --base {base}` - {why}. Open the PR against {into} instead, or "
+    "against an integration branch whose own PR is still open."
+)
+GH_BUDGET = 4.0  # seconds for every gh call of one hook run: the hook's timeout is 10 s
+GH_DEADLINE: float | None = None  # set by main(); None (in-process callers, tests) = GH_TIMEOUT per call only
+STAMPED = "\x00stamp"  # the repository slot of a stamp event's key in reviewed_for: stamps spend by PR number
+STAMP_SHAPE = (
+    "guard-shared-checkouts: held - this merge rests on another session's review stamp ({reason}), and auto mode "
+    "lets it through only pinned to that head. Run the merge alone in its call - a `cd` before it at most, nothing "
+    "after it: no pipe, redirect, `&&` or comment - and the guard adds `--match-head-commit {sha}` and allows it. "
+    "Any other shape reaches the auto-mode classifier as an unreviewed merge of a PR this session did not open."
+)
+STAMP_PIN = (
+    "guard-shared-checkouts: held - this merge rests on another session's review stamp, and outside auto mode nothing "
+    "pins it to the reviewed head: add `--match-head-commit {sha}` to the `gh pr merge`, so a push after the review "
+    "makes GitHub refuse it instead of merging unreviewed commits."
+)
+RECORDED = re.compile(r"recorded: ([^\s#]+/[^\s#]+)#(?P<n>\d+) reviewed at")  # pr-state's success line
+STAMP_ALONE = (
+    "guard-shared-checkouts: held - run `pr-state.py reviewed {number}` alone in its call (a `cd` before it at "
+    "most): its exit code is how the guard tells a written stamp from one that failed."
+)
+STAMP_ONE = (
+    "guard-shared-checkouts: held - record one review per call, by its literal PR number: "
+    "`python ~/.claude/agent-library/scripts/pr-state.py reviewed <n>`. One review covers one PR."
+)
+STAMP_UNREVIEWED = (
+    "guard-shared-checkouts: held `pr-state.py reviewed {number}` - no `review` agent has finished in this session "
+    "since its last merge or stamp of another PR, so there is no review to record. Spawn `review` with the PR's "
+    "whole diff (`git diff <base>...HEAD`), wait for its report, fix what it finds, push, then record it."
+)
+RECORD_WRITE = (
+    "guard-shared-checkouts: held - {name} is written only by `pr-state.py reviewed`, which the guard lets run "
+    "after a review in this session. A hand-made line would let another session merge an unreviewed PR."
+)
+CAP_VAR = "LOST_MARY_GUARD_WORKTREE_CAP"  # "off": no limit on `git worktree add`
+MAX_WORKTREES = 2  # worktrees one session may hold per repository: its task's, and one for an unrelated fix
+WORKTREE_CAP = (
+    "guard-shared-checkouts: held `git worktree add` - this session already has {count} worktrees of its own in "
+    "{repo} (max_worktrees {cap}):\n{listing}\nOne worktree per task, not per agent or per fix: do this work in the "
+    "one for your task - implementers share it, on disjoint files - or finish one: once its PR merges, `git -C "
+    "{repo} worktree remove <that path>`. Only this session's worktrees count; never touch another session's."
 )
 # What may share a call with a merge: moving into the checkout, trimming output, reading state, syncing
 # afterwards. Anything else - a push, a commit, `gh pr create`, a loop, an unknown program - holds it back.
@@ -328,6 +430,7 @@ class Config(NamedTuple):
     frozen: list[Dir]
     frozen_by: str | None
     homes: dict[tuple[str, ...], str] = {}
+    max_worktrees: int = MAX_WORKTREES
 
 
 def notice(text: str) -> None:
@@ -402,8 +505,12 @@ def parse_config(raw: object) -> Config | str:
     frozen_by = raw.get("frozen_by")
     if frozen_by is not None and not isinstance(frozen_by, str):
         return '"frozen_by" is not a string'
+    cap = raw.get("max_worktrees", MAX_WORKTREES)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        notice(f'"max_worktrees" {cap!r} is not a positive integer - using {MAX_WORKTREES}')
+        cap = MAX_WORKTREES
     return Config(
-        lists["shared"], lists["frozen"], frozen_by or None, parse_homes(raw.get("homes", {}), lists["shared"])
+        lists["shared"], lists["frozen"], frozen_by or None, parse_homes(raw.get("homes", {}), lists["shared"]), cap
     )
 
 
@@ -1257,13 +1364,93 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None, home: st
         return False
 
 
+WORKTREE_ADD = re.compile(r"worktree(?:\s|\\[nt])+add")  # in a JSON line: a space, tab, or escaped newline
+WORKTREE_ADD_VALUE_FLAGS = ("-b", "-B", "--reason")
+
+
+def added_worktree(call: Call) -> PureWindowsPath | None:
+    """The path a `git worktree add` call creates, resolved against the directory it runs in, else None."""
+    if call.args[:2] != ("worktree", "add"):
+        return None
+    rest = list(call.args[2:])
+    i = 0
+    while i < len(rest):
+        if rest[i] in WORKTREE_ADD_VALUE_FLAGS:
+            i += 2
+        elif rest[i].startswith("-"):
+            i += 1
+        else:
+            return norm(rest[i], call.target)
+    return None
+
+
+def session_worktrees(transcript: str) -> set[tuple[str, ...]]:
+    """Every worktree path this session's transcript added with `git worktree add` (by key_of)."""
+    mine: set[tuple[str, ...]] = set()
+    try:
+        with Path(transcript).open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not WORKTREE_ADD.search(line) or '"tool_use"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = record.get("message") if isinstance(record, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict) or block.get("name") not in SHELL_TOOLS:
+                        continue
+                    text = str((block.get("input") or {}).get("command") or "")
+                    for tokens, here in located(text, str(record.get("cwd") or ""), block.get("name") == "PowerShell"):
+                        call = repo_call(tokens, here)
+                        if call is not None and (made := added_worktree(call)) is not None:
+                            mine.add(key_of(made))
+    except OSError as exc:
+        notice(f"cannot read the transcript {transcript} ({exc}) - no worktree cap")
+    return mine
+
+
+def worktrees_full(target: PureWindowsPath | None, config: Config, transcript: str = "") -> str | None:
+    """The block message for a `git worktree add` by a session that already has `max_worktrees` worktrees of its
+    own in this repository - ones its transcript added that git still lists - else None. Per session, so one
+    session's worktrees never hold another's work. Frozen ones and Claude's `.claude/worktrees/` ones do not
+    count. No transcript, or any git failure: room."""
+    if target is None or not transcript or os.environ.get(CAP_VAR, "").lower() == "off":
+        return None
+    listing = git_out(target, time.monotonic() + HOME_BUDGET, "worktree", "list", "--porcelain")
+    if listing is None:
+        return None
+    mine = session_worktrees(transcript)
+    entries = [block.splitlines() for block in listing.replace("\r\n", "\n").strip().split("\n\n") if block]
+    counted: list[str] = []
+    main = ""
+    for i, lines in enumerate(entries):
+        path = next((ln[len("worktree ") :] for ln in lines if ln.startswith("worktree ")), "")
+        branch = next((ln[len("branch refs/heads/") :] for ln in lines if ln.startswith("branch refs/heads/")), "")
+        if i == 0:
+            main = path
+            continue
+        where = norm(path)
+        if where is None or match(where, config.frozen) or ".claude" in key_of(where):
+            continue
+        if key_of(where) in mine:
+            counted.append(f"  {path}  [{branch or 'detached'}]")
+    if len(counted) < config.max_worktrees:
+        return None
+    return WORKTREE_CAP.format(
+        repo=main or target, count=len(counted), cap=config.max_worktrees, listing="\n".join(counted)
+    )
+
+
 def frozen_reason(what: str, where: Dir, config: Config) -> str:
     via = f" only {config.frozen_by} may change it" if config.frozen_by else " only its deploy script may change it"
     return f"guard-shared-checkouts: blocked {what} - {where.shown} is a frozen tree the live jobs run;{via}."
 
 
-def check_command(command: str, cwd: str, config: Config, powershell: bool = False) -> str | None:
-    """A block reason for a Bash/PowerShell command, or None to allow it.
+def check_command(command: str, cwd: str, config: Config, powershell: bool = False, transcript: str = "") -> str | None:
+    """A block reason for a Bash/PowerShell command, or None to allow it. `transcript` (the session's) is read
+    only for the worktree cap.
 
     An unclear() call is also read naively (naive_located), so a command the careful scan hid is still seen.
     """
@@ -1277,6 +1464,8 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
         reason = None
         if where := match(call.target, config.frozen):
             reason = frozen_reason(f"`{call.label}` in {call.target}", where, config)
+        elif call.args[:2] == ("worktree", "add"):
+            reason = worktrees_full(call.target, config, transcript)
         elif (
             (where := match(call.target, config.shared))
             and call.changes_shared
@@ -1295,7 +1484,8 @@ def check_command(command: str, cwd: str, config: Config, powershell: bool = Fal
             reason = (
                 f"guard-shared-checkouts: blocked `{call.label}` in {call.target} - {where.shown} is a checkout "
                 f"other sessions use at the same time, and changing its branch or stash moves their work too. "
-                f"Work on a branch in your own worktree: git -C {base} worktree add {base}_wt_<name> -b <branch>"
+                f"Work on a branch in your own worktree - the one your task already has (`git -C {base} worktree "
+                f"list`), else: git -C {base} worktree add {base}_wt_<name> -b <branch>"
                 f"{call.hint}{home}"
             )
         if reason:
@@ -1436,7 +1626,14 @@ def merges_in(command: str, cwd: str, powershell: bool = False) -> list[tuple[li
     ]
 
 
-def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], str]], command: str = "") -> bool | None:
+def reviewed_for(
+    transcript: Path,
+    current: str,
+    merges: list[tuple[list[str], str]],
+    command: str = "",
+    finished: bool = False,
+    repo: str | None = None,
+) -> bool | None:
     """Whether a `review` was spawned in the session after the last merge of another PR that may have run.
 
     The review counts for the PR it precedes. A retry of the same PR (`keys` are this merge's) never spends it -
@@ -1448,6 +1645,14 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
     call's tool_use_id; the transcript may already hold the call - without an id, the last merge call with this
     `command` and no result yet is taken to be it. A `gh repo set-default` changes what a bare number names, so a
     number before it and the same number after it are two PRs. `merges` are this call's, with their directories.
+    A `pr-state.py reviewed <n>` stamp spends the review for every PR but the one it recorded - <n> of the
+    repository its result names (`recorded: owner/repo#n`), matched against `repo`, the current PR's (owner/repo,
+    lower case) - wherever either ran and however the PR is named. A stamp whose result names nothing spends it
+    for every PR; one that failed (an error result without that line: pr-state wrote nothing) spends nothing. It
+    runs alone in its call (check_stamp), so its exit code is pr-state's: one review, one PR.
+    With `finished`, a review counts only once it is done - its record's `toolUseResult.status` is "completed"
+    (a background launch says "async_launched"), or a later `<task-notification>` names its tool-use id with
+    `<status>completed</status>`.
     None if the transcript cannot be read.
     """
     epoch = 0
@@ -1459,6 +1664,10 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
     never_ran: set[str] = set()
     answered: set[str] = set()  # merge calls with a result
     merge_ids: set[str] = set()
+    stamp_ids: set[str] = set()  # calls holding only stamps
+    stamped_repo: dict[str, str] = {}  # stamp call -> the repository its `recorded:` line names
+    review_ids: set[str] = set()
+    done: set[str] = set()  # reviews that finished
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -1468,9 +1677,15 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
                     "subagent_type" in line
                     or "merg" in line.lower()
                     or "set-default" in line
+                    or "pr-state" in line
+                    or (stamp_ids and any(uid in line for uid in stamp_ids))
                     or (merge_ids and '"tool_result"' in line and any(uid in line for uid in merge_ids))
+                    or (review_ids and any(uid in line for uid in review_ids))
                 ):
                     continue
+                for uid in review_ids - done:
+                    if f"<tool-use-id>{uid}</tool-use-id>" in line and "<status>completed</status>" in line:
+                        done.add(uid)
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
@@ -1484,6 +1699,22 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
                         continue
                     if block.get("type") == "tool_result":
                         uid = str(block.get("tool_use_id"))
+                        result = record.get("toolUseResult")
+                        if (
+                            uid in review_ids
+                            and block.get("is_error") is not True
+                            and isinstance(result, dict)
+                            and result.get("status") == "completed"
+                        ):
+                            done.add(uid)
+                        if uid in stamp_ids:
+                            raw = block.get("content")
+                            if isinstance(raw, list):
+                                raw = " ".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
+                            if wrote := RECORDED.search(str(raw or "")):
+                                stamped_repo[uid] = wrote.group(1).lower()
+                            elif block.get("is_error") is True or "pr-state: " in str(raw or ""):
+                                never_ran.add(uid)  # no `recorded:` line, and pr-state's own failure: not written
                         if uid in merge_ids:
                             answered.add(uid)
                             if did_not_run(block):
@@ -1497,13 +1728,19 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
                     uid = str(block.get("id"))
                     if block.get("name") in ("Agent", "Task") and is_review_role(tool_input.get("subagent_type")):
                         events.append((uid, None, ""))
+                        review_ids.add(uid)
                     elif block.get("name") in SHELL_TOOLS:
                         text = str(tool_input.get("command") or "")
                         powershell = block.get("name") == "PowerShell"
                         found = merges_in(text, str(record.get("cwd") or ""), powershell)
-                        if found:
-                            events.append((uid, {pr_key(tokens, scoped(where)) for tokens, where in found}, text))
+                        stamps = stamp_calls(text, str(record.get("cwd") or ""), powershell)
+                        if found or stamps:
+                            spent = {pr_key(tokens, scoped(where)) for tokens, where in found}
+                            spent |= {(STAMPED, s.number.lstrip("#")) for s in stamps}
+                            events.append((uid, spent, text))
                             merge_ids.add(uid)
+                            if not found:
+                                stamp_ids.add(uid)
                         if any(
                             (gh_args(t) or [])[:2] == ["repo", "set-default"] and not {"-v", "--view"} & set(t)
                             for t in segments(text, powershell)
@@ -1517,12 +1754,21 @@ def reviewed_for(transcript: Path, current: str, merges: list[tuple[list[str], s
         mine = [e for e in events if e[1] is not None and e[2] == command and e[0] not in answered]
         if mine:
             events.remove(mine[-1])
+    numbers = {number for _, number in keys}
     reviewed = False
     for uid, merged, _ in events:
         if merged is None:
-            reviewed = True
-        elif uid not in never_ran and merged - keys:
-            reviewed = False  # another PR's merge may have run: this one needs a review of its own
+            reviewed = reviewed or not finished or uid in done
+        elif (
+            uid not in never_ran
+            and {
+                k
+                for k in merged
+                if not (k[0] == STAMPED and k[1] in numbers and repo and stamped_repo.get(uid) == repo)
+            }
+            - keys
+        ):
+            reviewed = False  # another PR's merge or stamp may have run: this one needs a review of its own
     return reviewed
 
 
@@ -1557,11 +1803,120 @@ def harmless(tokens: list[str], powershell: bool = False) -> bool:
     return args[0] not in GIT_MOVES or not any(a in GIT_RISKY or a.startswith("--force") for a in args[1:])
 
 
+PR_STATE: Any = None
+
+
+def pr_state() -> Any:
+    """scripts/pr-state.py by path (it owns the review stamps and the gh lookups), or None when it is off or
+    missing - then only the session's own review counts, as before it existed. Every gh call of one hook run
+    shares the deadline main() sets (GH_BUDGET, well inside the hook's 10 s timeout)."""
+    global PR_STATE
+    if os.environ.get(REVIEW_RECORD_VAR, "").lower() == "off" or os.environ.get("LOST_MARY_NO_GH") == "1":
+        return None
+    if PR_STATE is None:
+        path = Path(__file__).with_name("pr-state.py")
+        spec = importlib.util.spec_from_file_location("pr_state", path)
+        if spec is None or spec.loader is None or not path.exists():
+            notice(f"cannot load {path} - review stamps are not read")
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["pr_state"] = module
+        spec.loader.exec_module(module)
+        PR_STATE = module
+    loaded: Any = PR_STATE
+    loaded.DEADLINE = GH_DEADLINE
+    return loaded
+
+
+def pr_target(tokens: list[str], where: str, native: str | None) -> tuple[str, str | None, str | None] | None:
+    """(number, repository or None, the directory gh runs in) for a merge naming a literal PR, else None.
+    `where` is the lowercased key pr_key() scopes by; `native` the same directory as the OS spells it."""
+    repo, number = pr_key(tokens, where)
+    if repo == "?":
+        return None
+    return (number, None if repo.startswith("@") else repo, native)
+
+
+def native_dir(path: PureWindowsPath | None) -> str | None:
+    """A directory a subprocess can run in: `C:/x` on Windows, `/tmp/x` on POSIX (norm() keeps POSIX roots). None
+    on POSIX for a path norm() read as a Windows drive (`/t/x`, Git Bash's spelling of T:) - it names nothing."""
+    if path is None or (os.name != "nt" and path.drive):
+        return None
+    return path.as_posix()
+
+
+def homes_branches() -> frozenset[str]:
+    """The branches the config's `homes` declares: long-lived by the user's word, so never a "merged base"."""
+    config = load_config()
+    return frozenset(config.homes.values()) if config else frozenset()
+
+
+class Allow(NamedTuple):
+    reason: str
+    command: str  # the call as it will run: pinned to the stamped head with --match-head-commit
+
+
+def merge_verdict(
+    command: str, transcript: str, current: str = "", cwd: str = "", powershell: bool = False, mode: str = ""
+) -> tuple[str | None, Allow | None]:
+    """(block message, allow) for a call. A merge auto mode would refuse - unclear, chained, through the API, into
+    a merged base, or unreviewed - is held. A merge whose PR carries a review stamp for its current head:
+      * in auto mode (`mode`, the payload's permission_mode) it is answered with an allow pinned to the stamped
+        head - `--match-head-commit <sha>` appended, so a push between this check and the merge makes GitHub
+        refuse it - when it stands alone (a `cd` before it at most) and ends the call. Any other shape would
+        reach the classifier as an unreviewed merge of a PR this session did not open, be refused, and latch
+        the session: held, with the shape to use - unless this session reviewed the PR itself, as before.
+      * in any other mode no allow is printed (a prompt, or none at all), so the call must carry the pin itself.
+    """
+    stamped: list[tuple[str, str, str]] = []
+    held = check_merge(command, transcript, current, cwd, powershell, stamped)
+    if held or not stamped:
+        return held, None
+    reason, sha, repo = stamped[0]
+    allow = pinned_allow(command, powershell, sha, reason)
+    if mode == "auto" and allow is not None:
+        return None, allow
+    found = merges_in(command, cwd, powershell)
+    own = bool(transcript) and reviewed_for(Path(transcript), current, found, command, False, repo)
+    if own is True:
+        return None, None
+    if mode == "auto":
+        return STAMP_SHAPE.format(reason=reason.split(" - ", 1)[-1], sha=sha), None
+    merge = next(t for t in segments(command, powershell) if is_merge(t))
+    pinned = option_value(gh_args(merge) or [], "--match-head-commit")
+    return (None, None) if pinned is not None and pinned.lower() == sha else (STAMP_PIN.format(sha=sha), None)
+
+
+def pinned_allow(command: str, powershell: bool, sha: str, reason: str) -> Allow | None:
+    """The allow for a merge that stands alone and ends the call, as it will run: pinned to `sha`. None for any
+    other shape, for a call pinned to another head, and when appending the flag would not reach gh (a comment or
+    quote at the end) - the rewritten call is parsed again to make sure."""
+    parts = segments(command, powershell)
+    merge = next(t for t in parts if is_merge(t))
+    if any(t is not merge and t[0].lower() not in CD_COMMANDS for t in parts) or parts[-1] is not merge:
+        return None
+    pinned = option_value(gh_args(merge) or [], "--match-head-commit")
+    if pinned is not None:
+        return Allow(reason, command) if pinned.lower() == sha else None
+    rewritten = f"{command.rstrip()} --match-head-commit {sha}"
+    again = [t for t in segments(rewritten, powershell) if is_merge(t)]
+    if len(again) != 1 or option_value(gh_args(again[0]) or [], "--match-head-commit") != sha:
+        return None
+    return Allow(reason, rewritten)
+
+
 def check_merge(
-    command: str, transcript: str, current: str = "", cwd: str = "", powershell: bool = False
+    command: str,
+    transcript: str,
+    current: str = "",
+    cwd: str = "",
+    powershell: bool = False,
+    stamped: list[tuple[str, str, str]] | None = None,
 ) -> str | None:
     """The block message for a merge auto mode would refuse - in a call that does not parse cleanly, chained,
-    through the API, or unreviewed - else None."""
+    through the API, into a merged base, or unreviewed - else None. A review stamp for the PR's current head and
+    base (pr-state.py) stands in for a review in this session - not for `--auto` or `--admin`, which could merge
+    later commits; (its line, the stamped sha) is appended to `stamped`."""
     # An unclear call: a merge that heads any naive chunk is held (a merge only named in prose is not).
     if (why := unclear(command, powershell)) and any(merge_kind(t) for t in naive_segments(command)):
         return MERGE_UNCLEAR.format(open=why)
@@ -1578,11 +1933,178 @@ def check_merge(
         return MERGE_CHAINED
     if not all(t is only or harmless(t, powershell) for t in parts):
         return MERGE_CHAINED
+    found = merges_in(command, cwd, powershell)
+    here = next((at for tokens, at in located(command, cwd, powershell) if is_merge(tokens)), None)
+    status = ""
+    target = pr_target(found[0][0], found[0][1], native_dir(here)) if found else None
+    if here is not None and native_dir(here) is None:
+        target = None  # a directory no subprocess can enter: gh would answer for wherever the hook runs
+    repo = (target[1] or origin_repo(here)) if target else None  # gh's own answer replaces it below
+    module = pr_state() if target else None
+    if module is not None and target is not None:
+        pr = module.view(*target)
+        for note in module.drain_notes():
+            notice(note)
+        if pr is None:
+            notice(f"gh cannot read PR {target[0]} - no review stamp or merged-base check for this merge")
+        elif pr.state == "OPEN":
+            repo = pr.repo
+            why = module.stale_base(pr, target[2], homes_branches())
+            for note in module.drain_notes():
+                notice(note)
+            if why:
+                return MERGE_STALE_BASE.format(number=pr.number, why=why)
+            ok, status = module.review_status(pr)
+            if ok and {"--auto", "--admin"} & {a.split("=", 1)[0] for a in gh_args(only) or []}:
+                ok, status = False, f"{status} - not for `--auto` / `--admin`, which could merge later commits"
+            if ok:
+                if stamped is not None:
+                    stamped.append((f"guard-shared-checkouts: review stamp - {status}", pr.head, pr.repo))
+                return None
     if not transcript:
         notice("no transcript_path in the payload - the merge goes unchecked")
         return None
-    if reviewed_for(Path(transcript), current, merges_in(command, cwd, powershell), command) is False:
-        return MERGE_UNREVIEWED
+    if reviewed_for(Path(transcript), current, found, command, False, repo) is False:
+        return MERGE_UNREVIEWED + (f" Recorded: {status}." if status else "")
+    return None
+
+
+def option_value(args: list[str], *names: str) -> str | None:
+    """The value of the last `--name value`, `--name=value` or `-Xvalue` (one-letter names) among `args`."""
+    value = None
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                value = args[i + 1]
+            elif name.startswith("--") and arg.startswith(name + "="):
+                value = arg[len(name) + 1 :]
+            elif len(name) == 2 and arg.startswith(name) and len(arg) > 2 and not arg.startswith("--"):
+                value = arg[2:]
+    return value
+
+
+def check_pr_create(command: str, cwd: str, powershell: bool = False) -> str | None:
+    """The block message for a `gh pr create --base <b>` whose <b> is a feature branch already merged, else None.
+    Without `--base` the PR targets the default branch, which is never stale."""
+    for tokens, current in located(command, cwd, powershell):
+        args = gh_args(tokens) or []
+        if args[:2] != ["pr", "create"]:
+            continue
+        base = option_value(args[2:], "--base", "-B")
+        if not base or re.search(r"[$`{%(]", base) or (module := pr_state()) is None:
+            continue
+        repo = option_value(args[2:], "--repo", "-R")
+        why = module.stale_branch(base, repo, native_dir(current), homes_branches())
+        for note in module.drain_notes():
+            notice(note)
+        if why:
+            return CREATE_STALE_BASE.format(base=base, why=why, into=module.retarget(why))
+    return None
+
+
+STAMP_VALUE_FLAGS = ("-R", "--repo", "--tests")
+
+
+class Stamp(NamedTuple):
+    merge: list[str]  # the `gh pr merge` it stands for
+    where: str  # its directory, as pr_key() scopes it
+    number: str  # <n> as written
+    here: PureWindowsPath | None  # its directory
+    repo: str  # `-R owner/repo` as written, else ""
+
+
+def is_stamp(tokens: list[str]) -> bool:
+    at = next((i for i, t in enumerate(tokens) if t.replace("\\", "/").endswith("pr-state.py")), None)
+    return at is not None and tokens[at + 1 : at + 2] == ["reviewed"]
+
+
+def stamp_calls(command: str, cwd: str, powershell: bool = False) -> list[Stamp]:
+    """Each `pr-state.py reviewed <n>` in a call."""
+    found: list[Stamp] = []
+    for tokens, here in located(command, cwd, powershell):
+        at = next((i for i, t in enumerate(tokens) if t.replace("\\", "/").endswith("pr-state.py")), None)
+        if at is None or tokens[at + 1 : at + 2] != ["reviewed"]:
+            continue
+        rest = tokens[at + 2 :]
+        number, i = "", 0
+        while i < len(rest):
+            if rest[i] in STAMP_VALUE_FLAGS:
+                i += 2
+                continue
+            if not rest[i].startswith("-") and not number:
+                number = rest[i]
+            i += 1
+        repo = option_value(rest, "-R", "--repo")
+        merge = ["gh", "pr", "merge", number.lstrip("#"), *(["-R", repo] if repo else [])]
+        found.append(Stamp(merge, str(here).lower() if here else "?", number, here, repo or ""))
+    return found
+
+
+def check_stamp(
+    command: str, transcript: str, current: str = "", cwd: str = "", powershell: bool = False
+) -> str | None:
+    """The block message for a `pr-state.py reviewed <n>` that has no review to record, else None. Fails closed: a
+    stamp lets other sessions merge. One literal PR per call; the review must have FINISHED (its result, or its
+    background completion notice, is in the transcript) since this session's last merge or stamp of another PR."""
+    stamps = stamp_calls(command, cwd, powershell)
+    if not stamps:
+        return None
+    if len(stamps) > 1 or not re.fullmatch(r"#?\d+", stamps[0].number):
+        return STAMP_ONE
+    stamp = stamps[0]
+    if any(not is_stamp(t) and t[0].lower() not in CD_COMMANDS for t in segments(command, powershell)):
+        return STAMP_ALONE.format(number=stamp.number)
+    if not transcript:
+        return STAMP_UNREVIEWED.format(number=stamp.number) + " (No transcript to read the review from.)"
+    # GH_REPO before the stamp points gh at a repository the origin does not name: then which one is unknown.
+    repo = stamp.repo.lower() or (None if "GH_REPO" in command else origin_repo(stamp.here))
+    if reviewed_for(Path(transcript), current, [(stamp.merge, stamp.where)], command, True, repo) is not True:
+        return STAMP_UNREVIEWED.format(number=stamp.number)
+    return None
+
+
+def origin_repo(here: PureWindowsPath | None) -> str | None:
+    """owner/repo (lower case) of the GitHub origin of the checkout at `here` - the repository gh resolves there -
+    else None. None too when gh might resolve another one: more than one remote, or a remote gh marked resolved."""
+    if here is None:
+        return None
+    deadline = time.monotonic() + HOME_BUDGET
+    remotes = (git_out(here, deadline, "remote") or "").split()
+    if remotes != ["origin"] or git_out(here, deadline, "config", "--get-regexp", r"^remote\..*\.gh-resolved$"):
+        return None
+    url = git_out(here, deadline, "remote", "get-url", "origin") or ""
+    found = re.search(r"github[^/:\s]*[:/](?:\d+/)?([^/:\s]+/[^/\s]+?)(?:\.git)?/?$", url, re.IGNORECASE)
+    return found.group(1).lower() if found else None
+
+
+def records_path() -> Path:
+    """Where pr-state.py keeps the stamps (mirrors its records_path(); the guard must not need gh to know it)."""
+    root = os.environ.get("LOST_MARY_STATE_DIR") or Path.home() / ".claude" / "agent-library" / "state"
+    return Path(root) / "reviews.jsonl"
+
+
+RECORD_WRITES = re.compile(
+    r">>?\s*[\"']?[^\s|;&]*reviews\.jsonl"
+    r"|\b(?:tee|Out-File|Set-Content|Add-Content|ac|sc|AppendAllText|WriteAllText|AppendAllLines|WriteAllLines)\b"
+    r"[^|;&\n]*reviews\.jsonl"
+    r"|\b(?:cp|mv|copy|move|Copy-Item|Move-Item|cpi|mi)\b[^|;&\n]*\sreviews\.jsonl[\"']?\s*(?:$|[|;&\n])"
+    r"|\b(?:cp|mv|copy|move|Copy-Item|Move-Item|cpi|mi)\b[^|;&\n]*\s\S*/reviews\.jsonl[\"']?\s*(?:$|[|;&\n])"
+    r"|open\([^)]*reviews\.jsonl[^)]*[\"'][aw+]",
+    re.IGNORECASE,
+)
+
+
+def writes_records(tool: str, tool_input: dict[str, Any], cwd: str = "") -> str | None:
+    """The block message for an edit of the stamp file, or a shell call that writes it by hand - a speed bump: the
+    real control is that a stamp needs a finished review in the stamping session."""
+    if tool in EDIT_TOOLS:
+        target = norm(str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""), norm(cwd))
+        wanted = norm(str(records_path()))
+        same = target is not None and wanted is not None and key_of(target) == key_of(wanted)
+        return RECORD_WRITE.format(name=records_path()) if same else None
+    command = str(tool_input.get("command") or "")
+    if "reviews.jsonl" in command and RECORD_WRITES.search(command.replace("\\", "/")):
+        return RECORD_WRITE.format(name=records_path())
     return None
 
 
@@ -1605,33 +2127,66 @@ def main() -> int:
     tool_input = event.get("tool_input")
     if not isinstance(tool_input, dict):
         return 0
+    global GH_DEADLINE
+    GH_DEADLINE = time.monotonic() + GH_BUDGET
+    allow: Allow | None = None
+    try:
+        held = writes_records(tool, tool_input, str(event.get("cwd") or ""))
+    except Exception as exc:  # a speed bump, never worth the call
+        notice(f"stamp-file check skipped ({exc!r})")
+        held = None
+    if held:
+        print(held, file=sys.stderr)
+        return 2
     if tool in SHELL_TOOLS:
+        command = str(tool_input.get("command") or "")
+        transcript = str(event.get("transcript_path") or "")
+        current = str(event.get("tool_use_id") or "")
+        where = str(event.get("cwd") or "")
+        powershell = tool == "PowerShell"
         try:
-            held = check_merge(
-                str(tool_input.get("command") or ""),
-                str(event.get("transcript_path") or ""),
-                str(event.get("tool_use_id") or ""),
-                str(event.get("cwd") or ""),
-                tool == "PowerShell",
+            mode = str(event.get("permission_mode") or "")
+            held, allow = merge_verdict(command, transcript, current, where, powershell, mode)
+            held = (
+                held
+                or check_pr_create(command, where, powershell)
+                or check_stamp(command, transcript, current, where, powershell)
             )
         except Exception as exc:  # the merge check is a convenience: never let it cost the call
             notice(f"merge check skipped ({exc!r})")
-            held = None
+            held, allow = None, None
         if held:
             print(held, file=sys.stderr)
             return 2
     config = load_config()
     if config is None or not (config.shared or config.frozen):
-        return 0
+        return permit(allow, tool_input)
     cwd = str(event.get("cwd") or "")
     reason: str | None = None
     if tool in SHELL_TOOLS:
-        reason = check_command(str(tool_input.get("command") or ""), cwd, config, tool == "PowerShell")
+        command = str(tool_input.get("command") or "")
+        reason = check_command(command, cwd, config, tool == "PowerShell", str(event.get("transcript_path") or ""))
     elif tool in EDIT_TOOLS:
         reason = check_edit(str(tool_input.get("file_path") or tool_input.get("notebook_path") or ""), cwd, config)
     if reason:
         print(reason, file=sys.stderr)
         return 2
+    return permit(allow, tool_input)
+
+
+def permit(allow: Allow | None, tool_input: dict[str, Any]) -> int:
+    """Exit 0, telling auto mode the call may run when `allow` is given: a merge whose PR carries a review stamp
+    for its current head, run as `allow.command` (pinned to that head). The user's auto-mode allow rule covers only
+    a PR the session itself opened; the stamp is the review another session ran (docs, hooks-guide: the hook's
+    decision takes precedence over the classifier's; updatedInput replaces the whole input)."""
+    if allow:
+        decision = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": allow.reason,
+            "updatedInput": {**tool_input, "command": allow.command},
+        }
+        print(json.dumps({"hookSpecificOutput": decision}))
     return 0
 
 

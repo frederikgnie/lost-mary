@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply --hook",
             "async": true
           }
         ]

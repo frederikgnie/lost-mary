@@ -12,7 +12,9 @@ Usage: python tests/test-prune-worktrees.py
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -192,15 +194,53 @@ for wt in (*ALL_WT, wt_locked, wt_frozen):
     age_gitdir(wt, 2 * 86400)
 (wt_active / "README").touch()  # one file changed just now
 
+
+def age_dir(path: Path, seconds: float) -> None:
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
+
 leftover = WORK / "proj_wt_gone"
 leftover.mkdir()
-not_empty = WORK / "proj_backup"
+not_empty = WORK / "proj_baz"  # old enough, but holds a file
 not_empty.mkdir()
 (not_empty / "keep.txt").write_text("x", encoding="utf-8")
 other = WORK / "other_empty"
 other.mkdir()
-not_wt = WORK / "proj_data"  # empty, but not the guard's <repo>_wt_* shape: could be a mount point
-not_wt.mkdir()
+# 2026-10-05: sessions leave `<repo>_<anything>` behind (C:/repo/EU/OBF_experiments_acctlean), not only `_wt_`.
+leftover_any = WORK / "PROJ_foo"  # empty, not the guard's _wt_ shape, prefix in another case: swept
+leftover_any.mkdir()
+young = WORK / "proj_bar"  # empty but just created: may be a `git worktree add` in progress
+young.mkdir()
+# An interrupted `git worktree remove` on Windows often leaves only empty folders: an empty subtree is empty.
+nested = WORK / "proj_tree"
+(nested / "a" / "b").mkdir(parents=True)
+(nested / "c").mkdir()
+nested_file = WORK / "proj_treefile"  # a file deep down keeps it
+(nested_file / "a").mkdir(parents=True)
+(nested_file / "a" / "x.txt").write_text("x", encoding="utf-8")
+# A link is never followed: an old, empty directory behind one does not make its holder empty.
+link_target = TMP / "link_target"
+link_target.mkdir()
+linked = WORK / "proj_link"
+linked.mkdir()
+try:
+    os.symlink(link_target, linked / "j", target_is_directory=True)
+except OSError:  # no symlink privilege on Windows: a junction needs none
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(linked / "j"), str(link_target)], check=True, capture_output=True)
+# Claude Code's own isolation worktrees: <repo>/.claude/worktrees/<name>.
+isolation = PROJ / ".claude" / "worktrees"
+iso_old = isolation / "agent-old"
+(iso_old / "sub").mkdir(parents=True)
+iso_young = isolation / "agent-young"
+iso_full = isolation / "agent-full"
+iso_full.mkdir()
+(iso_full / "notes.txt").write_text("x", encoding="utf-8")
+for d in (leftover, not_empty, other, leftover_any, nested_file, link_target, linked, iso_full):
+    age_dir(d, 3600)
+for root in (nested, iso_old):
+    age_tree(root, 3600)
+iso_young.mkdir()
 
 CONFIG.write_text(json.dumps({"shared": [str(PROJ)], "frozen": [str(wt_frozen)]}), encoding="utf-8")
 worktrees_before = git(PROJ, "worktree", "list", "--porcelain")
@@ -219,6 +259,9 @@ EXPECTED = {
     wt_locked: ("KEPT", "locked"),
     wt_frozen: ("KEPT", "frozen"),
     leftover: ("LEFTOVER", "empty, not a registered worktree"),
+    leftover_any: ("LEFTOVER", "empty, not a registered worktree"),
+    nested: ("LEFTOVER", "empty, not a registered worktree"),
+    iso_old: ("LEFTOVER", "empty, not a registered worktree"),
 }
 
 
@@ -242,14 +285,16 @@ for path, (verdict, reason) in EXPECTED.items():
         (got.get("verdict"), got.get("reason")) == (verdict, reason),
         str(got),
     )
-check("dry run: non-empty proj_backup not reported", norm_key(not_empty) not in rows, str(rows.keys()))
+check("dry run: non-empty proj_baz not reported", norm_key(not_empty) not in rows, str(rows.keys()))
 check("dry run: other_empty (not proj_*) not reported", norm_key(other) not in rows, str(rows.keys()))
-check("dry run: empty proj_data (not proj_wt_*) not reported", norm_key(not_wt) not in rows, str(rows.keys()))
+check("dry run: empty proj_bar younger than 10 min not reported", norm_key(young) not in rows, str(rows.keys()))
+for kept_dir in (nested_file, linked, iso_young, iso_full):
+    check(f"dry run: {kept_dir.name} not reported", norm_key(kept_dir) not in rows, str(rows.keys()))
 check("dry run: branch reported", rows.get(norm_key(wt_merged), {}).get("branch") == "feat/merged", str(rows))
 summ = json.loads(r.stdout)["summary"] if r.returncode == 0 else {}
 check(
     "dry run: summary counts",
-    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 1, 0, 13),
+    (summ.get("removable"), summ.get("leftover"), summ.get("removed"), summ.get("worktrees")) == (2, 4, 0, 13),
     str(summ),
 )
 check("dry run changed no worktree", git(PROJ, "worktree", "list", "--porcelain") == worktrees_before)
@@ -333,32 +378,92 @@ for label, records, want in (
     check(f"judge: {label}", ok, repr(got))
 
 
-def judge_with_transcript(lines: list[str], age_seconds: float) -> str | None:
+def judge_with_transcript(
+    lines: list[str],
+    age_seconds: float,
+    target: object = wt,
+    found: list[object] | None = merged_here,
+    idle_hours: float = 6.0,
+) -> str | None:
     transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
     old = time.time() - age_seconds
     os.utime(transcript, (old, old))
     mod.session_mentions.cache_clear()
-    return mod.judge(wt, False, [], 6.0, lambda _cwd, _branch: merged_here)
+    return mod.judge(target, False, [], idle_hours, lambda _cwd, _branch: found)
 
 
-# Second review: a session quiet for longer than the idle window has an old transcript too. A RUNNING session
-# (a ~/.claude/sessions/<pid>.json whose pid is alive - this test's own) counts at any age; an exited one does not.
+def register(pid: int, sid: str, cwd: str | Path) -> None:
+    registry.write_text(json.dumps({"pid": pid, "sessionId": sid, "cwd": str(cwd)}), encoding="utf-8")
+
+
+# Second review: a session quiet for longer than the idle window has an old transcript too. On the ancestry
+# route (no gh) a RUNNING session (a ~/.claude/sessions/<pid>.json whose pid is alive - this test's own) counts
+# at any age; an exited one does not.
 used = [json.dumps({"message": {"content": [use]}})]
 got = judge_with_transcript(used, 3 * 86400)
 check("judge: an old transcript of no running session -> removable", got is None, repr(got))
 sessions_dir = HOME / ".claude" / "sessions"
 sessions_dir.mkdir(parents=True, exist_ok=True)
 registry = sessions_dir / f"{os.getpid()}.json"
-registry.write_text(json.dumps({"pid": os.getpid(), "sessionId": "s", "cwd": str(TMP)}), encoding="utf-8")
-got = judge_with_transcript(used, 3 * 86400)
-check("judge: a running session's transcript, quiet for three days -> kept", "session" in str(got), repr(got))
-registry.write_text(json.dumps({"pid": os.getpid(), "sessionId": "other", "cwd": open_path}), encoding="utf-8")
-got = judge_with_transcript([json.dumps({"type": "summary"})], 3 * 86400)
-check("judge: a running session whose own cwd is the worktree -> kept", "session" in str(got), repr(got))
-registry.write_text(json.dumps({"pid": 2**70, "sessionId": "s", "cwd": str(TMP)}), encoding="utf-8")
-got = judge_with_transcript(used, 3 * 86400)
+wt_m = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_merged.name)  # ancestor of origin/HEAD
+used_m = [json.dumps({"message": {"content": [{"type": "tool_use", "input": {"command": f"cd {wt_merged}"}}]}})]
+summary_only = [json.dumps({"type": "summary"})]
+register(os.getpid(), "s", TMP)
+got = judge_with_transcript(used_m, 3 * 86400, wt_m, None)
+check("judge (ancestry): a running session's transcript, quiet for 3 days -> kept", "session" in str(got), repr(got))
+register(os.getpid(), "other", wt_merged)
+got = judge_with_transcript(summary_only, 3 * 86400, wt_m, None)
+check("judge (ancestry): a running session whose own cwd is the worktree -> kept", "session" in str(got), repr(got))
+register(2**70, "s", TMP)
+got = judge_with_transcript(used_m, 3 * 86400, wt_m, None)
 check("judge: a registry pid out of range reads as running, never aborts -> kept", "session" in str(got), repr(got))
 registry.unlink()
+
+# 2026-10-05: sessions stay open for days after their PR merged, so the 24 h window and the running-transcript
+# rule kept merged worktrees indefinitely. A merged PR whose head is HEAD (gh) is definitive: the window is
+# --merged-idle-hours (default 1), and a running session keeps it only when its own cwd is at or under it.
+age_tree(wt_open, 2 * 3600)
+age_gitdir(wt_open, 2 * 3600)
+got = judge_with_transcript(summary_only, 3 * 86400, idle_hours=24.0)
+check("judge (gh merged): idle 2 h with --idle-hours 24 -> removable", got is None, repr(got))
+got = judge_with_transcript(used, 0, idle_hours=24.0)
+check("judge (gh merged): a transcript naming it within the merged window -> kept", "session" in str(got), repr(got))
+register(os.getpid(), "s", TMP)
+got = judge_with_transcript(used, 2 * 3600, idle_hours=24.0)
+check("judge (gh merged): a running session naming it, cwd elsewhere -> removable", got is None, repr(got))
+register(os.getpid(), "other", wt_open / "sub")
+got = judge_with_transcript(summary_only, 3 * 86400, idle_hours=24.0)
+check("judge (gh merged): a running session whose cwd is inside it -> kept", "session" in str(got), repr(got))
+register(os.getpid(), "other", wt_open)
+got = judge_with_transcript(summary_only, 3 * 86400, idle_hours=24.0)
+check("judge (gh merged): a running session whose cwd is the worktree -> kept", "session" in str(got), repr(got))
+register(os.getpid(), "other", f"{wt_open}_sibling")
+got = judge_with_transcript(summary_only, 3 * 86400, idle_hours=24.0)
+check("judge (gh merged): a running session in a same-prefix sibling -> removable", got is None, repr(got))
+registry.unlink()
+got = judge_with_transcript(summary_only, 3 * 86400, idle_hours=24.0, found=None)
+check("judge (gh off): the same worktree is not merged by ancestry", got == "not merged", repr(got))
+age_tree(wt_merged, 2 * 3600)
+age_gitdir(wt_merged, 2 * 3600)
+got = judge_with_transcript(summary_only, 3 * 86400, wt_m, None, idle_hours=24.0)
+check("judge (ancestry): idle 2 h with --idle-hours 24 -> kept (unchanged)", got == "active 2h00m ago", repr(got))
+age_tree(wt_merged, 2 * 86400)
+age_gitdir(wt_merged, 2 * 86400)
+
+
+def cli_in_process(*args: str) -> dict[str, dict[str, str]]:
+    """main() with an injected lookup that shows feat/open merged at HEAD, as gh would; JSON rows by path."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        mod.main([str(PROJ), "--json", *args], lambda _cwd, branch: merged_here if branch == "feat/open" else [])
+    return rows_by_path(out.getvalue())
+
+
+got_row = cli_in_process("--idle-hours", "24").get(norm_key(wt_open), {})
+check("main(): --merged-idle-hours defaults to 1 h -> removable", got_row.get("verdict") == "REMOVABLE", str(got_row))
+got_row = cli_in_process("--idle-hours", "24", "--merged-idle-hours", "3").get(norm_key(wt_open), {})
+check("main(): --merged-idle-hours 3 reaches judge -> kept", got_row.get("reason") == "active 2h00m ago", str(got_row))
+check("--merged-idle-hours -1 -> exit 2", cli("--merged-idle-hours", "-1").returncode == 2)
 # A transcript larger than the tail read: the partial first line is dropped, a later record is still found.
 saved_tail = mod.SESSION_TAIL
 setattr(mod, "SESSION_TAIL", 400)  # noqa: B010 - a module loaded by path: ty cannot see its attributes
@@ -367,7 +472,6 @@ check("judge: past the tail size, a later record still names it -> kept", "sessi
 setattr(mod, "SESSION_TAIL", saved_tail)  # noqa: B010
 transcript.unlink()
 mod.session_mentions.cache_clear()
-wt_m = next(w for w in mod.list_worktrees(PROJ) if Path(w.path).name == wt_merged.name)
 got = mod.judge(wt_m, False, [], 6.0, lambda _cwd, _branch: [mod.PR(9, "OPEN", "x")])
 check("judge: an open PR keeps even an ancestor of origin/HEAD", got == "open PR #9", repr(got))
 age_gitdir(wt_merged, 0)  # a session's `git status` or commit touches these; the files stay two days old
@@ -387,10 +491,40 @@ check(
     and not mod.disposable("runner_state.sqlite3"),
 )
 
+
+# --hook: the SessionStart payload's cwd is the starting session's own; whether that session is registered under
+# ~/.claude/sessions before its async hook reads the directory is not documented, so the payload counts as one.
+def cli_hook(payload: str) -> dict[str, dict[str, str]]:
+    r = subprocess.run(
+        [sys.executable, str(PRUNE), "--hook", "--json"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=ENV,
+        timeout=300,
+    )
+    return rows_by_path(r.stdout)
+
+
+got_row = cli_hook(json.dumps({"hook_event_name": "SessionStart", "cwd": str(wt_merged / "sub")})).get(
+    norm_key(wt_merged), {}
+)
+check(
+    "--hook: the starting session's cwd inside a merged worktree -> kept",
+    got_row.get("verdict") == "KEPT",
+    str(got_row),
+)
+got_row = cli_hook("not json").get(norm_key(wt_merged), {})
+check("--hook: an unreadable payload -> judged as before", got_row.get("verdict") == "REMOVABLE", str(got_row))
+got_row = cli_hook(chr(0xFEFF) + json.dumps({"cwd": str(wt_merged)})).get(norm_key(wt_merged), {})
+check("--hook: a payload with a BOM is read", got_row.get("verdict") == "KEPT", str(got_row))
+
 # --- apply ------------------------------------------------------------------------------------------
 r = cli("--apply")
 check("--apply exits 0", r.returncode == 0, r.stderr)
-check("--apply reports REMOVED lines", r.stdout.count("REMOVED") == 3, r.stdout)
+check("--apply reports REMOVED lines", r.stdout.count("REMOVED") == 6, r.stdout)
 check("--apply removed the merged worktree", not wt_merged.exists())
 check("--apply removed the worktree holding only an ignored cache", not wt_cache.exists())
 check("--apply kept the worktree holding an ignored non-cache file", (wt_ignored / ".git-info-exclude-probe").exists())
@@ -403,7 +537,14 @@ check("--apply unregistered the removed worktree", "proj_wt_merged" not in liste
 check("--apply removed the empty leftover", not leftover.exists())
 check("--apply kept the non-empty sibling", (not_empty / "keep.txt").exists())
 check("--apply kept other_empty", other.is_dir())
-check("--apply kept the empty proj_data (not proj_wt_*)", not_wt.is_dir())
+check("--apply removed the empty PROJ_foo older than 10 min (any <repo>_* name)", not leftover_any.exists())
+check("--apply kept the empty proj_bar younger than 10 min", young.is_dir())
+check("--apply removed proj_tree, holding only empty dirs, bottom-up", not nested.exists())
+check("--apply kept proj_treefile, a file two levels down", (nested_file / "a" / "x.txt").exists())
+check("--apply kept proj_link and did not follow its link", (linked / "j").exists() and link_target.is_dir())
+check("--apply removed .claude/worktrees/agent-old (empty subtree)", not iso_old.exists())
+check("--apply kept .claude/worktrees/agent-young (younger than 10 min)", iso_young.is_dir())
+check("--apply kept .claude/worktrees/agent-full (holds a file)", (iso_full / "notes.txt").exists())
 check(
     "--apply kept the skip-worktree edit",
     (wt_skip / "skip.txt").read_text(encoding="utf-8") == "edited where status cannot see it",

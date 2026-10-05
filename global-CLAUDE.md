@@ -19,8 +19,12 @@ verified commands, invariants and danger zones. Read them before editing.
   identity, a credential, money, a value only they hold, or cannot be undone.
   For a missing fact ask another session (`SendMessage`) before the user -
   never to do what a tool refused you. `BLOCKED:` backed by neither is bounced.
-  Spawn `review` on a PR's diff before its first `gh pr merge`, and run the
-  merge in its own call: a refused merge latches auto mode for the session.
+  One task: one branch, one worktree, one PR - implementers share it. Quick
+  tests per step (`scripts/test-scope.py`), the full suite once, before the
+  merge into main. Spawn `review` on the PR's whole diff once, before its
+  first `gh pr merge`, then stamp it (`scripts/pr-state.py reviewed <n>`) so
+  any session can merge it; run the merge in its own call: a refused merge
+  latches auto mode for the session. Never target a branch already merged.
   Once a PR merges, remove its worktree, or put the checkout it was made in
   back on its home branch - the default one, or the one the guard's `homes`
   declares (`git fetch origin <b>:<b>`, then `git switch <b>` in a call of its

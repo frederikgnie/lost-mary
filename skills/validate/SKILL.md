@@ -1,7 +1,7 @@
 ---
 name: validate
-description: Run the project's lint, type check and tests on what changed, and report the exact commands with their results. Use before declaring any Python change done, before /pr, and whenever asked whether something passes.
-argument-hint: [paths or packages - optional]
+description: Run the project's lint, type check and tests on what changed - the quick tier by default, the full suite with `full` - and report the exact commands with their results. Use before declaring any Python change done, before /pr, and whenever asked whether something passes.
+argument-hint: [quick | full] [paths or packages - optional]
 ---
 
 # Validate what changed
@@ -32,10 +32,21 @@ Target from the user (may be empty): $ARGUMENTS
    installation. In a multi-repo workspace (the root is not a git repo), run
    `--changed` once per package that has changes; the first output line names
    the repository it looked at.
-3. **Run the tests that cover the touched packages** - the documented test roots
-   for those packages, not the whole world, unless the whole suite is small.
-   Discover first with `--collect-only -q` when unsure.
-4. **Report** a table: `command -> result` with counts (`N passed`, `ty: 0
+3. **Run the tier asked for** - `quick` unless the target says `full`. A
+   project's `CLAUDE.md` naming its own quick / full commands wins.
+   - **quick** (after each step, and an implementer's `VALIDATION`): the unit
+     tests covering what changed on the branch. This prints the pytest line:
+
+     ```bash
+     python ~/.claude/agent-library/scripts/test-scope.py --cmd   # [--base <ref>] [-C <repo>]
+     ```
+
+     Exit 3 means no test file matches the changed modules: run the touched
+     package's documented test root instead. Exit 4: no Python changed.
+   - **full** (once, on the finished branch, before its PR into main merges):
+     every documented test root of the repository. Discover first with
+     `--collect-only -q` when unsure.
+4. **Report** the tier, then a table: `command -> result` with counts (`N passed`, `ty: 0
    errors`, `ruff: clean`). Quote failures verbatim. If something could not run,
    say so; never write "passes" for a command you did not run.
 

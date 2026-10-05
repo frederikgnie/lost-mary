@@ -25,6 +25,9 @@ deny and ask rules (documented).
      redirects only to relative paths or /dev/null. One foreign segment - no
      decision. Heredoc bodies are ignored, as in check-evidence.
   3. the library's own installers in verify mode.
+  4. the library's quick-tier selector, `python .../agent-library/scripts/test-scope.py`
+     (or the lost-mary checkout's own copy)
+     with no flags but --cmd, --base <ref> and -C <dir>: it only reads git.
 
 Output: {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
 "decision": {"behavior": "allow"}}} on stdout, exit 0. Nothing on stdout
@@ -86,6 +89,11 @@ PUSH_FLAGS_OK = frozenset({"-u", "--set-upstream", "-q", "--quiet", "-v", "--ver
 PUSH = re.compile(r"^git\s+(?:-C\s+(?P<dir>\S+)\s+)?(?:-c\s+\S+\s+)*push\b(?P<rest>.*)$", re.IGNORECASE)
 INSTALL_VERIFY = re.compile(
     r"^(?:bash\s+)?\.?[\\/]?install\.sh\s+--verify$|^powershell\b.*-File\s+\.?[\\/]?install\.ps1\s+-Verify$",
+    re.IGNORECASE,
+)
+TEST_SCOPE = re.compile(
+    r"^[\"']?(?:\S*[\\/])?(?:python3?|py)(?:\.exe)?[\"']?\s+[\"']?\S*(?:agent-library|lost-mary[^\s\\/]*)[\\/]scripts[\\/]test-scope\.py[\"']?"
+    r"(?:\s+(?:--cmd|--base\s+[\w./-]+|-C\s+\S+))*$",
     re.IGNORECASE,
 )
 REDIRECT = re.compile(r"(?<![0-9&])>+\s*(\S+)")
@@ -203,7 +211,7 @@ def decide(command: str, cwd: Path | None, evidence: Any) -> bool:
             continue
         if pushed is False:
             return False
-        if INSTALL_VERIFY.match(segment):
+        if INSTALL_VERIFY.match(segment) or TEST_SCOPE.match(segment):
             substantive = True
             continue
         if evidence.classify(segment) and redirects_ok(segment):
