@@ -1364,6 +1364,7 @@ def returns_home(args: tuple[str, ...], target: PureWindowsPath | None, home: st
         return False
 
 
+WORKTREE_ADD = re.compile(r"worktree(?:\s|\\[nt])+add")  # in a JSON line: a space, tab, or escaped newline
 WORKTREE_ADD_VALUE_FLAGS = ("-b", "-B", "--reason")
 
 
@@ -1389,7 +1390,7 @@ def session_worktrees(transcript: str) -> set[tuple[str, ...]]:
     try:
         with Path(transcript).open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if "worktree add" not in line or '"tool_use"' not in line:
+                if not WORKTREE_ADD.search(line) or '"tool_use"' not in line:
                     continue
                 try:
                     record = json.loads(line)
@@ -1712,11 +1713,11 @@ def reviewed_for(
                                 raw = " ".join(str(b.get("text", "")) for b in raw if isinstance(b, dict))
                             if wrote := RECORDED.search(str(raw or "")):
                                 stamped_repo[uid] = wrote.group(1).lower()
+                            elif block.get("is_error") is True or "pr-state: " in str(raw or ""):
+                                never_ran.add(uid)  # no `recorded:` line, and pr-state's own failure: not written
                         if uid in merge_ids:
                             answered.add(uid)
-                            if did_not_run(block) or (
-                                uid in stamp_ids and block.get("is_error") is True and uid not in stamped_repo
-                            ):
+                            if did_not_run(block):
                                 never_ran.add(uid)
                         continue
                     if block.get("type") != "tool_use" or (current and block.get("id") == current):
@@ -1938,7 +1939,7 @@ def check_merge(
     target = pr_target(found[0][0], found[0][1], native_dir(here)) if found else None
     if here is not None and native_dir(here) is None:
         target = None  # a directory no subprocess can enter: gh would answer for wherever the hook runs
-    repo = target[1] if target else None
+    repo = (target[1] or origin_repo(here)) if target else None  # gh's own answer replaces it below
     module = pr_state() if target else None
     if module is not None and target is not None:
         pr = module.view(*target)
@@ -2055,16 +2056,24 @@ def check_stamp(
         return STAMP_ALONE.format(number=stamp.number)
     if not transcript:
         return STAMP_UNREVIEWED.format(number=stamp.number) + " (No transcript to read the review from.)"
-    repo = stamp.repo.lower() or origin_repo(stamp.here)
-    if reviewed_for(Path(transcript), current, [(stamp.merge, stamp.where)], "", True, repo) is not True:
+    # GH_REPO before the stamp points gh at a repository the origin does not name: then which one is unknown.
+    repo = stamp.repo.lower() or (None if "GH_REPO" in command else origin_repo(stamp.here))
+    if reviewed_for(Path(transcript), current, [(stamp.merge, stamp.where)], command, True, repo) is not True:
         return STAMP_UNREVIEWED.format(number=stamp.number)
     return None
 
 
 def origin_repo(here: PureWindowsPath | None) -> str | None:
-    """owner/repo (lower case) of the GitHub origin of the checkout at `here`, else None."""
-    url = git_out(here, time.monotonic() + GIT_TIMEOUT, "remote", "get-url", "origin") if here is not None else None
-    found = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url or "")
+    """owner/repo (lower case) of the GitHub origin of the checkout at `here` - the repository gh resolves there -
+    else None. None too when gh might resolve another one: more than one remote, or a remote gh marked resolved."""
+    if here is None:
+        return None
+    deadline = time.monotonic() + HOME_BUDGET
+    remotes = (git_out(here, deadline, "remote") or "").split()
+    if remotes != ["origin"] or git_out(here, deadline, "config", "--get-regexp", r"^remote\..*\.gh-resolved$"):
+        return None
+    url = git_out(here, deadline, "remote", "get-url", "origin") or ""
+    found = re.search(r"github[^/:\s]*[:/](?:\d+/)?([^/:\s]+/[^/\s]+?)(?:\.git)?/?$", url, re.IGNORECASE)
     return found.group(1).lower() if found else None
 
 

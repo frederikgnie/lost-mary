@@ -6025,6 +6025,59 @@ for cmd in (f"{STAMP_CMD} && gh pr checks 41", f"{STAMP_CMD}; exit 1", f"{STAMP_
     )
 rc, out, err = ps_hook(f"cd {PS_GIT.as_posix()} && {STAMP_CMD}", t_done_review, cwd=NP)
 expect("stamp command: a cd, then the stamp -> exit 0", rc, ALLOW, err)
+OFF = PS_ENV | {"LOST_MARY_GUARD_REVIEW_RECORD": "off"}
+rc, out, err = ps_hook("gh pr merge 40 --squash", t_two, OFF)
+expect("stamp command: gh unavailable, a bare-number merge of the stamped PR in its clone -> exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook("gh pr merge 40 --squash", t_two, OFF, cwd=PS_FORK)
+expect("stamp command: ... the same number in another repository's clone -> exit 2", rc, BLOCK, err)
+rc, out, err = ps_hook("GH_REPO=x/y python ~/.claude/agent-library/scripts/pr-state.py reviewed 40", t_two)
+expect("stamp command: GH_REPO points the stamp elsewhere -> its repository is unknown, exit 2", rc, BLOCK, err)
+PS_ALIAS, PS_TWO_REMOTES = PS / "alias-clone", PS / "two-remotes"
+for clone in (PS_ALIAS, PS_TWO_REMOTES):
+    clone.mkdir()
+    git(clone, "init", "-q")
+git(PS_ALIAS, "remote", "add", "origin", "git@github-personal:O/R.git")
+git(PS_TWO_REMOTES, "remote", "add", "origin", "https://github.com/o/r.git")
+git(PS_TWO_REMOTES, "remote", "add", "upstream", "https://github.com/x/y.git")
+STAMP40 = "python ~/.claude/agent-library/scripts/pr-state.py reviewed 40"
+rc, out, err = ps_hook(STAMP40, t_two, cwd=PS_ALIAS)
+expect("stamp command: an SSH host alias origin, upper case -> the same repository, exit 0", rc, ALLOW, err)
+rc, out, err = ps_hook(STAMP40, t_two, cwd=PS_TWO_REMOTES)
+expect("stamp command: two remotes - gh may resolve either -> unknown, exit 2", rc, BLOCK, err)
+t_ps_failed = kg_transcript(
+    "stamp-ps-failed.jsonl",
+    [
+        kg_prompt("ship"),
+        kg_review(),
+        REVIEW_DONE,
+        ps_stamp_call("40", "t-p40", PS_GIT),
+        kg_result("t-p40", "pr-state: the local HEAD 1234567 is not the PR's head 89abcde", False),
+    ],
+)
+rc, out, err = ps_hook(STAMP, t_ps_failed)
+expect("stamp command: pr-state's own failure line, no error flag -> wrote nothing, not spent, exit 0", rc, ALLOW, err)
+in_flight = kg_transcript(
+    "stamp-in-flight.jsonl",
+    [
+        kg_prompt("ship"),
+        kg_review(),
+        REVIEW_DONE,
+        ps_stamp_call("40", "t-s40", PS_GIT),
+        kg_result("t-s40", "recorded: o/r#40 reviewed at aaaaaaaaa (feat/x -> main, none tests)", False),
+        ps_stamp_call("40", "t-again", PS_GIT),
+    ],
+)
+event = merge_event(STAMP40, in_flight, cwd=str(PS_GIT)) | {"permission_mode": "auto"}
+event.pop("tool_use_id")
+done = subprocess.run(
+    [sys.executable, str(GUARD)], input=json.dumps(event).encode("utf-8"), capture_output=True, env=PS_ENV
+)
+expect(
+    "stamp command: no tool_use_id, the call already in the transcript -> it does not spend its own review",
+    done.returncode,
+    ALLOW,
+    done.stderr.decode("utf-8", "replace"),
+)
 t_failed = kg_transcript(
     "stamp-failed.jsonl",
     [
