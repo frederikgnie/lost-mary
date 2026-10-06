@@ -38,6 +38,16 @@ The adapter explicitly handles those differences; native Codex permissions still
 apply. Roles are passed to available native subagents, not registered as global
 Codex agent definitions. When delegation is unavailable, the lead does the work.
 
+For an opt-in live check, run `python evals/codex-smoke.py --output
+evals/results/codex-local --case local` (use a new output directory each time).
+It uses your configured Codex model/account, creates an isolated fixture, saves
+tool traces and usage, and independently tests the resulting code. `--case review`
+also requests one native reviewer. That case returns exit 2 pending inspection of
+the persisted child response: some CLI versions omit that evidence from JSONL.
+Exit 1 means a failed automated check; exit 0 means the local case passed.
+Live runs consume tokens and are never launched by CI. These small smoke cases
+check compatibility and testing cadence, not broad effectiveness or cost savings.
+
 ## The idea
 
 Output quality in Claude Code comes from three things, in this order:

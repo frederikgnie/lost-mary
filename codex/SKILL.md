@@ -30,6 +30,11 @@ permissions take precedence over these files.
   enforced sandbox. Use the configured Codex model and effort; ignore Claude
   aliases, model policy, `memory: local`, and Agent/Team parameters. Keep work in
   the lead when delegation is unavailable. Never claim a self-review was independent.
+- A background launch acknowledgement is not a completed result. Wait using the
+  returned agent id, inspect its result, and resolve findings before counting the
+  delegated step as done. Reuse that agent for related follow-up rather than
+  repeating its investigation. If it cannot run, finish other authorized work
+  and report which acceptance checks remain unmet; do not claim the review passed.
 - `ListAgents` / `SendMessage` mean the current task's native subagent lifecycle
   tools, when available. They do not authorize messaging unrelated user chats.
   Use ordinary native subagents or serial work instead of assuming Agent Teams.

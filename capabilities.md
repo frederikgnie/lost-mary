@@ -386,3 +386,26 @@ enforcement is not claimed in Codex. Native agent availability and permissions
 depend on the host; the adapter falls back to lead execution. Local package tests
 cover source propagation, drift, backups, linked resources and helper CLIs;
 they do not establish live model behavior or hook parity.
+
+Live Windows checks on 2026-10-06, `codex-cli 0.155.0`, using the configured
+model without overrides: a local edit and a persisted-session edit with one
+independent reviewer both read the canonical procedure, fixed only the owned
+file, and passed three independent tests. Focused reproduction/checks preceded
+one full suite on the completed fix. The persisted parent and child records
+confirm review completion; the child assessed the supplied source/diff/tests,
+reported no actionable findings, and accurately disclosed that it ran no tools.
+An earlier `--ephemeral` review attempt failed with `no thread with id`; the lead
+reported that limitation. Consequently the review smoke case uses persisted
+sessions. JSONL exposed an empty wait event but omitted the child response, so
+the harness leaves review evidence explicitly unverified until inspected.
+
+The local baseline reported 126,663 input / 99,072 cached input / 633 output
+tokens; the persisted review lead reported 196,226 / 164,864 / 1,270. These are
+CLI-reported cumulative turn usage, not unique context size, total tree cost,
+or a controlled comparison. No token savings or general autonomy claim follows
+from two small cases. `evals/codex-smoke.py` saves future traces and usage;
+`tests/test-codex.py` tests its grader without making model calls. Installer
+tests also cover failed atomic replacement and preflight file/directory conflicts.
+A final local rerun stopped before editing when the account usage limit was
+reached. The harness correctly recorded failed/incomplete checks; that attempt
+is not counted as a passing evaluation.

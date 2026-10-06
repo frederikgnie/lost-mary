@@ -9,8 +9,10 @@ skill directory itself, not its parent. Existing managed edits are backed up.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,6 +44,8 @@ def install(dest: Path, files: dict[str, bytes], *, verify: bool = False, dry_ru
         path = dest / relative
         if path.resolve() != resolved / relative:
             raise ValueError(f"refusing redirected managed path: {path}")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"managed file is not a regular file: {path}")
     if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
         raise ValueError(f"not an ordinary skill directory: {dest}")
     if (
@@ -68,7 +72,14 @@ def install(dest: Path, files: dict[str, bytes], *, verify: bool = False, dry_ru
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             shutil.copy2(path, path.with_name(f"{path.name}.backup.{stamp}"))
-        path.write_bytes(files[name])
+        # A failed write/replacement must leave the previous working file intact.
+        descriptor, temporary = tempfile.mkstemp(prefix=".lost-mary-", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(files[name])
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     print(f"{'Dry run' if dry_run else 'Installed'}: {dest}")
     return 0
 

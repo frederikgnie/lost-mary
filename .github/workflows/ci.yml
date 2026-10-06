@@ -5,6 +5,7 @@ on:
     paths:
       - 'agents/**'
       - 'codex/**'
+      - 'evals/codex-smoke.py'
       - 'skills/**'
       - 'scripts/**'
       - 'tests/**'
@@ -21,6 +22,7 @@ on:
     paths:
       - 'agents/**'
       - 'codex/**'
+      - 'evals/codex-smoke.py'
       - 'skills/**'
       - 'scripts/**'
       - 'tests/**'

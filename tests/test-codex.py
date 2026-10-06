@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("install_codex", ROOT / "scripts/install-codex.py")
@@ -20,6 +21,12 @@ assert spec and spec.loader
 installer = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = installer
 spec.loader.exec_module(installer)
+
+smoke_spec = importlib.util.spec_from_file_location("codex_smoke", ROOT / "evals/codex-smoke.py")
+assert smoke_spec and smoke_spec.loader
+smoke = importlib.util.module_from_spec(smoke_spec)
+sys.modules[smoke_spec.name] = smoke
+smoke_spec.loader.exec_module(smoke)
 
 
 class CodexInstallTests(unittest.TestCase):
@@ -101,6 +108,30 @@ class CodexInstallTests(unittest.TestCase):
         self.assertEqual(note.read_text(), "keep me")
         self.assertEqual(self.install(verify=True), 0)
 
+    def test_failed_replacement_preserves_previous_file(self):
+        self.install()
+        previous = (self.dest / "SKILL.md").read_bytes()
+        self.files["SKILL.md"] = previous + b"\nUpdated.\n"
+        with mock.patch.object(installer.os, "replace", side_effect=OSError("simulated interrupted update")):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                self.install()
+        self.assertEqual((self.dest / "SKILL.md").read_bytes(), previous)
+        self.assertEqual(list(self.dest.rglob(".lost-mary-*.tmp")), [])
+        self.assertEqual(self.install(verify=True), 1)
+        self.install()
+        self.assertEqual(self.install(verify=True), 0)
+
+    def test_file_directory_collision_is_rejected_before_any_updates(self):
+        self.install()
+        previous = (self.dest / "SKILL.md").read_bytes()
+        self.files["SKILL.md"] = previous + b"\nUpdated.\n"
+        collision = self.dest / "references/review.md"
+        collision.unlink()
+        collision.mkdir()
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            self.install()
+        self.assertEqual((self.dest / "SKILL.md").read_bytes(), previous)
+
     def test_redirected_managed_directory_is_rejected(self):
         self.install()
         outside = self.root / "outside"
@@ -113,6 +144,60 @@ class CodexInstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "redirected"):
             self.install()
         self.assertEqual(list(outside.iterdir()), [])
+
+
+class SmokeGraderTests(unittest.TestCase):
+    @staticmethod
+    def event(kind, **fields):
+        return {"type": "item.completed", "item": {"type": kind, **fields}}
+
+    def setUp(self):
+        self.before = {"labels.py": "old", "test_labels.py": "protected"}
+        self.after = {**self.before, "labels.py": "fixed"}
+        self.events = [
+            self.event("command_execution", command="read procedure.md", exit_code=0),
+            self.event(
+                "command_execution",
+                command="python -m unittest test_labels.Labels.test_order",
+                exit_code=1,
+                aggregated_output="Ran 1 test\nFAILED",
+            ),
+            self.event("file_change"),
+            self.event(
+                "command_execution",
+                command="python -m unittest test_labels",
+                exit_code=0,
+                aggregated_output="Ran 3 tests\nOK",
+            ),
+            {"type": "turn.completed"},
+        ]
+
+    def grade(self, events=None, after=None, passed=True):
+        return smoke.grade(
+            self.events if events is None else events,
+            self.before,
+            self.after if after is None else after,
+            "DONE: passed",
+            passed,
+        )
+
+    def test_reproduction_failure_then_validated_fix_passes(self):
+        self.assertTrue(all(self.grade().values()))
+
+    def test_final_claim_cannot_replace_missing_execution(self):
+        result = self.grade(events=[{"type": "turn.completed"}])
+        self.assertFalse(result["quick_check_ran"])
+        self.assertFalse(result["full_check_after_final_edit"])
+
+    def test_stale_and_redundant_validation_is_detected(self):
+        events = self.events[:-1] + [self.event("file_change"), self.events[-1]]
+        self.assertFalse(self.grade(events=events)["full_check_after_final_edit"])
+        events = self.events[:-1] + [self.events[-2], self.events[-1]]
+        self.assertFalse(self.grade(events=events)["no_redundant_full_checks"])
+
+    def test_test_tampering_and_real_failures_are_rejected(self):
+        self.assertFalse(self.grade(after={**self.after, "test_labels.py": "weakened"})["only_owned_file_changed"])
+        self.assertFalse(self.grade(passed=False)["independent_tests_pass"])
 
 
 if __name__ == "__main__":
