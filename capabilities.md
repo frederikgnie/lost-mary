@@ -88,6 +88,17 @@ expects an absolute `python.exe` path. The Bash *tool* is separate: it runs
 `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` (tools reference) makes PowerShell the
 primary shell tool.
 
+**Why `global-CLAUDE.md` steers reads to Read/Grep/Glob (measured 2026-10-06,
+EU transcripts since 2026-09-25).** 5,514 read-only Bash calls (`cat`, `sed
+-n`, `grep`, `ls`, `tail` on a file) took 22.1 h; their median rose from 1.8 s
+(09-25) to 14.3 s (10-05) and 40.5 s (10-06) as the machine neared its commit
+limit, while Read's median was 0.0 s, Grep's 0.1 s and Glob's 0.2 s - none of
+them matches a hook. 233 foreground `until`/`while`/`sleep` polling calls held
+sessions 9.8 h, many at the 10-minute Bash cap. Files of 1,240-3,400 lines were
+Read whole 24-42 times each, at 25-40k tokens a time. Claude Code's own
+auto-mode reminder recommends `cat`/`sed`/`grep` through Bash; the user
+instructions override it.
+
 **Kill switches.** `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
 `"disableAllHooks": true` in `settings.json` disables every hook.
 

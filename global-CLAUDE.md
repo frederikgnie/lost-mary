@@ -47,6 +47,13 @@ verified commands, invariants and danger zones. Read them before editing.
   still not proof the predicate holds: re-run the decisive check, or `/validate`.
   The ledger shown at session start records what each subagent actually edited
   and ran; when a report and the ledger disagree, the ledger is right.
+- Shell calls are slow, built-in tools are not: each Bash/PowerShell call
+  starts a shell and runs the hooks (seconds on Windows); Read/Grep/Glob take
+  ~0 s. Read, search and list files with those - never `cat`, `head`/`tail`,
+  `sed -n`, `grep`, `ls` or their PowerShell twins on a file; filtering a
+  command's output is fine. Read a file over ~1,000 lines by `offset`/`limit`
+  around a Grep hit, and not again unless it changed. Wait for a long run with
+  `run_in_background`, never a foreground `until`/`sleep` loop or `--watch`.
 - A checkout other sessions share is read-only for branch state: work on a
   branch in your own worktree, never `git switch` / `stash` / `reset --hard`
   there - the guard hook blocks it where configured.
