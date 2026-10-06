@@ -865,8 +865,13 @@ def wired_hooks(settings: Path) -> tuple[list[WiredHook], list[str]]:
                 if not isinstance(entry, dict) or not entry.get("command"):
                     continue
                 command = str(entry.get("command"))
+                # Exec form: "args" holds the script, and a transcript names the hook as command and args
+                # joined by spaces, unquoted (measured 2026-10-06, 2.1.290).
+                args = [str(a) for a in entry.get("args") or []] if isinstance(entry.get("args"), list) else None
+                if args is not None:
+                    command = " ".join([command, *args])
                 script: Path | None = None
-                for token in shell_tokens(command):
+                for token in args if args is not None else shell_tokens(command):
                     if token.lower().endswith(".py"):
                         script = Path(expand_home(token))
                         break

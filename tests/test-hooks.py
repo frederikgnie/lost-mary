@@ -4623,6 +4623,56 @@ expect_true(
     out,
 )
 expect_true("--health writes nothing, not even with --record", not (FR / "health-readings").exists(), out)
+# Exec form ("args", no shell): the script is in args, and `command` is the bare interpreter.
+exec_settings = HEALTH / "settings-exec.json"
+exec_settings.write_text(
+    json.dumps(
+        {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "py", "args": [str(HEALTH / "scripts" / "good-hook.py")]}
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "py", "args": [str(HEALTH / "scripts" / "gone.py"), "-x"]}
+                        ]
+                    }
+                ],
+            }
+        }
+    ),
+    encoding="utf-8",
+)
+proc = subprocess.run(
+    [
+        sys.executable,
+        str(FRICTION),
+        "--projects-dir",
+        str(FR / "projects"),
+        "--settings",
+        str(exec_settings),
+        "--health",
+    ],
+    capture_output=True,
+    env=health_env,
+)
+out = proc.stdout.decode("utf-8", "replace")
+exec_lines = [line for line in out.splitlines() if line.startswith("  ")]
+expect_true(
+    "--health, exec form: the script in args is found and judged",
+    any("good-hook.py" in ln and "ok - exists, parses" in ln for ln in exec_lines),
+    out,
+)
+expect_true(
+    "--health, exec form: a missing script in args is broken, not skipped",
+    any("gone.py" in ln and "BROKEN - script missing" in ln for ln in exec_lines),
+    out,
+)
 
 # ------------------------------------------------------------------------------ usage
 print()

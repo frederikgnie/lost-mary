@@ -1,14 +1,21 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "//fallbackModel": "Covers an overloaded or unavailable model, for the session and for subagents. It does NOT cover a usage limit - see model-policy.example.md.",
-  "fallbackModel": ["opus"],
+  "fallbackModel": [
+    "opus"
+  ],
+  "//hooks": "Exec form: \"args\" makes Claude Code start the interpreter directly, with no shell. A hook without \"args\" runs through Git Bash on Windows and pays a bash start first - 3-4 s per hook on a loaded machine (measured 2026-10-06, 2.1.288-2.1.290). No shell also means no $HOME or ~ expansion: replace both placeholders, C:/ABSOLUTE/PATH/TO/python.exe and C:/ABSOLUTE/PATH/TO/HOME, with absolute paths.",
   "hooks": {
     "SubagentStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" brief",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/ledger.py",
+              "brief"
+            ],
             "timeout": 10
           }
         ]
@@ -20,7 +27,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/prune-worktrees.py\" --apply --hook",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/prune-worktrees.py",
+              "--apply",
+              "--hook"
+            ],
             "async": true
           }
         ]
@@ -30,12 +42,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" recall",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/ledger.py",
+              "recall"
+            ],
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "cat \"$HOME/.claude/agent-library/model-policy.md\" 2>/dev/null || true",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "-c",
+              "import pathlib, sys; p = pathlib.Path.home() / '.claude' / 'agent-library' / 'model-policy.md'; p.is_file() and sys.stdout.buffer.write(p.read_bytes())"
+            ],
             "timeout": 5
           }
         ]
@@ -47,7 +67,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/permit.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/permit.py"
+            ],
             "timeout": 10
           }
         ]
@@ -59,7 +82,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-spawn.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/check-spawn.py"
+            ],
             "timeout": 10
           }
         ]
@@ -69,7 +95,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/no-ask.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/no-ask.py"
+            ],
             "timeout": 10
           }
         ]
@@ -79,7 +108,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/guard-shared-checkouts.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/guard-shared-checkouts.py"
+            ],
             "timeout": 10
           }
         ]
@@ -90,7 +122,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/no-punt.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/no-punt.py"
+            ],
             "timeout": 10
           }
         ]
@@ -99,7 +134,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/ledger.py",
+              "record"
+            ],
             "timeout": 20
           }
         ]
@@ -108,7 +147,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-evidence.py\" --lead",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/check-evidence.py",
+              "--lead"
+            ],
             "timeout": 20
           }
         ]
@@ -120,7 +163,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" attach",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/ledger.py",
+              "attach"
+            ],
             "timeout": 10
           }
         ]
@@ -130,7 +177,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/pycheck.py\" --hook",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/pycheck.py",
+              "--hook"
+            ],
             "timeout": 90
           }
         ]
@@ -140,7 +191,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/witness.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/witness.py"
+            ],
             "timeout": 10
           }
         ]
@@ -152,7 +206,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/witness.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/witness.py"
+            ],
             "timeout": 10
           }
         ]
@@ -164,7 +221,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/check-evidence.py\"",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/check-evidence.py"
+            ],
             "timeout": 20
           }
         ]
@@ -173,7 +233,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/ABSOLUTE/PATH/TO/python.exe \"$HOME/.claude/agent-library/scripts/ledger.py\" record",
+            "command": "C:/ABSOLUTE/PATH/TO/python.exe",
+            "args": [
+              "C:/ABSOLUTE/PATH/TO/HOME/.claude/agent-library/scripts/ledger.py",
+              "record"
+            ],
             "timeout": 20
           }
         ]

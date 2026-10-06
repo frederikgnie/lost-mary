@@ -371,7 +371,7 @@ jobs:
           Copy-Item ./settings.example.windows.json $settings -Force
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with the placeholder interpreter path.' }
           if ($global:InstallerOutput -notmatch 'placeholder') { throw '-Verify failed but did not name the placeholder path.' }
-          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on a clean, wired install.' }
 
           Write-Host '--- -Verify flags autoMode.allow without $defaults (list and scalar), passes with the example ---'
@@ -384,7 +384,7 @@ jobs:
           $j | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with a scalar autoMode.allow.' }
           Copy-Item ./settings.example.windows.json $settings -Force
-          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after restoring the example settings.' }
 
           Write-Host '--- -NoOverwrite leaves a differing file alone and exits 3 ---'
@@ -438,12 +438,12 @@ jobs:
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with v1 hooks in settings.json.' }
           Set-Content -Path $settings -Value '{"hooks":{}}' -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with no hooks wired.' }
-          $cfg = (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | ConvertFrom-Json
+          $cfg = (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | ConvertFrom-Json
           $cfg | Add-Member -NotePropertyName disableAllHooks -NotePropertyValue $true
           $cfg | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with disableAllHooks: true.' }
           Set-Content -Path $settings -Value 'not json' -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with an unparseable settings.json.' }
-          (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed with v2 hooks in settings.json.' }
           Write-Host 'all installer scenarios passed'

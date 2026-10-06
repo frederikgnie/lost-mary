@@ -163,7 +163,10 @@ function Get-HookCommands {
         foreach ($h in @($inner.Value)) {
             $cmd = ''
             if ($h.PSObject.Properties['command']) { $cmd = [string]$h.command }
-            $out += [pscustomobject]@{ Command = $cmd; Matcher = $matcher }
+            # exec form ("args"): the script path sits in args, not in command
+            $exec = $h.PSObject.Properties['args'] -and $null -ne $h.args
+            if ($exec) { $cmd = (@($cmd) + @($h.args | ForEach-Object { [string]$_ })) -join ' ' }
+            $out += [pscustomobject]@{ Command = $cmd; Matcher = $matcher; Exec = [bool]$exec }
         }
     }
     return $out
@@ -203,7 +206,7 @@ function Test-Settings {
         }
         foreach ($f in $found) {
             if ($f.Command -like '*ABSOLUTE/PATH/TO*') {
-                Write-Host "DRIFT: $eventName $scriptName still has the placeholder interpreter path [$Settings]"
+                Write-Host "DRIFT: $eventName $scriptName still has a placeholder path (ABSOLUTE/PATH/TO) [$Settings]"
                 $script:DriftCount++
             } elseif ($scriptName -eq 'prune-worktrees.py' -and $f.Command -notlike '*--hook*') {
                 Write-Host "DRIFT: $eventName runs $scriptName without --hook - the starting session's own worktree is not protected [$Settings]"
@@ -221,6 +224,13 @@ function Test-Settings {
                     $script:DriftCount++
                 }
             }
+        }
+        # A hook without "args" runs through Git Bash: a bash start before every hook (3-4 s measured under load).
+        $shellForm = @(foreach ($prop in $hooks.PSObject.Properties) {
+                @(Get-HookCommands -Hooks $hooks -EventName $prop.Name) | Where-Object { -not $_.Exec -and $_.Command -match 'agent-library' }
+            })
+        if ($shellForm.Count -gt 0) {
+            Write-Host ('NOTE: ' + $shellForm.Count + ' library hook(s) run in shell form, each paying a Git Bash start - exec form ("args") in settings.example.windows.json skips it [' + $Settings + ']')
         }
     }
     # Auto mode: custom classifier rules must extend the built-ins, not replace them.

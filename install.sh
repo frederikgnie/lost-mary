@@ -265,7 +265,9 @@ hooks = data.get("hooks") or {}
 def commands(event):
     for entry in hooks.get(event) or []:
         for h in entry.get("hooks") or []:
-            yield str(h.get("command", "")), str(entry.get("matcher", ""))
+            # exec form ("args"): the script path sits in args, not in command
+            args = h.get("args") if isinstance(h.get("args"), list) else []
+            yield " ".join([str(h.get("command", "")), *map(str, args)]), str(entry.get("matcher", ""))
 for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py"), ("PreToolUse", "guard-shared-checkouts.py"), ("SessionStart", "prune-worktrees.py")):
     found = [(c, m) for c, m in commands(event) if script in c]
     if not found:
@@ -273,7 +275,7 @@ for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evi
         continue
     for cmd, matcher in found:
         if "ABSOLUTE/PATH/TO" in cmd:
-            print(f"DRIFT {event} {script} still has the placeholder interpreter path")
+            print(f"DRIFT {event} {script} still has a placeholder path (ABSOLUTE/PATH/TO)")
         elif "check-handoff-hook.py" in cmd or "guard-readonly-bash.py" in cmd:
             print(f"DRIFT {event} still references a v1 hook script")
         elif script == "prune-worktrees.py" and "--hook" not in cmd:
