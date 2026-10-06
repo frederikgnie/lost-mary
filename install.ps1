@@ -163,7 +163,14 @@ function Get-HookCommands {
         foreach ($h in @($inner.Value)) {
             $cmd = ''
             if ($h.PSObject.Properties['command']) { $cmd = [string]$h.command }
-            $out += [pscustomobject]@{ Command = $cmd; Matcher = $matcher }
+            # exec form ("args"): the script path sits in args, not in command
+            $exec = $h.PSObject.Properties['args'] -and $null -ne $h.args
+            $argv = @($cmd)
+            if ($exec) {
+                $argv += @($h.args | ForEach-Object { [string]$_ })
+                $cmd = $argv -join ' '
+            }
+            $out += [pscustomobject]@{ Command = $cmd; Matcher = $matcher; Exec = [bool]$exec; Argv = $argv }
         }
     }
     return $out
@@ -203,7 +210,7 @@ function Test-Settings {
         }
         foreach ($f in $found) {
             if ($f.Command -like '*ABSOLUTE/PATH/TO*') {
-                Write-Host "DRIFT: $eventName $scriptName still has the placeholder interpreter path [$Settings]"
+                Write-Host "DRIFT: $eventName $scriptName still has a placeholder path (ABSOLUTE/PATH/TO) [$Settings]"
                 $script:DriftCount++
             } elseif ($scriptName -eq 'prune-worktrees.py' -and $f.Command -notlike '*--hook*') {
                 Write-Host "DRIFT: $eventName runs $scriptName without --hook - the starting session's own worktree is not protected [$Settings]"
@@ -220,6 +227,43 @@ function Test-Settings {
                     Write-Host "DRIFT: $($prop.Name) still references a v1 hook script (retired) - remove it [$Settings]"
                     $script:DriftCount++
                 }
+            }
+        }
+        # A hook without "args" runs through Git Bash: a bash start before every hook (3-4 s measured under load).
+        $shellForm = @(foreach ($prop in $hooks.PSObject.Properties) {
+                @(Get-HookCommands -Hooks $hooks -EventName $prop.Name) | Where-Object { -not $_.Exec -and $_.Command -match 'agent-library' }
+            })
+        if ($shellForm.Count -gt 0) {
+            Write-Host ('NOTE: ' + $shellForm.Count + ' library hook(s) run in shell form, each paying a Git Bash start - exec form ("args") in settings.example.windows.json skips it [' + $Settings + ']')
+        }
+        # Exec form: no shell expands a variable, and python exits 2 - the BLOCK code - on a script it cannot
+        # open, so a wrong path wedges every call the hook matches. Both are drift.
+        $execForm = @(foreach ($prop in $hooks.PSObject.Properties) {
+                @(Get-HookCommands -Hooks $hooks -EventName $prop.Name) | Where-Object { $_.Exec } | ForEach-Object {
+                    $_ | Add-Member -NotePropertyName EventName -NotePropertyValue $prop.Name -PassThru
+                }
+            })
+        foreach ($c in $execForm) {
+            $scriptPath = @($c.Argv | Select-Object -Skip 1 | Where-Object { $_ -like '*.py' }) | Select-Object -First 1
+            if (@($c.Argv | Where-Object { $_ -match '\$\{?HOME\b|^~[/\\]|%USERPROFILE%' }).Count -gt 0) {
+                Write-Host "DRIFT: $($c.EventName) exec-form hook has a shell variable in a path, which nothing expands: $($c.Command) [$Settings]"
+                $script:DriftCount++
+            } elseif ($scriptPath -and $scriptPath -notlike '*ABSOLUTE/PATH/TO*' -and -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+                Write-Host "DRIFT: $($c.EventName) exec-form hook script not found: $scriptPath - python exits 2 on it, blocking every call [$Settings]"
+                $script:DriftCount++
+            }
+        }
+        if ($execForm.Count -gt 0) {
+            $version = $null
+            try { $version = (& claude --version 2>$null | Out-String) } catch { $version = $null }
+            if ($version -match '^\s*(\d+)\.(\d+)\.(\d+)') {
+                $v = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+                if ($v -lt [version]'2.1.288') {
+                    Write-Host "DRIFT: exec-form hooks need Claude Code 2.1.288 or later (the oldest measured); this is $v [$Settings]"
+                    $script:DriftCount++
+                }
+            } else {
+                Write-Host 'NOTE: claude not found to check its version - exec-form hooks were measured on 2.1.288 and later'
             }
         }
     }

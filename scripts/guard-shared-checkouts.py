@@ -1302,6 +1302,9 @@ def plain_switch(command: str) -> bool:
     )
 
 
+GIT_MISSING: list[bool] = []  # one notice per hook run, however many git calls fail
+
+
 def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
     """`git -C <target> <args>`'s stripped stdout, or None when git fails, cannot run, or the deadline passes.
 
@@ -1320,6 +1323,12 @@ def git_out(target: PureWindowsPath, deadline: float, *args: str) -> str | None:
             timeout=left,
             check=False,
         )
+    except FileNotFoundError:
+        # An exec-form hook inherits claude.exe's PATH, not Git Bash's: git may be missing even where bash had it.
+        if not GIT_MISSING:
+            GIT_MISSING.append(True)
+            notice("git is not on this hook's PATH - the checks reading git state (worktree cap, return home) are off")
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout.strip() if proc.returncode == 0 else None

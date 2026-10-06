@@ -181,6 +181,36 @@ jobs:
           fi
           cp settings.example.json "$FAKE_HOME/.claude/settings.json"
           HOME="$FAKE_HOME" bash ./install.sh --verify
+      - name: --verify reads exec-form hooks (args) - a missing script and $HOME in args are drift
+        run: |
+          set -euo pipefail
+          S="$FAKE_HOME/.claude/settings.json"
+          exec_form() {  # $1: what replaces $HOME in the script paths
+            python3 - "$1" "$S" <<'PY'
+          import json, shlex, sys
+          home, out = sys.argv[1], sys.argv[2]
+          d = json.load(open("settings.example.json", encoding="utf-8"))
+          for groups in d["hooks"].values():
+              for g in groups:
+                  for h in g["hooks"]:
+                      argv = shlex.split(h["command"].replace("$HOME", "@HOME@"))
+                      if len(argv) > 1 and argv[1].endswith(".py"):
+                          h["command"], h["args"] = argv[0], [a.replace("@HOME@", home) for a in argv[1:]]
+          json.dump(d, open(out, "w", encoding="utf-8"), indent=2)
+          PY
+          }
+          exec_form "$FAKE_HOME"
+          HOME="$FAKE_HOME" bash ./install.sh --verify
+          exec_form "/no/such/home"
+          rc=0; out="$(HOME="$FAKE_HOME" bash ./install.sh --verify)" || rc=$?
+          test "$rc" != "0" || { echo "ERROR: --verify passed with exec-form scripts that do not exist" >&2; exit 1; }
+          grep -q 'script not found' <<<"$out"
+          exec_form '$HOME'
+          rc=0; out="$(HOME="$FAKE_HOME" bash ./install.sh --verify)" || rc=$?
+          test "$rc" != "0" || { echo "ERROR: --verify passed with \$HOME in exec-form args" >&2; exit 1; }
+          grep -q 'shell variable' <<<"$out"
+          cp settings.example.json "$S"
+          HOME="$FAKE_HOME" bash ./install.sh --verify
       - name: --no-overwrite leaves a differing file alone and exits 3 (INCOMPLETE)
         run: |
           set -euo pipefail
@@ -371,8 +401,35 @@ jobs:
           Copy-Item ./settings.example.windows.json $settings -Force
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with the placeholder interpreter path.' }
           if ($global:InstallerOutput -notmatch 'placeholder') { throw '-Verify failed but did not name the placeholder path.' }
-          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on a clean, wired install.' }
+          if ($global:InstallerOutput -match 'shell form') { throw 'exec-form hooks reported as shell form.' }
+
+          Write-Host '--- exec form: home placeholder left, missing script, $HOME in args are drift; shell form is a NOTE ---'
+          $example = Get-Content ./settings.example.windows.json -Raw
+          $example.Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with the home placeholder left.' }
+          if ($global:InstallerOutput -notmatch 'placeholder') { throw '-Verify failed but did not name the placeholder.' }
+          $example.Replace('C:/ABSOLUTE/PATH/TO/HOME', 'C:/no/such/home').Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with exec-form scripts that do not exist.' }
+          if ($global:InstallerOutput -notmatch 'script not found') { throw '-Verify failed but did not name the missing script.' }
+          $example.Replace('C:/ABSOLUTE/PATH/TO/HOME', '$HOME').Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with $HOME in exec-form args.' }
+          if ($global:InstallerOutput -notmatch 'shell variable') { throw '-Verify failed but did not name the shell variable.' }
+          $shell = $example.Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | ConvertFrom-Json
+          foreach ($ev in $shell.hooks.PSObject.Properties) {
+            foreach ($g in @($ev.Value)) {
+              foreach ($h in @($g.hooks)) {
+                $quoted = @($h.args | ForEach-Object { '"' + $_ + '"' }) -join ' '
+                $h.command = "$($h.command) $quoted"
+                $h.PSObject.Properties.Remove('args')
+              }
+            }
+          }
+          $shell | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
+          if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed on shell-form hooks.' }
+          if ($global:InstallerOutput -notmatch 'NOTE: \d+ library hook\(s\) run in shell form') { throw 'shell-form hooks got no NOTE.' }
+          $example.Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
 
           Write-Host '--- -Verify flags autoMode.allow without $defaults (list and scalar), passes with the example ---'
           $j = Get-Content $settings -Raw | ConvertFrom-Json
@@ -384,7 +441,7 @@ jobs:
           $j | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with a scalar autoMode.allow.' }
           Copy-Item ./settings.example.windows.json $settings -Force
-          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content $settings -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed after restoring the example settings.' }
 
           Write-Host '--- -NoOverwrite leaves a differing file alone and exits 3 ---'
@@ -438,12 +495,12 @@ jobs:
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with v1 hooks in settings.json.' }
           Set-Content -Path $settings -Value '{"hooks":{}}' -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with no hooks wired.' }
-          $cfg = (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | ConvertFrom-Json
+          $cfg = (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | ConvertFrom-Json
           $cfg | Add-Member -NotePropertyName disableAllHooks -NotePropertyValue $true
           $cfg | ConvertTo-Json -Depth 10 | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with disableAllHooks: true.' }
           Set-Content -Path $settings -Value 'not json' -Encoding utf8
           if ((Invoke-Installer '-Verify') -eq 0) { throw '-Verify passed with an unparseable settings.json.' }
-          (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
+          (Get-Content ./settings.example.windows.json -Raw).Replace('C:/ABSOLUTE/PATH/TO/HOME', ($fake -replace '\\', '/')).Replace('C:/ABSOLUTE/PATH/TO/python.exe', 'python') | Set-Content $settings -Encoding utf8
           if ((Invoke-Installer '-Verify') -ne 0) { throw '-Verify failed with v2 hooks in settings.json.' }
           Write-Host 'all installer scenarios passed'

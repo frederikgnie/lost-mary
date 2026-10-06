@@ -29,10 +29,16 @@ The installer never edits `settings.json`. Copy the `hooks` block from
 (macOS/Linux) into `~/.claude/settings.json`. A running Claude Code normally
 picks it up live; restart if it does not.
 
-Windows: replace `C:/ABSOLUTE/PATH/TO/python.exe` with a real interpreter. The
+Windows: replace `C:/ABSOLUTE/PATH/TO/python.exe` with a real interpreter and
+`C:/ABSOLUTE/PATH/TO/HOME` with your home directory (forward slashes). The
 `python` on PATH is often the Microsoft Store stub, and a hook that cannot
-start fails open - silently, forever. Keep `$HOME` as is; it expands under both
-Git Bash and PowerShell.
+start fails open - silently, forever. The hooks are in exec form (`"args"`):
+Claude Code starts python directly instead of through Git Bash, which saves a
+bash start per hook - seconds each on a busy machine - but also means no shell
+expands `$HOME` or `~`, so both paths must be absolute. A wrong script path
+blocks rather than fails open (python exits 2, the block code), so run
+`.\install.ps1 -Verify` after editing: it checks that every exec-form script
+exists. Exec form was measured on Claude Code 2.1.288 and later.
 
 Without this step the library is documentation. With it:
 

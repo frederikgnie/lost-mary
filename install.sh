@@ -265,7 +265,9 @@ hooks = data.get("hooks") or {}
 def commands(event):
     for entry in hooks.get(event) or []:
         for h in entry.get("hooks") or []:
-            yield str(h.get("command", "")), str(entry.get("matcher", ""))
+            # exec form ("args"): the script path sits in args, not in command
+            args = h.get("args") if isinstance(h.get("args"), list) else []
+            yield " ".join([str(h.get("command", "")), *map(str, args)]), str(entry.get("matcher", ""))
 for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evidence.py"), ("PreToolUse", "no-ask.py"), ("Stop", "no-punt.py"), ("SubagentStop", "ledger.py"), ("SessionStart", "ledger.py"), ("Stop", "ledger.py"), ("PreToolUse", "check-spawn.py"), ("PostToolUse", "ledger.py"), ("PermissionRequest", "permit.py"), ("SubagentStart", "ledger.py"), ("Stop", "check-evidence.py"), ("PostToolUse", "witness.py"), ("PostToolUseFailure", "witness.py"), ("PreToolUse", "guard-shared-checkouts.py"), ("SessionStart", "prune-worktrees.py")):
     found = [(c, m) for c, m in commands(event) if script in c]
     if not found:
@@ -273,7 +275,7 @@ for event, script in (("PostToolUse", "pycheck.py"), ("SubagentStop", "check-evi
         continue
     for cmd, matcher in found:
         if "ABSOLUTE/PATH/TO" in cmd:
-            print(f"DRIFT {event} {script} still has the placeholder interpreter path")
+            print(f"DRIFT {event} {script} still has a placeholder path (ABSOLUTE/PATH/TO)")
         elif "check-handoff-hook.py" in cmd or "guard-readonly-bash.py" in cmd:
             print(f"DRIFT {event} still references a v1 hook script")
         elif script == "prune-worktrees.py" and "--hook" not in cmd:
@@ -284,6 +286,28 @@ for event in hooks:
     for cmd, _ in commands(event):
         if "check-handoff-hook.py" in cmd or "guard-readonly-bash.py" in cmd:
             print(f"DRIFT {event} still references a v1 hook script (retired) - remove it")
+# Exec form ("args"): no shell expands a variable, and python exits 2 - the BLOCK code - on a script it
+# cannot open, so a wrong path wedges every call the hook matches. Both are drift.
+import os, re, subprocess
+SHELL_VAR = re.compile(r"\$\{?HOME\b|^~[/\\]|%USERPROFILE%", re.I)
+exec_form = [(e, h) for e in hooks for entry in hooks.get(e) or [] for h in entry.get("hooks") or [] if isinstance(h.get("args"), list)]
+for event, h in exec_form:
+    argv = [str(h.get("command", "")), *map(str, h["args"])]
+    script = next((a for a in argv[1:] if a.lower().endswith(".py")), None)
+    if any(SHELL_VAR.search(a) for a in argv):
+        print(f"DRIFT {event} exec-form hook has a shell variable in a path, which nothing expands: {' '.join(argv)}")
+    elif script and "ABSOLUTE/PATH/TO" not in script and not os.path.isfile(script):
+        print(f"DRIFT {event} exec-form hook script not found: {script} - python exits 2 on it, blocking every call")
+if exec_form:
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    v = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", out)
+    if v and tuple(map(int, v.groups())) < (2, 1, 288):
+        print(f"DRIFT exec-form hooks need Claude Code 2.1.288 or later (the oldest measured); this is {v.group(0).strip()}")
+    elif not v:
+        print("NOTE: claude not found to check its version - exec-form hooks were measured on 2.1.288 and later")
 # Auto mode: custom classifier rules must extend the built-ins, not replace them.
 perms = data.get("permissions") or {}
 auto = data.get("autoMode") or {}
@@ -312,7 +336,7 @@ PYEOF
   if grep -q 'witness.py' "$SETTINGS"; then echo "OK witness.py referenced"; else echo "DRIFT witness.py not referenced"; fi
   if grep -q 'guard-shared-checkouts.py' "$SETTINGS"; then echo "OK guard-shared-checkouts.py referenced"; else echo "DRIFT guard-shared-checkouts.py not referenced"; fi
   if grep -q 'prune-worktrees.py' "$SETTINGS"; then echo "OK prune-worktrees.py referenced"; else echo "DRIFT prune-worktrees.py not referenced"; fi
-  if grep -q 'ABSOLUTE/PATH/TO' "$SETTINGS"; then echo "DRIFT placeholder interpreter path"; fi
+  if grep -q 'ABSOLUTE/PATH/TO' "$SETTINGS"; then echo "DRIFT a placeholder path (ABSOLUTE/PATH/TO)"; fi
 }
 
 check_settings() {
