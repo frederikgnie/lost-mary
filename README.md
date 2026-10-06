@@ -47,6 +47,8 @@ the persisted child response: some CLI versions omit that evidence from JSONL.
 Exit 1 means a failed automated check; exit 0 means the local case passed.
 Live runs consume tokens and are never launched by CI. These small smoke cases
 check compatibility and testing cadence, not broad effectiveness or cost savings.
+The ordering check covers recorded file-change events; inspect shell writes
+manually. Independent tests check the final code regardless of how it was edited.
 
 ## The idea
 

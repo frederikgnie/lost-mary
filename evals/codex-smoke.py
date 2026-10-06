@@ -10,6 +10,8 @@ Review cases use ordinary persisted Codex sessions: ephemeral mode can prevent
 native delegation. The local case uses an ephemeral session.
 The timeout bounds the CLI wait, not an account spend limit. Keep output for
 manual trace review: passing these small cases is not proof of general autonomy.
+Validation ordering covers recorded file_change events only; shell-based writes
+need manual trace inspection. Independent tests always check the final files.
 """
 
 from __future__ import annotations
@@ -76,7 +78,9 @@ def grade(events: list[dict], before: dict, after: dict, final: str, passed: boo
             and "Ran 1 test" in item.get("aggregated_output", "")
             for _, item in commands
         ),
-        "full_check_after_final_edit": bool(edits and full and full[-1][0] > max(edits) and success(full[-1][1])),
+        "full_check_after_last_recorded_file_change": bool(
+            edits and full and full[-1][0] > max(edits) and success(full[-1][1])
+        ),
         "no_redundant_full_checks": len(full) == 1,
         "closed_done": bool(re.search(r"(?m)^DONE:\s*\S", final)),
         "turn_completed": any(e.get("type") == "turn.completed" for e in events),

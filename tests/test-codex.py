@@ -187,11 +187,11 @@ class SmokeGraderTests(unittest.TestCase):
     def test_final_claim_cannot_replace_missing_execution(self):
         result = self.grade(events=[{"type": "turn.completed"}])
         self.assertFalse(result["quick_check_ran"])
-        self.assertFalse(result["full_check_after_final_edit"])
+        self.assertFalse(result["full_check_after_last_recorded_file_change"])
 
     def test_stale_and_redundant_validation_is_detected(self):
         events = self.events[:-1] + [self.event("file_change"), self.events[-1]]
-        self.assertFalse(self.grade(events=events)["full_check_after_final_edit"])
+        self.assertFalse(self.grade(events=events)["full_check_after_last_recorded_file_change"])
         events = self.events[:-1] + [self.events[-2], self.events[-1]]
         self.assertFalse(self.grade(events=events)["no_redundant_full_checks"])
 

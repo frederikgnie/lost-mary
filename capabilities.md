@@ -409,3 +409,7 @@ tests also cover failed atomic replacement and preflight file/directory conflict
 A final local rerun stopped before editing when the account usage limit was
 reached. The harness correctly recorded failed/incomplete checks; that attempt
 is not counted as a passing evaluation.
+A subsequent completion rerun passed all automated checks (127,498 input,
+99,712 cached input, 695 output tokens), including independent final tests.
+The grader's ordering claim is limited to recorded file-change events; shell
+edits require manual trace inspection.
