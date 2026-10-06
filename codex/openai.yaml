@@ -1,0 +1,6 @@
+interface:
+  display_name: "Lost Mary"
+  short_description: "Autonomous tasks with scoped work and evidence"
+  default_prompt: "Use $lost-mary to complete this task autonomously and verify the result."
+policy:
+  allow_implicit_invocation: false

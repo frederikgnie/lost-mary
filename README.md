@@ -6,6 +6,38 @@ excellent on a typed Python monorepo and to work unchanged anywhere else.
 
 > New here? [GETTING-STARTED.md](GETTING-STARTED.md) is the 5-minute version.
 
+## Codex (optional)
+
+From this checkout, with Python 3.11+:
+
+```sh
+python scripts/install-codex.py
+python scripts/install-codex.py --verify
+```
+
+This installs `$lost-mary` into `~/.agents/skills/lost-mary`. Invoke it explicitly
+with your task; restart Codex if it does not appear. `--dry-run` previews changes;
+`--dest <skill-directory>` installs into an alternate location, including a
+project's `.agents/skills/lost-mary`. Existing managed files are backed up before
+replacement; an existing unowned skill is refused. No Codex global settings or
+Claude installation are changed.
+
+**Update the Claude sources as usual, then rerun the same installer.** It packages
+the canonical procedure, roles, PR/validation instructions and two validation
+helpers directly. There is no second procedure to edit and no generated copy to
+commit. Only [the small adapter](codex/SKILL.md) describes runtime differences;
+change it when a new Claude-specific mechanism needs a Codex translation.
+`--verify` detects stale bundled sources. The existing Claude installers and
+hook wiring are unchanged, and do not refresh the optional Codex installation.
+
+Codex follows the same autonomous completion and quick/full testing workflow,
+using native tools and the user's configured model. This is **instruction-level
+support**, not Claude hook parity: no Stop/SubagentStop hooks, automatic per-edit
+lint, ledger, model fallback, review stamps, or checkout cleanup are installed.
+The adapter explicitly handles those differences; native Codex permissions still
+apply. Roles are passed to available native subagents, not registered as global
+Codex agent definitions. When delegation is unavailable, the lead does the work.
+
 ## The idea
 
 Output quality in Claude Code comes from three things, in this order:
