@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'agents/**'
+      - 'codex/**'
+      - 'evals/codex-smoke.py'
       - 'skills/**'
       - 'scripts/**'
       - 'tests/**'
@@ -19,6 +21,8 @@ on:
   pull_request:
     paths:
       - 'agents/**'
+      - 'codex/**'
+      - 'evals/codex-smoke.py'
       - 'skills/**'
       - 'scripts/**'
       - 'tests/**'
@@ -51,6 +55,8 @@ jobs:
         run: python tests/test-agents.py
       - name: Skill definitions are well-formed
         run: python tests/test-skills.py
+      - name: Codex adapter packages canonical sources and updates safely
+        run: python tests/test-codex.py
       - name: Hooks behave (pycheck, check-evidence)
         run: python tests/test-hooks.py
       - name: Stale-worktree pruner keeps everything not provably safe
