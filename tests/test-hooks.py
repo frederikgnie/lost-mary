@@ -4648,12 +4648,30 @@ exec_settings.write_text(
     ),
     encoding="utf-8",
 )
+# A transcript names an exec-form hook as command and args joined by spaces, unquoted (measured 2026-10-06,
+# 2.1.290, on hook_success, PreToolUse blocks and Stop feedback alike).
+EXEC_PROJ = HEALTH / "exec-projects" / "c--repo-x"
+EXEC_PROJ.mkdir(parents=True)
+exec_seen: dict[str, object] = {
+    "type": "attachment",
+    "timestamp": "2026-10-06T09:00:00.0Z",
+    "attachment": {
+        "type": "hook_success",
+        "hookName": "PostToolUse:Edit",
+        "hookEvent": "PostToolUse",
+        "command": f"py {HEALTH / 'scripts' / 'good-hook.py'}",
+        "exitCode": 0,
+        "stdout": "",
+        "stderr": "",
+    },
+}
+(EXEC_PROJ / "s1.jsonl").write_text(jsonl([exec_seen]), encoding="utf-8")
 proc = subprocess.run(
     [
         sys.executable,
         str(FRICTION),
         "--projects-dir",
-        str(FR / "projects"),
+        str(HEALTH / "exec-projects"),
         "--settings",
         str(exec_settings),
         "--health",
@@ -4673,6 +4691,41 @@ expect_true(
     any("gone.py" in ln and "BROKEN - script missing" in ln for ln in exec_lines),
     out,
 )
+expect_true(
+    "--health, exec form: a transcript record of the joined command is credited to the wired hook",
+    any("good-hook.py" in ln and "last fired 2026-10-06" in ln for ln in exec_lines),
+    out,
+)
+
+# The Windows example's model-policy hook replaced `cat ... || true`: it must print the file when present and
+# print nothing, exit 0, when it is absent or unreadable - a SessionStart hook that errors is noise every session.
+win_example = json.loads((ROOT / "settings.example.windows.json").read_text(encoding="utf-8"))
+policy_args = next(
+    h["args"]
+    for groups in win_example["hooks"].values()
+    for g in groups
+    for h in g["hooks"]
+    if h.get("args", [None])[0] == "-c" and "model-policy.md" in h["args"][1]
+)
+POLICY_HOME = SCRATCH / "policy-home"
+policy_file = POLICY_HOME / ".claude" / "agent-library" / "model-policy.md"
+
+
+def run_policy() -> subprocess.CompletedProcess[bytes]:
+    env = {**os.environ, "HOME": str(POLICY_HOME), "USERPROFILE": str(POLICY_HOME)}
+    return subprocess.run([sys.executable, *policy_args], capture_output=True, env=env)
+
+
+POLICY_HOME.mkdir()
+done = run_policy()
+expect_true("model-policy hook, no file: exit 0, no output", done.returncode == 0 and not done.stdout, repr(done))
+policy_file.mkdir(parents=True)  # a directory where the file should be: unreadable
+done = run_policy()
+expect_true("model-policy hook, unreadable: exit 0, no output", done.returncode == 0 and not done.stdout, repr(done))
+policy_file.rmdir()
+policy_file.write_text("# Model policy\nopus\n", encoding="utf-8")
+done = run_policy()
+expect_true("model-policy hook, file present: printed as is", done.stdout == policy_file.read_bytes(), repr(done))
 
 # ------------------------------------------------------------------------------ usage
 print()

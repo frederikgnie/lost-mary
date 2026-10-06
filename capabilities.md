@@ -68,7 +68,19 @@ hook took 161 ms in exec form. So `settings.example.windows.json` is exec form:
 flags. No shell means no `$HOME` or `~` expansion - both are placeholders to
 replace. A transcript names an exec-form hook as `command` and `args` joined by
 spaces, unquoted (`Stop hook feedback:\n[<python.exe> <script> --flag]: ...`),
-so the script name is still in it for `no-punt` and `friction`. `install.ps1
+so the script name is still in it for `no-punt` and `friction`; so is the
+`command` of `hook_success` attachments and of a PreToolUse block's
+`PreToolUse:<tool> hook error: [...]` result. Measured on PreToolUse as well
+as Stop: exit 2 blocks the call, and a JSON `permissionDecision` on stdout is
+read. No changelog entry names the version that added `args`, so 2.1.288 - the
+oldest measured - is the floor: a version that ignored `args` would run a bare
+`python.exe` that reads the hook payload as a program and exits 0 or 1, i.e.
+the hook silently does not run. Both installers' verify reports DRIFT for
+exec-form hooks under an older `claude --version`, for a script path that does
+not exist (python exits 2 on it - a block on every matching call, not a fail
+open), and for `$HOME` / `~` / `%USERPROFILE%` in `args`. An exec-form hook
+also inherits `claude.exe`'s PATH, not Git Bash's: where git is only on Git
+Bash's PATH the guard's git reads fail, and it says so once on stderr. `install.ps1
 -Verify` NOTEs library hooks still in shell form. The interpreter is the other
 trap: `python` on PATH is often the Microsoft Store stub, so the Windows example
 expects an absolute `python.exe` path. The Bash *tool* is separate: it runs

@@ -1,9 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "//fallbackModel": "Covers an overloaded or unavailable model, for the session and for subagents. It does NOT cover a usage limit - see model-policy.example.md.",
-  "fallbackModel": [
-    "opus"
-  ],
+  "fallbackModel": ["opus"],
   "//hooks": "Exec form: \"args\" makes Claude Code start the interpreter directly, with no shell. A hook without \"args\" runs through Git Bash on Windows and pays a bash start first - 3-4 s per hook on a loaded machine (measured 2026-10-06, 2.1.288-2.1.290). No shell also means no $HOME or ~ expansion: replace both placeholders, C:/ABSOLUTE/PATH/TO/python.exe and C:/ABSOLUTE/PATH/TO/HOME, with absolute paths.",
   "hooks": {
     "SubagentStart": [
@@ -54,7 +52,7 @@
             "command": "C:/ABSOLUTE/PATH/TO/python.exe",
             "args": [
               "-c",
-              "import pathlib, sys; p = pathlib.Path.home() / '.claude' / 'agent-library' / 'model-policy.md'; p.is_file() and sys.stdout.buffer.write(p.read_bytes())"
+              "import contextlib, pathlib, sys\nwith contextlib.suppress(OSError):\n    sys.stdout.buffer.write((pathlib.Path.home() / '.claude' / 'agent-library' / 'model-policy.md').read_bytes())"
             ],
             "timeout": 5
           }

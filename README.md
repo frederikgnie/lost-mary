@@ -114,11 +114,15 @@ without it your list *replaces* them, and `--verify` flags that as drift. Edit
 the placeholders or drop the block; auto mode reads `autoMode` from
 `~/.claude/settings.json` only, never from a project's `.claude/settings.json`.
 
-Windows: hook commands run under Git Bash when it is installed (PowerShell
-otherwise); `$HOME` expands in both. Use an **absolute path to `python.exe`** -
-`python` on PATH is often the Microsoft Store stub, which would make the hooks
-fail open on every event. `./install.sh --verify` reports whether the hooks are
-wired and whether v1 entries linger.
+Windows: the example's hooks are in exec form (`"args"`), so Claude Code starts
+python directly instead of paying a Git Bash start before every hook. No shell
+also means nothing expands `$HOME` or `~`: replace both placeholders with
+**absolute paths** - `python.exe` (the `python` on PATH is often the Microsoft
+Store stub, which would make the hooks fail open on every event) and your home
+directory. A script path that does not exist is worse than a missing
+interpreter: python exits 2 on it, which blocks every call the hook matches.
+`./install.sh --verify` / `.\install.ps1 -Verify` report whether the hooks are
+wired, whether each exec-form script exists, and whether v1 entries linger.
 
 Kill switches: `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
 `"disableAllHooks": true` in `settings.json` disables every hook.
