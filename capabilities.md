@@ -99,6 +99,20 @@ Read whole 24-42 times each, at 25-40k tokens a time. Claude Code's own
 auto-mode reminder recommends `cat`/`sed`/`grep` through Bash; the user
 instructions override it.
 
+**Subagent cost is growth, not startup (measured 2026-10-06, 369 EU
+subagents since 2026-09-25).** Median first-request context 18.9k tokens
+(review 18.5k, implement 25.7k): system prompt and tools ~11k, instruction
+files ~7k - the project's auto-memory `MEMORY.md` alone ~4-5k - the brief
+~0.5-1k, the ledger brief ~0.5k; 5-19% of it cache-read; first reply after a
+median 4.1 s. Re-sending that block every turn is 12% of subagent cost. The
+rest is growth: median end context 97k, implement 196k after a median 74
+turns and 70 min, and 71% of implement cost was spent on calls past 200k.
+What filled implement contexts: shell file reads/searches 44%, other shell
+output 19%, Read 17%, test output 10%; 37% of their Reads repeated a file
+(review 22%, explore 17%). Hence the context rules in the three roles and
+"size a brief to one focused change" in `/lost-mary`. Review spawns ran 25-66
+a day before PR #40's one-review-per-PR rule (66 on 2026-10-05).
+
 **Kill switches.** `PYCHECK_DISABLE=1` in the environment silences `pycheck`;
 `"disableAllHooks": true` in `settings.json` disables every hook.
 

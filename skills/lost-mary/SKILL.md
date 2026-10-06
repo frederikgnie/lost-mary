@@ -98,7 +98,7 @@ present, is shown at session start
 ```text
 OWNED:        globs this agent may change                     (required)
 OFF-LIMITS:   globs it must not touch                          (required)
-DONE MEANS:   <the predicate from step 1>                      (required)
+DONE MEANS:   <the step-1 predicate, or this brief's step>     (required)
 VALIDATION:   exact commands to run - the quick tier, step 4    (required)
 GOAL / SCOPE / DEPENDS ON:  when they add information beyond the task text
 REPORT:       CHANGED / RAN / DONE MEANS / RISKS
@@ -106,6 +106,14 @@ REPORT:       CHANGED / RAN / DONE MEANS / RISKS
 
 A spawn missing a required field comes back as `MISSING: <field>` - fill it in
 and respawn; do not argue.
+
+Size a brief to one focused change, with its own DONE MEANS - a step toward
+the step-1 predicate - and VALIDATION. Context growth is the risk that
+justifies more agents: each re-sends its whole context every turn, so one
+kept going for hours pays for ~200k tokens a turn. A long task is several
+agents in a row in the task's worktree; commit each one's change before
+spawning the next, so its `git diff` is its own, and pass it the last one's
+report under DEPENDS ON.
 
 ## 4. Gate on evidence
 

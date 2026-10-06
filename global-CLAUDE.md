@@ -37,9 +37,10 @@ verified commands, invariants and danger zones. Read them before editing.
   DONE MEANS / VALIDATION - it returns `MISSING: <field>` otherwise); `review`
   for an independent check (opus; paste it the `git diff`; it cannot
   run anything). The session-start model policy, if shown, wins over these.
-  Several `implement` only for disjoint scopes, each `isolation: worktree` -
-  which needs the session cwd inside a git repo and branches from the default
-  branch unless `worktree.baseRef` is `head`; otherwise run them one at a time.
+  Several `implement` at once only for disjoint `OWNED` in the task's one
+  worktree; `isolation: worktree` only when two must run checks on overlapping
+  files at once (it branches from the default branch unless `worktree.baseRef`
+  is `head`); otherwise run them one at a time.
 - Evidence over claims: report the exact commands you ran and what they showed.
   Never say tests pass unless they ran in this session. Hooks enforce part of
   this - ruff/ty run on every Python edit, and a subagent that edited files must
