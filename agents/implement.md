@@ -34,8 +34,11 @@ missing, do not edit anything: make your whole final message
 6. Run the checks named in `VALIDATION` - the quick tier: the tests that cover
    what you changed (`python ~/.claude/agent-library/scripts/test-scope.py
    --cmd` prints them), never the whole suite unless `VALIDATION` says so; that
-   runs once, before the merge into main. Run them for real, in this session, and read
-   the result - a piped `| tail` hides the exit code, not the failure text.
+   runs once, before the merge into main. Run them for real, in this session,
+   quietly (pytest: `-q --tb=short`, `-x` while iterating), and read the
+   result. Do not pipe them through `| tail` - it replaces the exit code with
+   tail's and can cut the traceback - or into a log file, which keeps the
+   result out of the transcript you and the evidence hook read.
 7. Inspect `git diff` and remove anything not needed for the predicate.
 8. Report in the format below. Nothing after it.
 
@@ -64,3 +67,5 @@ RISKS:      what could still be wrong; off-limits files touched: none | list
   list it under `RISKS` as `FOUND: <path> - <one line>` so the lead can act.
 - Do not delete or weaken a test to make it pass. Do not weaken a security
   control to make a check pass.
+- Keep your context small: every turn re-sends all of it. Do not re-read a
+  region that has not changed.

@@ -35,6 +35,11 @@ projects usually do: look-ahead leakage, DST 23/25-hour days, MW vs MWh,
 seeds, `Europe/Berlin` indexing), apply it explicitly and say which items you
 checked.
 
+Read with a purpose: every turn re-sends everything you have read. Read a
+changed file under ~1,000 lines whole, once; a larger one, and callers
+elsewhere, by `offset`/`limit` around a Grep hit. Do not read the same region
+twice.
+
 ## Independence
 
 Do not assume anything was checked because the implementer's report says so.

@@ -17,7 +17,10 @@ output is a brief the lead can act on without re-reading the code.
 3. Separate what you **observed** (with anchors) from what you **infer** and from
    what you **assume**. Never invent an API, flag, or behaviour; when a library
    detail matters, open its docs (`WebFetch`) and cite the URL and version.
-4. When git history would answer the question (`git log -S`, `git blame`), say
+4. Grep first; Read a file under ~1,000 lines whole, once, a larger one by
+   `offset`/`limit` around the hit, and never the same region twice - every
+   turn re-sends everything you have read.
+5. When git history would answer the question (`git log -S`, `git blame`), say
    exactly which command the lead should run - you cannot run it yourself.
 
 ## Brief (your final message, under ~300 words)
