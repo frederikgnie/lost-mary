@@ -24,13 +24,20 @@ Notes from the user (may be empty): $ARGUMENTS
    unpushed work; only if several do, name them and stop), if the
    current branch is the default branch, or if the tree has uncommitted
    changes. Never commit or stash on the user's behalf here.
-2. **Pick the account** that owns `owner/repo` (from the remote URL; the
-   repository's `AGENTS.md` may name it). If it is not the active `gh` account,
-   prefix every `gh` and `git push` below with
-   `GH_TOKEN=$(gh auth token -u <account>)` - `gh` and its git credential helper
-   both serve that token. **Never `gh auth switch`**: the active account is
-   global, and other sessions and scheduled tasks act on whichever one is active
-   (a switch here once made another session's PR reads 404).
+2. **Pick the account** that can push to `owner/repo` (from the remote URL; the
+   repository's `AGENTS.md` may name it). The owner may be an organisation, so
+   probe rather than guess: for each login in `gh auth status`, run
+   `GH_TOKEN=$(gh auth token -u <login>) gh repo view <owner/repo> --json viewerPermission`
+   and take the first that reports `WRITE`, `MAINTAIN` or `ADMIN`, the active
+   account first. None does: stop and say so. If it is not the active account,
+   prefix every `gh` and `git push` below with `GH_TOKEN=$(gh auth token -u <login>)`
+   (PowerShell: `$env:GH_TOKEN = gh auth token -u <login>` before the commands,
+   `Remove-Item Env:GH_TOKEN` after) - `gh` and its git credential helper both
+   serve that token. Check that `gh auth token -u <login>` succeeded: an empty
+   `GH_TOKEN` silently falls back to the active account. **Never
+   `gh auth switch`**: the active account is global, and other sessions and
+   scheduled tasks act on whichever one is active (a switch here once made
+   another session's PR reads 404).
 3. **Check the commit identity.** `git config user.email` should belong to the
    same account as the remote owner; warn if it does not. Do not rewrite
    history.

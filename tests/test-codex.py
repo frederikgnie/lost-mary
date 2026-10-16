@@ -6,13 +6,15 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +100,15 @@ class CodexInstallTests(unittest.TestCase):
         self.files["SKILL.md"] = self.files["SKILL.md"] + b"\nUpdated.\n"
         self.install()
         self.assertEqual(len(list(self.dest.glob("SKILL.md.backup.*"))), 1)
+
+    def test_unreadable_state_record_does_not_wedge_installs(self):
+        self.install()
+        # What PowerShell 5.1's `'{}' > file` writes: UTF-16 with a BOM.
+        (self.dest / installer.STATE).write_text("{}", encoding="utf-16")
+        self.files["SKILL.md"] = self.files["SKILL.md"] + b"\nUpdated.\n"
+        self.assertEqual(self.install(), 0)
+        self.assertIsInstance(json.loads((self.dest / installer.STATE).read_bytes()), dict)
+        self.assertEqual(self.install(verify=True), 0)
 
     def test_retired_files_are_reported_and_renamed_not_deleted(self):
         self.install()
@@ -266,40 +277,49 @@ class SmokeGraderTests(unittest.TestCase):
 
     def test_timeout_kill_reaches_grandchildren(self):
         # The shape of a .cmd shim: a parent whose real work runs in a child process.
-        pidfile = Path(tempfile.mkdtemp(prefix="lost-mary-kill-")) / "child.pid"
-        self.addCleanup(shutil.rmtree, pidfile.parent, True)
+        # Both hold the stdout pipe, so EOF on it means the whole tree is gone - no
+        # PID probing, which Windows PID reuse would make flaky.
         script = (
             "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
-            f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], stdout=sys.stdout)\n"
+            "print(child.pid, flush=True)\n"
             "time.sleep(120)\n"
         )
-        process = subprocess.Popen([sys.executable, "-c", script], start_new_session=os.name != "nt")
-        deadline = time.monotonic() + 30
-        while not (pidfile.is_file() and pidfile.read_text().strip()):
-            self.assertLess(time.monotonic(), deadline, "child never started")
-            time.sleep(0.1)
-        child = int(pidfile.read_text())
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=smoke.NEW_SESSION,  # the setting main() launches codex with
+        )
+        assert process.stdout is not None
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(smoke.kill_tree, process)
+        child = int(process.stdout.readline())
         smoke.kill_tree(process)
-        deadline = time.monotonic() + 10
-        while alive(child):
-            self.assertLess(time.monotonic(), deadline, f"grandchild {child} survived kill_tree")
-            time.sleep(0.1)
+        reader = threading.Thread(target=process.stdout.read, daemon=True)
+        reader.start()
+        reader.join(timeout=10)
+        survived = reader.is_alive()
+        if survived:  # do not leave it sleeping on the runner's output
+            kill_pid(child)
+        self.assertFalse(survived, f"grandchild {child} survived kill_tree")
+
+    def test_setup_errors_exit_3_not_the_review_pending_2(self):
+        output = Path(tempfile.mkdtemp(prefix="lost-mary-smoke-")) / "out"
+        self.addCleanup(shutil.rmtree, output.parent, True)
+        script = str(ROOT / "evals/codex-smoke.py")
+        for args in ([], ["--output", str(output), "--timeout", "0"]):
+            result = subprocess.run([sys.executable, script, *args], capture_output=True)
+            self.assertEqual(result.returncode, smoke.SETUP_ERROR, result.stderr)
+        self.assertFalse(output.exists())
 
 
-def alive(pid: int) -> bool:
+def kill_pid(pid: int) -> None:
     if os.name == "nt":
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
-        return str(pid) in out
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    # A reparented zombie still answers kill(0); it is dead for our purposes.
-    with contextlib.suppress(OSError):
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        return stat.rsplit(")", 1)[1].split()[0] != "Z"
-    return True
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
 
 
 if __name__ == "__main__":

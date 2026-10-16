@@ -11,6 +11,7 @@ A file the bundle no longer ships (RETIRED) is renamed aside, never deleted.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -118,9 +119,12 @@ def install(
             shutil.copy2(path, path.with_name(f"{path.name}.backup.{stamp}"))
         write_atomic(path, files[name])
     if not dry_run:
-        record = json.dumps({name: digest(data) for name, data in sorted(files.items())}, indent=2) + "\n"
-        if not (dest / STATE).is_file() or (dest / STATE).read_text(encoding="utf-8") != record:
-            write_atomic(dest / STATE, record.encode("utf-8"))
+        record = (json.dumps({name: digest(data) for name, data in sorted(files.items())}, indent=2) + "\n").encode()
+        current = b""
+        with contextlib.suppress(OSError):
+            current = (dest / STATE).read_bytes()
+        if current != record:
+            write_atomic(dest / STATE, record)
     print(f"{'Dry run' if dry_run else 'Installed'}: {dest}")
     return 0
 

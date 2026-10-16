@@ -28,12 +28,26 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 # Exit codes: 0 local case passed, 1 an automated check failed,
-# 2 review case passed its automated checks and needs manual evidence, 4 timed out.
+# 2 review case passed its automated checks and needs manual evidence,
+# 3 bad arguments or a missing prerequisite (nothing ran), 4 timed out.
 NEEDS_REVIEW_EVIDENCE = 2
+SETUP_ERROR = 3
 TIMED_OUT = 4
+# codex runs in its own process group (POSIX) so kill_tree can reach all of it.
+NEW_SESSION = os.name != "nt"
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        # argparse's own exit 2 would read as NEEDS_REVIEW_EVIDENCE.
+        self.print_usage(sys.stderr)
+        self.exit(SETUP_ERROR, f"{self.prog}: error: {message}\n")
+
+
 TESTS = """import unittest
 from labels import normalize
 
@@ -124,7 +138,7 @@ def kill_tree(process: subprocess.Popen) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--output", required=True, type=Path, help="new output directory; existing directories are refused"
     )
@@ -215,7 +229,6 @@ def main() -> int:
         (output / "trace.jsonl").open("w", encoding="utf-8") as stdout,
         (output / "stderr.txt").open("w", encoding="utf-8") as stderr,
     ):
-        # Own process group / tree, so a timeout can stop all of it (see kill_tree).
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -224,7 +237,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             env=env,
-            start_new_session=os.name != "nt",
+            start_new_session=NEW_SESSION,
         )
         try:
             process.communicate(prompt, timeout=args.timeout)
@@ -232,6 +245,10 @@ def main() -> int:
             kill_tree(process)
             print(f"Timed out; the codex process tree was killed. Inspect {output}. No pass recorded.")
             return TIMED_OUT
+        except BaseException:
+            # Ctrl+C included: in its own group codex never sees the terminal's SIGINT.
+            kill_tree(process)
+            raise
     events, stray = parse_trace((output / "trace.jsonl").read_text(encoding="utf-8-sig"))
     final_path = output / "final.txt"
     final = final_path.read_text(encoding="utf-8") if final_path.exists() else ""
