@@ -18,9 +18,10 @@ python scripts/install-codex.py --verify
 This installs `$lost-mary` into `~/.agents/skills/lost-mary`. Invoke it explicitly
 with your task; restart Codex if it does not appear. `--dry-run` previews changes;
 `--dest <skill-directory>` installs into an alternate location, including a
-project's `.agents/skills/lost-mary`. Existing managed files are backed up before
-replacement; an existing unowned skill is refused. No Codex global settings or
-Claude installation are changed.
+project's `.agents/skills/lost-mary`. A managed file you edited is backed up
+before replacement (files the installer wrote are not); a file the bundle stopped
+shipping is renamed to `*.retired.<stamp>`; an existing unowned skill is refused.
+No Codex global settings or Claude installation are changed.
 
 **Update the Claude sources as usual, then rerun the same installer.** It packages
 the canonical procedure, roles, PR/validation instructions and two validation
@@ -30,8 +31,8 @@ change it when a new Claude-specific mechanism needs a Codex translation.
 `--verify` detects stale bundled sources. The existing Claude installers and
 hook wiring are unchanged, and do not refresh the optional Codex installation.
 
-Codex follows the same autonomous completion and quick/full testing workflow,
-using native tools and the user's configured model. This is **instruction-level
+Codex runs the canonical procedure as written, using native tools and the user's
+configured model. This is **instruction-level
 support**, not Claude hook parity: no Stop/SubagentStop hooks, automatic per-edit
 lint, ledger, model fallback, review stamps, or checkout cleanup are installed.
 The adapter explicitly handles those differences; native Codex permissions still
@@ -44,7 +45,8 @@ It uses your configured Codex model/account, creates an isolated fixture, saves
 tool traces and usage, and independently tests the resulting code. `--case review`
 also requests one native reviewer. That case returns exit 2 pending inspection of
 the persisted child response: some CLI versions omit that evidence from JSONL.
-Exit 1 means a failed automated check; exit 0 means the local case passed.
+Exit 1 means a failed automated check; exit 4 means the run timed out (the whole
+codex process tree is killed, no pass recorded); exit 0 means the local case passed.
 Live runs consume tokens and are never launched by CI. These small smoke cases
 check compatibility and testing cadence, not broad effectiveness or cost savings.
 The ordering check covers recorded file-change events; inspect shell writes

@@ -14,10 +14,9 @@ permissions take precedence over these files.
 - `$ARGUMENTS` means the task in the user's message. Slash commands and `!`
   command interpolation in references are Claude syntax, not executed context.
   Run relevant commands with available tools and inspect their results.
-- Preserve autonomous completion: make reasonable reversible decisions, work
-  through authorized steps, and use the procedure's completion criteria. Do not
-  introduce routine approval gates. Respect real permission denials and
-  user-only blockers; do not route around them through another agent.
+- The procedure's decision and completion rules apply as written. Respect real
+  permission denials and user-only blockers; do not route around them through
+  another agent.
 - Use Codex's available search, file, shell, and background execution tools.
   If dedicated file tools are absent, use shell search/read commands. Read the
   project's `AGENTS.md` as well as relevant `CLAUDE.md` / `AGENT.md` conventions.
@@ -42,13 +41,12 @@ permissions take precedence over these files.
   Replace `~/.claude/agent-library/scripts/pycheck.py` and `test-scope.py` with
   the absolute paths to this skill's [pycheck](scripts/pycheck.py) and
   [test selector](scripts/test-scope.py). Run them using a working Python 3.11+
-  interpreter from the task repository. Project commands win. Preserve quick
-  checks per coherent step and broad validation on the confident, integrated
-  solution; do not run the full suite after every edit or handoff. Re-run affected
-  checks when subsequent edits invalidate their evidence.
+  interpreter from the task repository. Project commands win; the procedure's
+  quick/full testing rhythm applies unchanged.
 - For an authorized PR, read [pr](references/pr.md). Gather its context explicitly,
-  use Codex attribution instead of Claude attribution, and restore the prior
-  GitHub account even on failure. Use a body file for multiline CLI descriptions.
+  use Codex attribution instead of Claude attribution, and pass the owning
+  account's token per command (`GH_TOKEN`) instead of switching the global `gh`
+  account. Use a body file for multiline CLI descriptions.
 - This adapter installs no Claude hooks, global instructions, model overrides,
   ledger, cleanup automation, or review-stamp enforcement. Do not run `pr-state.py`
   or claim a stamp, automatic lint, hook bounce, ledger record, or physical role
