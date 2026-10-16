@@ -270,22 +270,23 @@ git config --local user.name  "frederikgnie"
 git config --local user.email "60433760+frederikgnie@users.noreply.github.com"
 ```
 
-**Push and `gh` operations** require the personal account to be active:
+**Push and `gh` operations** pass the personal account's token per command:
 
 ```sh
-gh auth switch --hostname github.com --user frederikgnie   # before pushing
-gh auth switch --hostname github.com --user fgn-odigo      # after, to avoid cross-account surprises
+GH_TOKEN=$(gh auth token -u frederikgnie) git push -u origin <branch>
+GH_TOKEN=$(gh auth token -u frederikgnie) gh pr create ...
 ```
 
-An agent working in this repository performs that switch itself rather than
-asking, and switches back when finished. `/pr` encodes exactly this procedure.
+**Never `gh auth switch`.** The active account is global: other sessions and
+scheduled tasks on this machine work on `fgn-odigo` repositories through it,
+and on 2026-10-16 a switch made here turned every one of their PR reads into a
+404. `/pr` encodes the per-command form.
 
-**Why this is not automatic.** `gh auth git-credential` serves only the token
-of the *active* account; it does not select an account from the username in
-the remote URL. Rewriting the remote as `https://frederikgnie@github.com/...`
-therefore does not work - the helper returns nothing and Git falls through to
-an interactive password prompt. With the work account active, this private
-repository reads as `Repository not found`. The only mechanisms giving genuinely
-per-repository authentication are an SSH host alias with a dedicated key, or a
-stored per-repo token. Neither is set up, so the account switch is the
-supported path.
+**Why this works.** `gh auth git-credential` serves the token of the active
+account, *unless* `GH_TOKEN` is set - then it serves that token (as
+`x-access-token`), for `git push` as well as for `gh` itself; checked
+2026-10-16 by comparing what the helper returns with and without it. It does
+not select an account from the username in the remote URL, so rewriting the
+remote as `https://frederikgnie@github.com/...` does not work. The repository
+is public, so reads succeed from either account; pushes, PR creation and merges
+need the personal token.

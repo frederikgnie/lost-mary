@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Push the current branch and open a pull request using the GitHub account that owns this repository (personal vs work), then switch gh back to the previously active account.
+description: Push the current branch and open a pull request using the GitHub account that owns this repository (personal vs work), passing that account's token per command so the globally active gh account never changes.
 argument-hint: [title or notes - optional]
 disable-model-invocation: true
 ---
@@ -24,14 +24,20 @@ Notes from the user (may be empty): $ARGUMENTS
    unpushed work; only if several do, name them and stop), if the
    current branch is the default branch, or if the tree has uncommitted
    changes. Never commit or stash on the user's behalf here.
-2. **Pick the account.** Derive `owner/repo` from the remote URL and note the
-   currently active `gh` account. Run `gh repo view <owner/repo>`. If it exits
-   non-zero (typically `Could not resolve to a Repository`), the active account
-   cannot see the repo: switch with
-   `gh auth switch --hostname github.com --user <account that owns this repo>`
-   and remember which account to switch back to. `gh` serves only the active
-   account's token, so the switch is the supported path (the repository's
-   `AGENTS.md` may say which account to use).
+2. **Pick the account** that can push to `owner/repo` (from the remote URL; the
+   repository's `AGENTS.md` may name it). The owner may be an organisation, so
+   probe rather than guess: for each login in `gh auth status`, run
+   `GH_TOKEN=$(gh auth token -u <login>) gh repo view <owner/repo> --json viewerPermission`
+   and take the first that reports `WRITE`, `MAINTAIN` or `ADMIN`, the active
+   account first. None does: stop and say so. If it is not the active account,
+   prefix every `gh` and `git push` below with `GH_TOKEN=$(gh auth token -u <login>)`
+   (PowerShell: `$env:GH_TOKEN = gh auth token -u <login>` before the commands,
+   `Remove-Item Env:GH_TOKEN` after) - `gh` and its git credential helper both
+   serve that token. Check that `gh auth token -u <login>` succeeded: an empty
+   `GH_TOKEN` silently falls back to the active account. **Never
+   `gh auth switch`**: the active account is global, and other sessions and
+   scheduled tasks act on whichever one is active (a switch here once made
+   another session's PR reads 404).
 3. **Check the commit identity.** `git config user.email` should belong to the
    same account as the remote owner; warn if it does not. Do not rewrite
    history.
@@ -44,5 +50,4 @@ Notes from the user (may be empty): $ARGUMENTS
      results from `/validate` - never invent them; write "not run" if you did
      not run them), `## Risks`, then the footer line
      `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
-6. **Switch `gh` back** to the account that was active in step 2 - also when a
-   step failed, before reporting the error - then print the PR URL.
+6. **Print the PR URL.** Nothing to restore: the active account never changed.

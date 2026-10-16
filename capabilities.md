@@ -380,6 +380,12 @@ Verified against current official documentation:
 and [native subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 Codex discovers user/project skills under `.agents/skills`; `agents/openai.yaml`
 with `policy.allow_implicit_invocation: false` preserves explicit invocation.
+Re-checked 2026-10-16 (developers.openai.com/codex/skills, which now redirects to
+learn.chatgpt.com/docs/build-skills): user level `$HOME/.agents/skills`, repo level
+`.agents/skills` from the cwd up to the repo root, plus `/etc/codex/skills` and a
+bundled system location; `~/.codex/skills` is not listed. `agents/openai.yaml` takes
+`interface.*`, `policy.allow_implicit_invocation` (default `true`; `false` keeps
+explicit `$skill` invocation) and `dependencies.tools`.
 `scripts/install-codex.py` packages canonical Claude sources with a small runtime
 adapter; it installs no global agent configuration or hooks. Claude-specific
 enforcement is not claimed in Codex. Native agent availability and permissions

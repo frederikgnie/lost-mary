@@ -18,9 +18,10 @@ python scripts/install-codex.py --verify
 This installs `$lost-mary` into `~/.agents/skills/lost-mary`. Invoke it explicitly
 with your task; restart Codex if it does not appear. `--dry-run` previews changes;
 `--dest <skill-directory>` installs into an alternate location, including a
-project's `.agents/skills/lost-mary`. Existing managed files are backed up before
-replacement; an existing unowned skill is refused. No Codex global settings or
-Claude installation are changed.
+project's `.agents/skills/lost-mary`. A managed file you edited is backed up
+before replacement (files the installer wrote are not); a file the bundle stopped
+shipping is renamed to `*.retired.<stamp>`; an existing unowned skill is refused.
+No Codex global settings or Claude installation are changed.
 
 **Update the Claude sources as usual, then rerun the same installer.** It packages
 the canonical procedure, roles, PR/validation instructions and two validation
@@ -30,8 +31,8 @@ change it when a new Claude-specific mechanism needs a Codex translation.
 `--verify` detects stale bundled sources. The existing Claude installers and
 hook wiring are unchanged, and do not refresh the optional Codex installation.
 
-Codex follows the same autonomous completion and quick/full testing workflow,
-using native tools and the user's configured model. This is **instruction-level
+Codex runs the canonical procedure as written, using native tools and the user's
+configured model. This is **instruction-level
 support**, not Claude hook parity: no Stop/SubagentStop hooks, automatic per-edit
 lint, ledger, model fallback, review stamps, or checkout cleanup are installed.
 The adapter explicitly handles those differences; native Codex permissions still
@@ -44,7 +45,9 @@ It uses your configured Codex model/account, creates an isolated fixture, saves
 tool traces and usage, and independently tests the resulting code. `--case review`
 also requests one native reviewer. That case returns exit 2 pending inspection of
 the persisted child response: some CLI versions omit that evidence from JSONL.
-Exit 1 means a failed automated check; exit 0 means the local case passed.
+Exit 1 means a failed automated check; exit 3 a bad argument or missing `codex`
+(nothing ran); exit 4 a timeout (the whole codex process tree is killed, no pass
+recorded; Ctrl+C kills it too); exit 0 means the local case passed.
 Live runs consume tokens and are never launched by CI. These small smoke cases
 check compatibility and testing cadence, not broad effectiveness or cost savings.
 The ordering check covers recorded file-change events; inspect shell writes
@@ -93,7 +96,7 @@ is *correct*. See [Migration from v1](#migration-from-v1).
 | [`agents/review.md`](agents/review.md) | Independent review on `opus` with `Read/Grep/Glob` only - you hand it the diff. Applies the project's review lens (for quant code: look-ahead leakage, DST 23/25-hour days, MW vs MWh, NaN propagation, timezone-naive timestamps). |
 | [`/lost-mary <task>`](skills/lost-mary/SKILL.md) | The operating procedure on one screen: acceptance predicate first, smallest mode, full spawn block, gate on evidence. User-invoked only. |
 | [`/validate [paths]`](skills/validate/SKILL.md) | Lint + typecheck + tests for what changed, commands taken from the project's `CLAUDE.md`, exact results reported. Claude may invoke it itself before declaring something done. |
-| [`/pr [notes]`](skills/pr/SKILL.md) | Push and open a PR with the GitHub account that owns the repository (personal vs work), then switch `gh` back. User-invoked only. |
+| [`/pr [notes]`](skills/pr/SKILL.md) | Push and open a PR with the GitHub account that can push to the repository (personal vs work), passing its token per command - the global `gh` account never changes. User-invoked only. |
 | [`/ledger [n]`](skills/ledger/SKILL.md) | Show the ledger's latest entries for the current project on demand - what agents actually edited and ran. Claude may invoke it itself when a report needs checking against the record. |
 | [`global-CLAUDE.md`](global-CLAUDE.md) | ~3 KB of always-on rules, imported by `~/.claude/CLAUDE.md`. |
 | [`capabilities.md`](capabilities.md) | Every runtime field, frontmatter key and file layout the library depends on, how each was verified, and how it degrades. |
